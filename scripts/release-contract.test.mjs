@@ -68,6 +68,8 @@ describe("desktop release asset contract", () => {
 
     const smoke = await readFile(join(import.meta.dirname, "smoke-desktop-update-macos.mjs"), "utf8");
     expect(smoke).toContain('verifySignature ? {} : { WHEELJACK_SKIP_SIGNATURE_VERIFY: "1" }');
+    expect(smoke).toContain("binaryPaths.add(await realpath(binary))");
+    expect(smoke).toContain("await stopTestApps()");
   });
 
   test("keeps Windows packaging portable-only", async () => {

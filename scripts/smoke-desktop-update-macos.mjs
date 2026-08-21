@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, mkdtemp, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -22,6 +22,8 @@ const temporary = await mkdtemp(join(tmpdir(), "wheeljack-macos-updater-"));
 const targetApp = join(temporary, "wheeljack.app");
 const profile = join(temporary, "profile");
 const archive = join(temporary, "wheeljack.app.zip");
+const binary = join(targetApp, "Contents/MacOS/wheeljack-desktop");
+const binaryPaths = new Set([binary]);
 await mkdir(profile);
 
 const run = async (command, args) => {
@@ -47,10 +49,35 @@ const waitFor = async (predicate, description, milliseconds = 90_000) => {
   }
   throw new Error(`Timed out waiting for ${description}.`);
 };
+const stopTestApps = async () => {
+  const processes = await run("/bin/ps", ["-axo", "pid=,command="]).catch(() => "");
+  const pids = processes.split("\n")
+    .filter((line) => [...binaryPaths].some((path) => line.includes(path)))
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((pid) => pid && pid !== process.pid);
+  for (const pid of pids) process.kill(pid, "SIGTERM");
+  for (const pid of pids) {
+    await waitFor(() => {
+      try {
+        process.kill(pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    }, `macOS updater smoke process ${pid} to exit`, 5_000).catch(() => {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // The process exited between the timeout and forced cleanup.
+      }
+    });
+  }
+};
 
 let server;
 try {
   await run("/usr/bin/ditto", [sourceApp, targetApp]);
+  binaryPaths.add(await realpath(binary));
   await run("/usr/bin/ditto", ["-c", "-k", "--keepParent", targetApp, archive]);
   const archiveHash = await hashFile(archive);
   const archiveSize = (await stat(archive)).size;
@@ -86,7 +113,6 @@ try {
     },
   });
 
-  const binary = join(targetApp, "Contents/MacOS/wheeljack-desktop");
   const originalInode = await run("/usr/bin/stat", ["-f", "%i", binary]);
   const child = Bun.spawn([binary, "--ui-smoke"], {
     env: {
@@ -127,12 +153,8 @@ try {
     ? "macOS packaged updater rollback passed."
     : "macOS packaged updater replacement and health acknowledgement passed.");
 
-  const processes = await run("/bin/ps", ["-axo", "pid=,command="]);
-  for (const line of processes.split("\n").filter((value) => value.includes(binary))) {
-    const pid = Number.parseInt(line.trim(), 10);
-    if (pid && pid !== process.pid) process.kill(pid, "SIGTERM");
-  }
 } finally {
+  await stopTestApps();
   server?.stop(true);
   await Bun.sleep(500);
   await rm(temporary, { recursive: true, force: true });
