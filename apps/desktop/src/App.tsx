@@ -181,7 +181,7 @@ import {
 import { Activity, Bell, Briefcase, CheckIcon, ChevronRight, ChevronsLeft, ChevronsRight, Columns2, FileCode2, Folder, GitBranch, History, Home, LayoutDashboard, MonitorCog, MoreHorizontal, Plus, RefreshCw, Square, Terminal, Trash2, X } from "./SargamIcon";
 import { builtInThemes, themeCss, validateTheme } from "./theme";
 import { agentEffortOptions } from "./types";
-import { useUpdater, type UpdateProgress } from "./updater";
+import { useUpdater, type UpdateDownload, type UpdateProgress } from "./updater";
 import { UpdateReleaseNotesSheet } from "./UpdaterPresentation";
 import {
   defaultShortcutBindings,
@@ -757,8 +757,9 @@ export function App() {
     void updater.checkNow()
       .then(async () => {
         if (await updater.installNow()) return true;
-        if (!await updater.downloadNow()) return false;
-        return updater.installNow();
+        const downloaded = await updater.downloadNow();
+        if (!downloaded) return false;
+        return updater.installNow(downloaded.updatePath);
       })
       .then((installed) => {
         if (!installed) setError(`The ${updateSmokeMode} updater smoke could not install its staged update.`);
@@ -6242,9 +6243,9 @@ export function App() {
     }
   };
 
-  const installReadyUpdate = async () => {
+  const installReadyUpdate = async (downloaded?: UpdateDownload) => {
     if (
-      updater.signatureStatus === "unsigned"
+      (downloaded?.signatureStatus ?? updater.signatureStatus) === "unsigned"
       && !await requestConfirmation(
         "Install unsigned wheeljack update?",
         "This update passed its SHA-256 check but is not signed by a trusted Windows publisher. Continue only if you trust this release.",
@@ -6252,7 +6253,7 @@ export function App() {
     ) {
       return;
     }
-    await updater.installNow();
+    await updater.installNow(downloaded?.updatePath);
   };
 
   const startTitleBarUpdate = async () => {
@@ -6271,7 +6272,7 @@ export function App() {
       return;
     }
     const downloaded = await updater.downloadNow();
-    if (downloaded) await installReadyUpdate();
+    if (downloaded) await installReadyUpdate(downloaded);
   };
 
   const commandPaletteItems: CommandPaletteItem[] = [

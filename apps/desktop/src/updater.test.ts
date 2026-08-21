@@ -126,6 +126,31 @@ test("manual checks never inherit automatic-download policy", async () => {
   vi.unstubAllEnvs();
 });
 
+test("installs a completed download without waiting for React state to render", async () => {
+  vi.stubEnv("DEV", false);
+  localStorage.setItem(UPDATE_STORAGE_KEY, JSON.stringify({
+    status: "idle",
+    automaticCheck: false,
+    automaticDownload: false,
+  }));
+  mockUpdaterCore();
+  const applyUpdate = vi.fn(async () => undefined);
+  const { result, unmount } = renderHook(() => useUpdater("0.1.0", applyUpdate));
+  await waitFor(() => expect(vi.mocked(callCore)).toHaveBeenCalledWith("updater_recovery_error", {}));
+
+  let installed = false;
+  await act(async () => {
+    await result.current.checkNow();
+    const downloaded = await result.current.downloadNow();
+    installed = await result.current.installNow(downloaded?.updatePath);
+  });
+
+  expect(installed).toBe(true);
+  expect(applyUpdate).toHaveBeenCalledWith("updates/wheeljack-0.1.1.exe");
+  unmount();
+  vi.unstubAllEnvs();
+});
+
 test("enabling automatic checks runs once only when the startup guard permits", async () => {
   vi.stubEnv("DEV", false);
   localStorage.setItem(UPDATE_STORAGE_KEY, JSON.stringify({

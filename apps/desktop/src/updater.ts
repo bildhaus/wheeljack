@@ -29,7 +29,7 @@ interface UpdateCheck {
   message: string;
 }
 
-interface UpdateDownload {
+export interface UpdateDownload {
   version: string;
   assetName: string;
   updatePath: string;
@@ -66,7 +66,7 @@ export interface UpdateState {
 export interface UpdateController extends UpdateState {
   checkNow: () => Promise<void>;
   downloadNow: () => Promise<UpdateDownload | undefined>;
-  installNow: () => Promise<boolean>;
+  installNow: (updatePath?: string) => Promise<boolean>;
   onProgress: (progress: UpdateProgress) => void;
   setAutomaticCheck: (enabled: boolean) => void;
   setAutomaticDownload: (enabled: boolean) => void;
@@ -311,8 +311,8 @@ export function useUpdater(
     return () => window.clearInterval(timer);
   }, [currentVersion, runCheck]);
 
-  const installNow = useCallback(async () => {
-    const updatePath = stateRef.current.updatePath;
+  const installNow = useCallback(async (requestedUpdatePath?: string) => {
+    const updatePath = requestedUpdatePath ?? stateRef.current.updatePath;
     if (!updatePath) return false;
     commit((current) => ({ ...current, status: "installing", error: undefined }));
     try {
