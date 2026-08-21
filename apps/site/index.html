@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0c0c0c" />
+    <meta
+      name="description"
+      content="Local-first wheeljack runs coding agents and shell sessions in split terminals, routes tasks through isolated Git worktrees, and keeps review evidence close."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="wheeljack" />
+    <meta property="og:url" content="https://wheeljack.dev/" />
+    <meta property="og:title" content="wheeljack — local-first workspace for coding agents" />
+    <meta
+      property="og:description"
+      content="Local-first wheeljack runs coding agents and shell sessions in split terminals, routes tasks through isolated Git worktrees, and keeps review evidence close."
+    />
+    <meta property="og:image" content="https://wheeljack.dev/app-icon.png" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="wheeljack — local-first workspace for coding agents" />
+    <meta
+      name="twitter:description"
+      content="Run coding agents and shell sessions in split terminals, isolated Git worktrees, and review-ready task lanes."
+    />
+    <meta name="twitter:image" content="https://wheeljack.dev/app-icon.png" />
+    <link rel="canonical" href="https://wheeljack.dev/" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>wheeljack — local-first workspace for coding agents</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "wheeljack",
+        "description": "A local-first workspace for coding agents, split terminals, isolated task lanes, and review evidence.",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Windows, macOS",
+        "url": "https://wheeljack.dev/",
+        "downloadUrl": "https://github.com/bildhaus/wheeljack/releases/latest"
+      }
+    </script>
+    <style>
+      .static-fallback { min-height: 100vh; padding: 24px; color: #f4f4f4; background: #0c0c0c; font: 16px/1.6 system-ui, sans-serif; }
+      .static-fallback > * { width: min(1100px, 100%); margin-inline: auto; }
+      .static-fallback nav { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-block: 12px; }
+      .static-fallback nav div { display: flex; flex-wrap: wrap; gap: 20px; }
+      .static-fallback a { color: inherit; }
+      .static-fallback section { padding-block: clamp(64px, 10vw, 128px); border-bottom: 1px solid #2d2d2d; }
+      .static-fallback h1 { max-width: 820px; margin: 16px 0; font-size: clamp(3rem, 8vw, 7rem); line-height: .94; }
+      .static-fallback h2 { margin: 0 0 24px; font-size: clamp(2rem, 5vw, 4rem); line-height: 1; }
+      .static-fallback h3 { margin-bottom: 4px; }
+      .static-fallback p { max-width: 720px; }
+      .static-fallback .static-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 28px; }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="static-fallback">
+        <a href="#top">Skip to content</a>
+        <nav aria-label="Primary navigation">
+          <a href="#top" aria-label="wheeljack home">wheeljack</a>
+          <div>
+            <a href="#features">Features</a>
+            <a href="#workflow">Workflow</a>
+            <a href="#download">Downloads</a>
+          </div>
+        </nav>
+        <main id="top">
+          <section aria-labelledby="hero-title">
+            <p>local-first agent workspace</p>
+            <h1 id="hero-title">Your terminal. Your agents. One workspace.</h1>
+            <p>wheeljack brings split terminals, structured agent sessions, isolated task lanes, and review evidence together on your machine.</p>
+            <p><a href="#workflow">See how it works</a> · <a href="#features">Explore features</a></p>
+          </section>
+          <section id="features" aria-labelledby="features-title">
+            <h2 id="features-title">Built for the whole loop.</h2>
+            <div class="static-grid">
+              <article><h3>Work</h3><p>Split panes recursively and move from shell to structured agent chat without leaving the project.</p></article>
+              <article><h3>Agents</h3><p>Run your coding-agent CLIs or a plain shell side by side while wheeljack keeps sessions legible.</p></article>
+              <article><h3>Plan</h3><p>Turn scoped tasks into isolated Git worktree lanes with constraints and verification commands attached.</p></article>
+              <article><h3>Review</h3><p>Inspect changed files, handoff notes, acceptance criteria, and checks before delivery.</p></article>
+            </div>
+          </section>
+          <section id="workflow" aria-labelledby="workflow-title">
+            <h2 id="workflow-title">Work moves. You keep the final say.</h2>
+            <ol>
+              <li>Define the outcome, constraints, dependencies, and proof.</li>
+              <li>Run agents in the shared checkout or isolated Git worktrees.</li>
+              <li>Review decisions and verification evidence before delivery.</li>
+            </ol>
+          </section>
+          <section id="download" aria-labelledby="download-title">
+            <h2 id="download-title">Download wheeljack.</h2>
+            <p><a href="https://github.com/bildhaus/wheeljack/releases/latest/download/wheeljack-windows-x64-portable.exe">Windows</a> · <a href="https://github.com/bildhaus/wheeljack/releases/latest/download/wheeljack-macos-universal.dmg">macOS</a></p>
+          </section>
+        </main>
+        <footer><p>Local-first · 2026</p></footer>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

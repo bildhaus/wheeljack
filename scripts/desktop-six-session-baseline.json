@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "runs": 3,
+  "median": {
+    "workingSetMiB": 676.621,
+    "inputP95Milliseconds": 110,
+    "resizeP95Milliseconds": 0.6,
+    "frameP95Milliseconds": 21.5
+  }
+}

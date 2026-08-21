@@ -1,0 +1,174 @@
+name: wheeljack release draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (must equal vVERSION)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheeljack-release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - id: release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "Release tag is malformed: $RELEASE_TAG" >&2
+            exit 1
+          }
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          git fetch origin "refs/heads/main:refs/remotes/origin/main"
+          release_sha="$(git rev-parse "$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor "$release_sha" origin/main || {
+            echo "Release tag $RELEASE_TAG is not contained in origin/main." >&2
+            exit 1
+          }
+          git checkout --detach "$release_sha"
+          WHEELJACK_RELEASE_TAG="$RELEASE_TAG" bun scripts/verify-desktop-version.mjs
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$release_sha" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    needs: resolve
+    permissions:
+      contents: read
+    uses: ./.github/workflows/desktop.yml
+    with:
+      checkout_ref: ${{ needs.resolve.outputs.sha }}
+      source_sha: ${{ needs.resolve.outputs.sha }}
+      windows_artifact_name: wheeljack-release-windows
+      macos_artifact_name: wheeljack-release-macos
+      require_signed_windows: false
+      require_signed_macos: true
+      release_mode: true
+      release_environment: desktop-release
+      artifact_retention_days: 7
+    secrets:
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+  publish-assets:
+    needs: [resolve, desktop]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: desktop-release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+      RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wheeljack-release-windows
+          path: release-input/windows
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wheeljack-release-macos
+          path: release-input/macos
+      - name: Verify and assemble the exact release asset set
+        run: |
+          set -euo pipefail
+          [[ "$(cat release-input/windows/SOURCE_SHA)" == "$RELEASE_SHA" ]]
+          [[ "$(cat release-input/macos/SOURCE_SHA)" == "$RELEASE_SHA" ]]
+          [[ "$(cat release-input/macos/MACOS_SIGNING_STATUS)" == "signed-notarized" ]]
+          bun scripts/prepare-desktop-release.mjs --windows release-input/windows --macos release-input/macos --output release-assets
+      - name: Create or reuse an unpublished draft
+        run: |
+          set -euo pipefail
+          if release_json="$(gh release view "$RELEASE_TAG" --json isDraft,tagName 2>/dev/null)"; then
+            [[ "$(jq -r .tagName <<<"$release_json")" == "$RELEASE_TAG" ]]
+            [[ "$(jq -r .isDraft <<<"$release_json")" == "true" ]] || {
+              echo "Published release $RELEASE_TAG is immutable." >&2
+              exit 1
+            }
+          else
+            gh release create "$RELEASE_TAG" --draft --generate-notes --title "$RELEASE_TAG" --verify-tag
+          fi
+      - name: Upload and verify immutable assets
+        run: |
+          set -euo pipefail
+          existing="$(mktemp -d)"
+          find release-assets -maxdepth 1 -type f -printf '%f\n' | sort > expected-assets.txt
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort > actual-assets.txt
+          unexpected="$(comm -13 expected-assets.txt actual-assets.txt)"
+          [[ -z "$unexpected" ]] || {
+            printf 'Draft contains unexpected assets:\n%s\n' "$unexpected" >&2
+            exit 1
+          }
+          while IFS= read -r name; do
+            [[ -n "$name" ]] || continue
+            gh release download "$RELEASE_TAG" --pattern "$name" --dir "$existing"
+            cmp --silent "release-assets/$name" "$existing/$name" || {
+              echo "Release asset $name already exists with different bytes." >&2
+              exit 1
+            }
+          done < actual-assets.txt
+          for file in release-assets/*; do
+            name="$(basename "$file")"
+            if grep -Fxq "$name" actual-assets.txt; then
+              echo "Skipping byte-identical $name."
+            else
+              gh release upload "$RELEASE_TAG" "$file"
+            fi
+          done
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort > actual-assets.txt
+          diff -u expected-assets.txt actual-assets.txt
+          release_json="$(gh release view "$RELEASE_TAG" --json assets)"
+          for file in release-assets/*; do
+            name="$(basename "$file")"
+            local_digest="sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+            remote_digest="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+            [[ "$remote_digest" == "$local_digest" ]] || {
+              echo "GitHub digest mismatch for $name: $remote_digest != $local_digest" >&2
+              exit 1
+            }
+          done
+          windows_status="$(cat release-input/windows/WINDOWS_SIGNING_STATUS)"
+          macos_status="$(cat release-input/macos/MACOS_SIGNING_STATUS)"
+          [[ "$windows_status" == "signed" || "$windows_status" == "unsigned" ]]
+          [[ "$macos_status" == "signed-notarized" ]]
+          {
+            echo "## Draft $RELEASE_TAG is complete"
+            echo
+            echo "- Source: \`$RELEASE_SHA\`"
+            echo "- Windows: **$windows_status**"
+            echo "- macOS: **$macos_status**"
+            echo "- Assets: verified locally and against GitHub SHA-256 digests"
+            echo "- Publication: manual"
+          } >> "$GITHUB_STEP_SUMMARY"

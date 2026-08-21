@@ -1,0 +1,659 @@
+use super::*;
+
+const MAX_DIFF_BYTES: usize = 200_000;
+
+pub(crate) fn read_git_status(path: &Path, include_worktrees: bool) -> GitStatusDto {
+    let path_exists = path.exists();
+    let Some(status_output) = read_git_status_porcelain(path, false) else {
+        return GitStatusDto {
+            is_repo: false,
+            path_exists,
+            branch: "none".to_string(),
+            dirty: false,
+            github_remote: false,
+            changed_files: Vec::new(),
+            worktrees: Vec::new(),
+        };
+    };
+
+    let (branch, changed_files) = parse_git_status_porcelain(&status_output);
+    GitStatusDto {
+        is_repo: true,
+        path_exists,
+        branch,
+        dirty: !changed_files.is_empty(),
+        github_remote: has_github_remote(path),
+        changed_files,
+        worktrees: if include_worktrees {
+            read_worktrees(path)
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn has_github_remote(path: &Path) -> bool {
+    git_command()
+        .arg("-C")
+        .arg(path)
+        .args(["config", "--get-regexp", r"^remote\..*\.url$"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_once(char::is_whitespace).map(|(_, url)| url))
+                .any(|url| {
+                    let url = url.to_ascii_lowercase();
+                    url.starts_with("git@github.com:")
+                        || url.contains("://github.com/")
+                        || url.contains("@github.com/")
+                })
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn read_git_diff(path: &Path) -> Result<GitDiffDto> {
+    if !is_git_repo(path) {
+        return Ok(GitDiffDto {
+            is_repo: false,
+            text: String::new(),
+            truncated: false,
+        });
+    }
+
+    let has_head = git_command()
+        .arg("-C")
+        .arg(path)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg("HEAD")
+        .output()?
+        .status
+        .success();
+    let mut command = git_command();
+    command
+        .arg("-C")
+        .arg(path)
+        .arg("diff")
+        .arg("--no-ext-diff")
+        .arg("--no-color");
+    if has_head {
+        command.arg("HEAD");
+    } else {
+        command.arg("--cached");
+    }
+    let output = command.arg("--").output()?;
+    if !output.status.success() {
+        bail!("git diff failed: {}", command_output_detail(&output));
+    }
+
+    let truncated = output.stdout.len() > MAX_DIFF_BYTES;
+    let bytes = &output.stdout[..output.stdout.len().min(MAX_DIFF_BYTES)];
+    Ok(GitDiffDto {
+        is_repo: true,
+        text: String::from_utf8_lossy(bytes).to_string(),
+        truncated,
+    })
+}
+
+fn read_git_status_porcelain(path: &Path, include_untracked: bool) -> Option<String> {
+    // ponytail: keep the normal UI scan cheap; destructive worktree removal opts into untracked files.
+    git_command()
+        .arg("-C")
+        .arg(path)
+        .arg("status")
+        .arg("--porcelain=v1")
+        .arg("--branch")
+        .arg(if include_untracked {
+            "--untracked-files=normal"
+        } else {
+            "--untracked-files=no"
+        })
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn parse_git_status_porcelain(output: &str) -> (String, Vec<String>) {
+    let mut branch = "detached".to_string();
+    let mut changed_files = Vec::new();
+
+    for line in output.lines() {
+        if let Some(status) = line.strip_prefix("## ") {
+            branch = parse_git_status_branch(status);
+        } else if !line.trim().is_empty() {
+            changed_files.push(line.to_string());
+        }
+    }
+
+    (branch, changed_files)
+}
+
+fn parse_git_status_branch(status: &str) -> String {
+    let local = status
+        .split("...")
+        .next()
+        .unwrap_or(status)
+        .trim()
+        .strip_prefix("No commits yet on ")
+        .unwrap_or_else(|| status.split("...").next().unwrap_or(status).trim())
+        .trim();
+
+    if local.is_empty() || local.eq_ignore_ascii_case("HEAD (no branch)") {
+        "detached".to_string()
+    } else {
+        local.to_string()
+    }
+}
+
+pub(crate) fn is_git_repo(path: &Path) -> bool {
+    git_command()
+        .arg("-C")
+        .arg(path)
+        .arg("rev-parse")
+        .arg("--is-inside-work-tree")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "true")
+        .unwrap_or(false)
+}
+
+pub(crate) fn read_worktrees(path: &Path) -> Vec<GitWorktreeDto> {
+    let output = git_command()
+        .arg("-C")
+        .arg(path)
+        .arg("worktree")
+        .arg("list")
+        .arg("--porcelain")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+        .unwrap_or_default();
+    let mut worktrees = parse_worktree_list(&output);
+    for worktree in &mut worktrees {
+        worktree.dirty = worktree_path_is_dirty(Path::new(&worktree.path));
+    }
+    worktrees
+}
+
+fn parse_worktree_list(output: &str) -> Vec<GitWorktreeDto> {
+    let mut worktrees = Vec::new();
+    let mut current: Option<GitWorktreeDto> = None;
+    for line in output.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(worktree) = current.take() {
+                worktrees.push(worktree);
+            }
+            current = Some(GitWorktreeDto {
+                path: path.to_string(),
+                branch: "detached".to_string(),
+                head: String::new(),
+                detached: false,
+                bare: false,
+                dirty: false,
+            });
+        } else if let Some(worktree) = current.as_mut() {
+            if let Some(head) = line.strip_prefix("HEAD ") {
+                worktree.head = head.to_string();
+            } else if let Some(branch) = line.strip_prefix("branch ") {
+                worktree.branch = branch
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(branch)
+                    .to_string();
+            } else if line == "detached" {
+                worktree.detached = true;
+            } else if line == "bare" {
+                worktree.bare = true;
+            }
+        }
+    }
+    if let Some(worktree) = current {
+        worktrees.push(worktree);
+    }
+    worktrees
+}
+
+fn worktree_path_is_dirty(path: &Path) -> bool {
+    read_git_status_porcelain(path, true)
+        .map(|output| !parse_git_status_porcelain(&output).1.is_empty())
+        .unwrap_or(false)
+}
+
+pub(crate) fn resolve_git_worktree_context(project_path: &Path) -> Result<(PathBuf, PathBuf)> {
+    let root_output = git_command()
+        .arg("-C")
+        .arg(project_path)
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .output()?;
+    if !root_output.status.success() {
+        bail!(
+            "Project path is not a git repository: {}",
+            command_output_detail(&root_output)
+        );
+    }
+    let root = String::from_utf8_lossy(&root_output.stdout)
+        .trim()
+        .to_string();
+    let root = normalize_command_cwd(
+        PathBuf::from(root)
+            .canonicalize()
+            .context("Git repository root does not exist.")?,
+    );
+
+    let prefix_output = git_command()
+        .arg("-C")
+        .arg(project_path)
+        .arg("rev-parse")
+        .arg("--show-prefix")
+        .output()?;
+    if !prefix_output.status.success() {
+        bail!(
+            "Could not resolve the project path inside its git repository: {}",
+            command_output_detail(&prefix_output)
+        );
+    }
+    let project_relative = PathBuf::from(String::from_utf8_lossy(&prefix_output.stdout).trim());
+    Ok((root, project_relative))
+}
+
+pub(crate) fn read_git_head(path: &Path) -> Result<String> {
+    let output = git_command()
+        .arg("-C")
+        .arg(path)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg("HEAD^{commit}")
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "Git repository needs a committed HEAD: {}",
+            command_output_detail(&output)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub(crate) fn validate_full_commit(path: &Path, value: &str) -> Result<String> {
+    let commit = value.trim();
+    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("Base commit must be a full 40- or 64-character git object ID.");
+    }
+    let output = git_command()
+        .arg("-C")
+        .arg(path)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg(format!("{commit}^{{commit}}"))
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "Base commit is not available in this repository: {}",
+            command_output_detail(&output)
+        );
+    }
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !resolved.eq_ignore_ascii_case(commit) {
+        bail!("Base commit did not resolve to the expected object.");
+    }
+    Ok(resolved)
+}
+
+pub(crate) fn read_worktree_snapshot(
+    worktree_path: &Path,
+    base_commit: &str,
+) -> Result<(String, Vec<String>, String, bool)> {
+    let index_path =
+        env::temp_dir().join(format!("wheeljack-{}.index", Uuid::now_v7().as_simple()));
+    let mut lock_name = index_path.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    let lock_path = PathBuf::from(lock_name);
+
+    let result = (|| {
+        let read_tree = git_with_index(worktree_path, &index_path)
+            .arg("read-tree")
+            .arg(base_commit)
+            .output()?;
+        if !read_tree.status.success() {
+            bail!(
+                "git read-tree failed: {}",
+                command_output_detail(&read_tree)
+            );
+        }
+
+        let add = git_with_index(worktree_path, &index_path)
+            .arg("add")
+            .arg("-A")
+            .arg("--")
+            .output()?;
+        if !add.status.success() {
+            bail!("git snapshot failed: {}", command_output_detail(&add));
+        }
+
+        let write_tree = git_with_index(worktree_path, &index_path)
+            .arg("write-tree")
+            .output()?;
+        if !write_tree.status.success() {
+            bail!(
+                "git snapshot tree failed: {}",
+                command_output_detail(&write_tree)
+            );
+        }
+        let snapshot_id = String::from_utf8_lossy(&write_tree.stdout)
+            .trim()
+            .to_string();
+
+        let names = git_with_index(worktree_path, &index_path)
+            .arg("diff")
+            .arg("--cached")
+            .arg("--name-only")
+            .arg("-z")
+            .arg("--no-ext-diff")
+            .arg("--no-color")
+            .arg(base_commit)
+            .arg("--")
+            .output()?;
+        if !names.status.success() {
+            bail!(
+                "git snapshot file list failed: {}",
+                command_output_detail(&names)
+            );
+        }
+        let changed_files = names
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8_lossy(path).to_string())
+            .collect();
+
+        let diff = git_with_index(worktree_path, &index_path)
+            .arg("diff")
+            .arg("--cached")
+            .arg("--no-ext-diff")
+            .arg("--no-color")
+            .arg(base_commit)
+            .arg("--")
+            .output()?;
+        if !diff.status.success() {
+            bail!("git snapshot diff failed: {}", command_output_detail(&diff));
+        }
+        let truncated = diff.stdout.len() > MAX_DIFF_BYTES;
+        let bytes = &diff.stdout[..diff.stdout.len().min(MAX_DIFF_BYTES)];
+        Ok((
+            snapshot_id,
+            changed_files,
+            String::from_utf8_lossy(bytes).to_string(),
+            truncated,
+        ))
+    })();
+
+    let lock_cleanup = remove_file_if_exists(&lock_path);
+    let index_cleanup = remove_file_if_exists(&index_path);
+    let cleanup = lock_cleanup.and(index_cleanup);
+    match (result, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), _) => Err(error),
+    }
+}
+
+fn git_with_index<'a>(worktree_path: &'a Path, index_path: &'a Path) -> Command {
+    let mut command = git_command();
+    command
+        .arg("-C")
+        .arg(worktree_path)
+        .env("GIT_INDEX_FILE", index_path);
+    command
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove temporary {}", path.display())),
+    }
+}
+
+pub(crate) fn ensure_safe_branch_name(branch_name: &str) -> Result<()> {
+    let name = branch_name.trim();
+    if name.is_empty()
+        || name.len() > 128
+        || name.eq_ignore_ascii_case("head")
+        || name.starts_with('-')
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || name.contains("..")
+        || name.contains("//")
+        || name.ends_with(".lock")
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/'))
+    {
+        bail!("Branch names may use letters, numbers, '.', '_', '-', and '/', but cannot contain traversal, lock suffixes, spaces, or shell-sensitive characters.");
+    }
+    let output = git_command()
+        .arg("check-ref-format")
+        .arg("--branch")
+        .arg(name)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!("Git rejected that branch name.")
+    }
+}
+
+pub(crate) fn resolve_new_worktree_path(
+    repo_path: &Path,
+    branch_name: &str,
+    requested_path: Option<&str>,
+) -> Result<PathBuf> {
+    let path = match requested_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        Some(path) => {
+            let expanded = expand_home_path(path);
+            if expanded.is_absolute() {
+                expanded
+            } else {
+                repo_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(expanded)
+            }
+        }
+        None => {
+            let repo_name = repo_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow!("Project path needs a folder name before a default worktree can be created."))?;
+            let parent = repo_path.parent().ok_or_else(|| {
+                anyhow!(
+                    "Project path needs a parent folder before a default worktree can be created."
+                )
+            })?;
+            parent.join(format!("{repo_name}-{}", safe_worktree_leaf(branch_name)))
+        }
+    };
+    if path.exists() {
+        bail!("Worktree path already exists; wheeljack will not overwrite it.");
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("Worktree path needs a folder name."))?;
+    if file_name == "." || file_name == ".." || file_name.trim().is_empty() {
+        bail!("Worktree path needs a safe folder name.");
+    }
+    Ok(normalize_command_cwd(path))
+}
+
+fn safe_worktree_leaf(branch_name: &str) -> String {
+    branch_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .chars()
+        .take(80)
+        .collect::<String>()
+}
+
+pub(crate) fn run_git_worktree_add(
+    repo_path: &Path,
+    branch_name: &str,
+    target_path: &Path,
+    base_commit: &str,
+) -> Result<()> {
+    if git_branch_exists(repo_path, branch_name) {
+        bail!("Branch {branch_name} already exists.");
+    }
+    let create_branch = git_command()
+        .arg("-C")
+        .arg(repo_path)
+        .arg("branch")
+        .arg(branch_name)
+        .arg(base_commit)
+        .output()?;
+    if !create_branch.status.success() {
+        bail!(
+            "git branch create failed: {}",
+            command_output_detail(&create_branch)
+        );
+    }
+    let output = git_command()
+        .arg("-C")
+        .arg(repo_path)
+        .arg("worktree")
+        .arg("add")
+        .arg(target_path)
+        .arg(branch_name)
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let _ = git_command()
+        .arg("-C")
+        .arg(repo_path)
+        .arg("branch")
+        .arg("-D")
+        .arg(branch_name)
+        .output();
+    bail!(
+        "git worktree add failed: {}",
+        command_output_detail(&output)
+    );
+}
+
+fn git_branch_exists(repo_path: &Path, branch_name: &str) -> bool {
+    git_command()
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg(format!("refs/heads/{branch_name}"))
+        .output()
+        .ok()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+pub(crate) fn removable_worktree<'a>(
+    repo_path: &Path,
+    target_path: &Path,
+    worktrees: &'a [GitWorktreeDto],
+    expected_branch: Option<&str>,
+) -> Result<&'a GitWorktreeDto> {
+    if paths_equivalent(repo_path, target_path) {
+        bail!("wheeljack will not remove the currently opened project worktree.");
+    }
+    if let Some(primary) = worktrees.first() {
+        if paths_equivalent(Path::new(&primary.path), target_path) {
+            bail!("wheeljack will not remove the primary git worktree.");
+        }
+    }
+    let worktree = worktrees
+        .iter()
+        .find(|worktree| paths_equivalent(Path::new(&worktree.path), target_path))
+        .ok_or_else(|| anyhow!("Worktree path is not registered with this repository."))?;
+    if worktree.bare {
+        bail!("wheeljack will not remove bare worktrees.");
+    }
+    if let Some(expected_branch) = expected_branch {
+        if worktree.branch != expected_branch {
+            bail!(
+                "Worktree branch mismatch: expected {expected_branch}, found {}.",
+                worktree.branch
+            );
+        }
+    }
+    if worktree.dirty {
+        bail!("Worktree has local changes; commit, stash, or clean it before removal.");
+    }
+    Ok(worktree)
+}
+
+pub(crate) fn run_git_worktree_remove(repo_path: &Path, target_path: &Path) -> Result<()> {
+    let output = git_command()
+        .arg("-C")
+        .arg(repo_path)
+        .arg("worktree")
+        .arg("remove")
+        .arg(target_path)
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "git worktree remove failed: {}",
+            command_output_detail(&output)
+        );
+    }
+}
+
+pub(crate) fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => normalize_command_cwd(left) == normalize_command_cwd(right),
+        _ => {
+            normalize_command_cwd(left.to_path_buf()) == normalize_command_cwd(right.to_path_buf())
+        }
+    }
+}
+
+pub(crate) fn git_command() -> Command {
+    hidden_command("git")
+}
+
+pub(crate) fn hidden_command(program: impl AsRef<OsStr>) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new(program);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
+    }
+}
+
+fn command_output_detail(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    } else {
+        stderr
+    }
+}

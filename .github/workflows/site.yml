@@ -1,0 +1,58 @@
+name: wheeljack site
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.bun-version'
+      - 'apps/site/**'
+      - '.github/workflows/site.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wheeljack-site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy
+    if: github.ref == 'refs/heads/main' && vars.PUBLIC_SITE_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: site-production
+      url: https://wheeljack.dev
+    permissions:
+      contents: read
+      deployments: write
+    defaults:
+      run:
+        working-directory: apps/site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if bunx wrangler pages deploy dist --project-name wheeljack --branch main; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              exit 1
+            fi
+            echo "::warning::Cloudflare Pages deploy failed (attempt $attempt/5); retrying in 60 seconds."
+            sleep 60
+          done

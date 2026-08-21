@@ -1,0 +1,119 @@
+name: wheeljack CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: wheeljack-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repo:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      desktop: ${{ steps.paths.outputs.desktop }}
+      site: ${{ steps.paths.outputs.site }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - id: paths
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            desktop:
+              - '.bun-version'
+              - 'rust-toolchain*'
+              - '.cargo/**'
+              - 'VERSION'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'clippy.toml'
+              - 'rustfmt.toml'
+              - 'Directory.Build.props'
+              - 'LICENSE'
+              - 'THIRD_PARTY_NOTICES.md'
+              - 'apps/desktop/**'
+              - 'crates/wheeljack-core/**'
+              - 'scripts/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/desktop.yml'
+              - '.github/workflows/release.yml'
+            site:
+              - '.bun-version'
+              - 'apps/site/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/site.yml'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - name: Check repository contracts
+        run: |
+          set -euo pipefail
+          if git grep -I -n 'Wheel[j]ack' -- . ':(exclude)THIRD_PARTY_NOTICES.md'; then exit 1; fi
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          bun test scripts/release-contract.test.mjs
+
+  site:
+    needs: repo
+    if: (github.event_name == 'pull_request' && needs.repo.outputs.site == 'true') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - name: Build site
+        run: |
+          set -euo pipefail
+          cd apps/site
+          bun install --frozen-lockfile
+          bun run build
+
+  desktop:
+    needs: repo
+    if: (github.event_name == 'pull_request' && needs.repo.outputs.desktop == 'true') || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/desktop.yml
+    with:
+      checkout_ref: ${{ github.sha }}
+      source_sha: ${{ github.sha }}
+      windows_artifact_name: wheeljack-Tauri-Windows
+      macos_artifact_name: wheeljack-Tauri-macOS
+      require_signed_windows: false
+      require_signed_macos: false
+      release_mode: false
+
+  required:
+    if: always()
+    needs: [repo, site, desktop]
+    name: required
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      REPO_RESULT: ${{ needs.repo.result }}
+      SITE_RESULT: ${{ needs.site.result }}
+      DESKTOP_RESULT: ${{ needs.desktop.result }}
+    steps:
+      - name: Require every applicable lane
+        run: |
+          set -euo pipefail
+          [[ "$REPO_RESULT" == "success" ]] || { echo "Repository checks: $REPO_RESULT" >&2; exit 1; }
+          for result in "$SITE_RESULT" "$DESKTOP_RESULT"; do
+            [[ "$result" == "success" || "$result" == "skipped" ]] || { echo "Conditional lane: $result" >&2; exit 1; }
+          done
+          printf 'repo=%s site=%s desktop=%s\n' "$REPO_RESULT" "$SITE_RESULT" "$DESKTOP_RESULT"

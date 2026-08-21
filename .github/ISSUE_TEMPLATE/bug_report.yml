@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a reproducible wheeljack problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not include credentials, provider tokens, private transcripts, project source, or app databases.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I reproduced this on the latest wheeljack release.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: This report does not contain secrets or private project data.
+          required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open...
+        2. Select...
+        3. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+    validations:
+      required: true
+  - type: input
+    id: wheeljack-version
+    attributes:
+      label: wheeljack version
+      placeholder: 0.1.8
+    validations:
+      required: true
+  - type: input
+    id: adapter
+    attributes:
+      label: Agent adapter and CLI version
+      description: Use "generic shell" when no structured agent is involved.
+      placeholder: Codex CLI 0.x, Claude Code 1.x, OpenCode 1.x, Pi 0.x, or generic shell
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Safe diagnostics
+      description: Include only the smallest redacted error or diagnostic excerpt needed to understand the failure.
+      render: shell

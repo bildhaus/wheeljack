@@ -1,0 +1,17 @@
+/target/
+**/node_modules/
+**/dist/
+**/.cache/
+**/.vite/
+/.playwright-mcp/
+**/bin/
+**/obj/
+.env
+.env.*
+!.env.example
+TestResults/
+artifacts/
+wallpaper-testmp4.mp4
+**/*.rs.bk
+.DS_Store
+Thumbs.db

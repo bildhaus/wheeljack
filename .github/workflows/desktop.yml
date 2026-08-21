@@ -1,0 +1,283 @@
+name: wheeljack desktop build
+
+on:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      windows_artifact_name:
+        required: true
+        type: string
+      macos_artifact_name:
+        required: true
+        type: string
+      require_signed_windows:
+        required: false
+        default: false
+        type: boolean
+      require_signed_macos:
+        required: false
+        default: false
+        type: boolean
+      release_mode:
+        required: false
+        default: false
+        type: boolean
+      release_environment:
+        required: false
+        default: ""
+        type: string
+      artifact_retention_days:
+        required: false
+        default: 7
+        type: number
+    secrets:
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      rust_version: ${{ steps.rust-toolchain.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout_ref }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - id: rust-toolchain
+        name: Read Rust toolchain version
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)"
+          [[ -n "$version" ]] || { echo "rust-toolchain.toml has no toolchain channel." >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-10
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.version }}
+          components: rustfmt
+      - name: Verify release and frontend contracts
+        run: |
+          set -euo pipefail
+          bun scripts/verify-desktop-version.mjs
+          cd apps/desktop
+          bun install --frozen-lockfile
+          bun run test
+          bun run build
+          cd ../..
+          cargo fmt --all -- --check
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+
+  windows:
+    needs: preflight
+    runs-on: windows-2025
+    timeout-minutes: 60
+    environment: ${{ inputs.release_environment || null }}
+    env:
+      REQUIRE_SIGNED_WINDOWS: ${{ inputs.require_signed_windows }}
+      WHEELJACK_SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout_ref }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-10
+        with:
+          toolchain: ${{ needs.preflight.outputs.rust_version }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: wheeljack
+          key: windows-x64-${{ needs.preflight.outputs.rust_version }}-${{ hashFiles('Cargo.lock') }}
+      - name: Verify native code
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          Push-Location apps\desktop
+          bun install --frozen-lockfile
+          Pop-Location
+          cargo test --locked -p wheeljack-core -p wheeljack-desktop
+          cargo clippy --locked -p wheeljack-core -p wheeljack-desktop --all-targets -- -D warnings
+      - name: Package and exercise actual WebView2 app
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $certificate = $null
+          $importedCertificates = @()
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'wheeljack-windows-signing.pfx'
+          try {
+            if ($env:WINDOWS_CERTIFICATE) {
+              if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw 'WINDOWS_CERTIFICATE_PASSWORD is required when WINDOWS_CERTIFICATE is configured.' }
+              [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+              $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+              $importedCertificates = Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+              $certificate = $importedCertificates | Where-Object HasPrivateKey | Select-Object -First 1
+              if (-not $certificate) { throw 'Windows signing certificate import failed.' }
+              $env:WHEELJACK_WINDOWS_CERTIFICATE_THUMBPRINT = $certificate.Thumbprint
+            } elseif ($env:REQUIRE_SIGNED_WINDOWS -eq 'true') {
+              throw 'Signed Windows packaging was required but WINDOWS_CERTIFICATE is not configured.'
+            }
+            $requireSigned = $env:REQUIRE_SIGNED_WINDOWS -eq 'true'
+            .\scripts\publish-desktop-windows.ps1 -RequireSigned:$requireSigned -SkipInstall
+            Set-Content -LiteralPath artifacts\desktop\windows\SOURCE_SHA -Value $env:WHEELJACK_SOURCE_SHA -NoNewline -Encoding utf8NoBOM
+            $signingStatus = if ($certificate) { 'signed' } else { 'unsigned' }
+            Set-Content -LiteralPath artifacts\desktop\windows\WINDOWS_SIGNING_STATUS -Value $signingStatus -NoNewline -Encoding ascii
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "Windows artifacts: **$signingStatus**"
+            $portable = 'artifacts\desktop\windows\wheeljack-windows-x64-portable.exe'
+            .\scripts\smoke-desktop-windows.ps1 -Executable $portable -SkipDevTools
+            $signatureArguments = if ($certificate) { @('--verify-signature', 'true') } else { @() }
+            & bun .\scripts\smoke-desktop-update.mjs --executable $portable --native true @signatureArguments
+            if ($LASTEXITCODE -ne 0) { throw 'Healthy updater smoke failed.' }
+            & bun .\scripts\smoke-desktop-update.mjs --executable $portable --expect-rollback true --native true @signatureArguments
+            if ($LASTEXITCODE -ne 0) { throw 'Rollback updater smoke failed.' }
+          } finally {
+            foreach ($importedCertificate in $importedCertificates) {
+              Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($importedCertificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+            }
+            Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+          }
+      - if: inputs.release_mode
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.windows_artifact_name }}
+          path: artifacts/desktop/windows/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+  macos:
+    needs: preflight
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment: ${{ inputs.release_environment || null }}
+    env:
+      REQUIRE_SIGNED_MACOS: ${{ inputs.require_signed_macos }}
+      WHEELJACK_MACOS_TARGET: universal-apple-darwin
+      WHEELJACK_SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout_ref }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable 2026-08-10
+        with:
+          toolchain: ${{ needs.preflight.outputs.rust_version }}
+          components: clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: wheeljack
+          key: macos-universal-${{ needs.preflight.outputs.rust_version }}-${{ hashFiles('Cargo.lock') }}
+      - name: Verify native code
+        run: |
+          set -euo pipefail
+          cd apps/desktop
+          bun install --frozen-lockfile
+          cd ../..
+          cargo test --locked -p wheeljack-core -p wheeljack-desktop
+          cargo clippy --locked -p wheeljack-core -p wheeljack-desktop --all-targets -- -D warnings
+      - name: Import Apple signing certificate
+        if: inputs.require_signed_macos
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            [[ -n "${!name:-}" ]] || { echo "Required release secret $name is not configured." >&2; exit 1; }
+          done
+          certificate_path="$RUNNER_TEMP/wheeljack-signing.p12"
+          keychain_path="$RUNNER_TEMP/wheeljack-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "WHEELJACK_CERTIFICATE_PATH=$certificate_path" >> "$GITHUB_ENV"
+          echo "WHEELJACK_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" | grep -F "\"$APPLE_SIGNING_IDENTITY\""
+      - name: Package and exercise actual macOS app
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ inputs.require_signed_macos && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ inputs.require_signed_macos && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ inputs.require_signed_macos && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ inputs.require_signed_macos && secrets.APPLE_TEAM_ID || '' }}
+          WHEELJACK_NOTARIZE_DMG: ${{ inputs.release_mode && inputs.require_signed_macos }}
+          WHEELJACK_SKIP_INSTALL: "true"
+        run: |
+          set -euo pipefail
+          bash scripts/publish-desktop-macos.sh
+          printf '%s\n' "$WHEELJACK_SOURCE_SHA" > artifacts/desktop/macos/SOURCE_SHA
+          signing_status="unsigned"
+          if [[ "$REQUIRE_SIGNED_MACOS" == "true" ]]; then signing_status="signed-notarized"; fi
+          printf '%s\n' "$signing_status" > artifacts/desktop/macos/MACOS_SIGNING_STATUS
+          printf 'macOS artifacts: **%s**\n' "$signing_status" >> "$GITHUB_STEP_SUMMARY"
+          app="target/universal-apple-darwin/release/bundle/macos/wheeljack.app"
+          test -x "$app/Contents/MacOS/wheeljack-desktop"
+          codesign --verify --deep --strict --verbose=3 "$app"
+          if [[ "$REQUIRE_SIGNED_MACOS" == "true" ]]; then
+            codesign -dv --verbose=4 "$app" 2>&1 | grep -q '^Authority=Developer ID Application'
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=2 "$app"
+          fi
+          dmg="artifacts/desktop/macos/wheeljack-macos-universal.dmg"
+          mount="$RUNNER_TEMP/wheeljack-dmg"
+          mkdir -p "$mount"
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount"
+          trap 'hdiutil detach "$mount" || true' EXIT
+          installed_app="$mount/wheeljack.app"
+          test -x "$installed_app/Contents/MacOS/wheeljack-desktop"
+          codesign --verify --deep --strict --verbose=3 "$installed_app"
+          bash scripts/smoke-desktop-macos.sh "$installed_app"
+          bun scripts/smoke-desktop-update-macos.mjs --app "$app" --verify-signature "$REQUIRE_SIGNED_MACOS"
+          bun scripts/smoke-desktop-update-macos.mjs --app "$app" --expect-rollback true --verify-signature "$REQUIRE_SIGNED_MACOS"
+          hdiutil detach "$mount"
+          trap - EXIT
+      - name: Remove Apple signing keychain
+        if: always()
+        run: |
+          if [[ -n "${WHEELJACK_KEYCHAIN_PATH:-}" ]]; then security delete-keychain "$WHEELJACK_KEYCHAIN_PATH" || true; fi
+          if [[ -n "${WHEELJACK_CERTIFICATE_PATH:-}" ]]; then rm -f "$WHEELJACK_CERTIFICATE_PATH"; fi
+      - if: inputs.release_mode
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.macos_artifact_name }}
+          path: artifacts/desktop/macos/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact_retention_days }}

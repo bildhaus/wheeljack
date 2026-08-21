@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose a focused wheeljack improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult today, and who encounters it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful behavior change.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds or simpler options.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Primary surface
+      options:
+        - Terminal and panes
+        - Structured agent chat
+        - Plan and orchestration
+        - Projects, files, and Git
+        - Settings, themes, and shortcuts
+        - Packaging and updates
+        - Website and documentation
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for a similar request.
+          required: true
+        - label: This request does not include private project data or credentials.
+          required: true

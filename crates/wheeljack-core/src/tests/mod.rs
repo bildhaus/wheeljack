@@ -1,0 +1,18 @@
+mod support;
+
+mod adapters;
+mod agent_control;
+mod agent_protocol;
+mod bento;
+mod canvas;
+mod coordination;
+mod core_init;
+mod db;
+mod git_paths;
+mod intent;
+mod ops_runtime;
+mod project_documents;
+mod session_history;
+mod terminal;
+mod updater;
+mod usage;

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "wheeljack Gate",
+  "identifier": "com.omershatz.wheeljack.gate",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "wheeljack Gate",
+        "decorations": false,
+        "additionalBrowserArgs": "--force-renderer-accessibility --remote-debugging-port=9334 --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection"
+      }
+    ]
+  }
+}

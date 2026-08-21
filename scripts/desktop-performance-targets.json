@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "bundle": {
+    "ceiling": {
+      "initialJsBytes": 1700000,
+      "largestJsChunkBytes": 1350000,
+      "totalJsBytes": 1800000
+    },
+    "target": {
+      "initialJsBytes": 1250000,
+      "largestJsChunkBytes": 900000,
+      "totalJsBytes": 1550000
+    }
+  },
+  "sixSession": {
+    "target": {
+      "workingSetMiB": 540,
+      "inputP95Milliseconds": 75,
+      "frameP95Milliseconds": 16.7
+    }
+  }
+}
