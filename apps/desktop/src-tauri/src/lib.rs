@@ -1113,9 +1113,9 @@ exit 1"#;
 #[tauri::command]
 fn close_after_flush(app: tauri::AppHandle) -> Result<(), String> {
     app.get_webview_window("main")
-        .ok_or_else(|| "wheeljack window is unavailable.".to_string())?
-        .destroy()
-        .map_err(|error| error.to_string())
+        .ok_or_else(|| "wheeljack window is unavailable.".to_string())?;
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]

@@ -915,6 +915,15 @@ test("shows build, updater, and storage settings", () => {
   expect(paritySource).toContain("data-updater-status={updater.status}");
 });
 
+test("exits the desktop host explicitly after flushing local state", () => {
+  const closeSource = tauriSource.slice(
+    tauriSource.indexOf("fn close_after_flush"),
+    tauriSource.indexOf("fn open_devtools"),
+  );
+  expect(closeSource).toContain("app.exit(0)");
+  expect(closeSource).not.toContain(".destroy()");
+});
+
 test("keeps distinct icons when terminal toolbar labels collapse", () => {
   expect(appSource).toContain("<Plus /><span>New pane</span>");
   expect(appSource).toContain("<ProviderMark adapterId={selectedAdapterId} /><span>Agent</span>");
