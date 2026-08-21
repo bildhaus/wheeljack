@@ -7,7 +7,7 @@ import type { Adapter, Project } from "./types";
 
 const project: Project = {
   id: "project_one",
-  name: "Wheeljack",
+  name: "wheeljack",
   path: "C:\\wheeljack",
   icon: "folder",
   iconColor: "#777777",
