@@ -49,7 +49,22 @@ const waitFor = async (predicate, description, milliseconds = 90_000) => {
   }
   throw new Error(`Timed out waiting for ${description}.`);
 };
-const stopTestApps = async () => {
+const stopProcessGroup = async (processGroupId) => {
+  if (!processGroupId) return;
+  const signalGroup = (signal) => {
+    try {
+      process.kill(-processGroupId, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!signalGroup("SIGTERM")) return;
+  await waitFor(() => !signalGroup(0), `macOS updater smoke process group ${processGroupId} to exit`, 5_000)
+    .catch(() => signalGroup("SIGKILL"));
+};
+const stopTestApps = async (processGroupId) => {
+  await stopProcessGroup(processGroupId);
   const processes = await run("/bin/ps", ["-axo", "pid=,command="]).catch(() => "");
   const pids = processes.split("\n")
     .filter((line) => [...binaryPaths].some((path) => line.includes(path)))
@@ -75,6 +90,7 @@ const stopTestApps = async () => {
 };
 
 let server;
+let processGroupId;
 try {
   await run("/usr/bin/ditto", [sourceApp, targetApp]);
   binaryPaths.add(await realpath(binary));
@@ -115,6 +131,7 @@ try {
 
   const originalInode = await run("/usr/bin/stat", ["-f", "%i", binary]);
   const child = Bun.spawn([binary, "--ui-smoke"], {
+    detached: true,
     env: {
       ...process.env,
       WHEELJACK_DESKTOP_DATA_DIR: profile,
@@ -127,6 +144,7 @@ try {
     stdout: "ignore",
     stderr: "ignore",
   });
+  processGroupId = child.pid;
   await Promise.race([
     child.exited,
     Bun.sleep(90_000).then(() => {
@@ -154,7 +172,7 @@ try {
     : "macOS packaged updater replacement and health acknowledgement passed.");
 
 } finally {
-  await stopTestApps();
+  await stopTestApps(processGroupId);
   server?.stop(true);
   await Bun.sleep(500);
   await rm(temporary, { recursive: true, force: true });
