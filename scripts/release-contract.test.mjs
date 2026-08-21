@@ -175,4 +175,13 @@ describe("workflow ownership contract", () => {
     expect(site).toContain("CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}");
     expect(site).toContain("CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}");
   });
+
+  test("keeps published download controls live and signing status explicit", async () => {
+    const app = await readFile(join(import.meta.dirname, "../apps/site/src/App.tsx"), "utf8");
+    expect(app).toContain("const downloadsLive = true;");
+    expect(app).toContain("releases/latest/download/wheeljack-windows-x64-portable.exe");
+    expect(app).toContain("releases/latest/download/wheeljack-macos-universal.dmg");
+    expect(app).toContain("Your workspace is ready.");
+    expect(app).toContain("macOS builds are signed and notarized. Windows builds are currently unsigned.");
+  });
 });

@@ -28,7 +28,7 @@ import windowIcon from "sargam-icons/Icons/Line/si_Window.svg";
 gsap.registerPlugin(useGSAP, ScrollTrigger);
 defineShatzAvatar();
 
-const downloadsLive = false;
+const downloadsLive = true;
 const paperField = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Cpath fill='%23f3f2ee' d='M0 0h8v8H0z'/%3E%3C/svg%3E";
 const WjHeroModel = lazy(() => import("./WjHeroModel"));
 
@@ -812,21 +812,21 @@ function DownloadSection() {
         <div className="download-copy">
           <img className="app-icon" src="/app-icon.png" alt="" />
           <p>Built for your machine</p>
-          <h2 id="download-title">Your workspace is almost ready.</h2>
+          <h2 id="download-title">Your workspace is ready.</h2>
           <p className="download-deck">
-            Signed Windows and macOS builds are being prepared. Workspace state stays local.
-            Agent credentials stay with their CLIs.
+            macOS builds are signed and notarized. Windows builds are currently unsigned.
+            Workspace state stays local. Agent credentials stay with their CLIs.
           </p>
         </div>
         <div className="download-options">
           <DownloadOption
             platform="Windows"
-            detail="Windows x64 · Portable EXE"
+            detail="Windows x64 · Portable EXE · Unsigned"
             href={downloads.windows}
           />
           <DownloadOption
             platform="macOS"
-            detail="Apple silicon + Intel · Universal DMG"
+            detail="Apple silicon + Intel · Universal DMG · Signed & notarized"
             href={downloads.macos}
           />
         </div>
