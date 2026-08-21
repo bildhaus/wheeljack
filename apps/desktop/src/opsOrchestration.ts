@@ -419,6 +419,8 @@ export function mergeProjectDocuments(current: OpsState, documents: ProjectDocum
             approvalAttempt: currentCard?.approvalAttempt,
             reviewPolicy: currentCard?.reviewPolicy ?? card.reviewPolicy ?? "agent",
             taskLane: currentCard?.taskLane,
+            workerSpecialist: currentCard?.workerSpecialist,
+            reviewerSpecialist: currentCard?.reviewerSpecialist,
           };
         }),
       }

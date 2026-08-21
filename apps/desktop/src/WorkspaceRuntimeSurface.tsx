@@ -1,6 +1,7 @@
 import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgentChat } from "./AgentChat";
+import { botSnapshotFromNode } from "./bots";
 import { agentCompositionFromNode, type AgentCompositionState } from "./agentComposition";
 import { PaneAgentMenuItems, type TerminalAgentContext } from "./PaneAgentMenuItems";
 import { ProviderMark } from "./ProviderMark";
@@ -95,6 +96,7 @@ interface SplitViewProps {
   onRepair?: (runtime: PaneRuntime) => void;
   onResume?: (runtime: PaneRuntime) => void;
   onPrepareHandoff?: (runtime: PaneRuntime) => void;
+  onSaveBot?: (snapshot: NonNullable<TerminalAgentContext["botSnapshot"]>) => void;
   onReviewTranscript?: (runtime: PaneRuntime) => void;
   onQueryStatus?: (runtime: PaneRuntime) => void;
   onLoadOlderHistory?: (runtime: PaneRuntime) => Promise<void>;
@@ -142,6 +144,7 @@ export function SplitView(props: SplitViewProps) {
         onRepair={() => runtime && props.onRepair?.(runtime)}
         onResume={() => runtime && props.onResume?.(runtime)}
         onPrepareHandoff={() => runtime && props.onPrepareHandoff?.(runtime)}
+        onSaveBot={(snapshot) => props.onSaveBot?.(snapshot)}
         onReviewTranscript={() => runtime && props.onReviewTranscript?.(runtime)}
         onQueryStatus={() => runtime && props.onQueryStatus?.(runtime)}
         onLoadOlderHistory={() => runtime ? props.onLoadOlderHistory?.(runtime) ?? Promise.resolve() : Promise.resolve()}
@@ -266,6 +269,7 @@ function Pane({
   onRepair,
   onResume,
   onPrepareHandoff,
+  onSaveBot,
   onReviewTranscript,
   onQueryStatus,
 }: {
@@ -303,11 +307,13 @@ function Pane({
   onRepair: () => void;
   onResume: () => void;
   onPrepareHandoff: () => void;
+  onSaveBot: (snapshot: NonNullable<TerminalAgentContext["botSnapshot"]>) => void;
   onReviewTranscript: () => void;
   onQueryStatus: () => void;
 }) {
   const [contextOnTerminal, setContextOnTerminal] = useState(false);
   const [contextSelection, setContextSelection] = useState("");
+  const bot = botSnapshotFromNode(node.data);
   const promptAgent = useEventCallback(onPrompt);
   const respondToAgent = useEventCallback(onRespond);
   const cancelAgent = useEventCallback(onCancel);
@@ -452,9 +458,9 @@ function Pane({
           {runtime?.structured
             ? <ProviderMark adapterId={runtime.adapterId} className="wj-pane-provider" />
             : <RunStateBadge status={runtime?.status ?? "recovered"} variant="indicator" className={`pane-status ${runtime?.status ?? "recovered"}`} />}
-          <strong>{node.title}</strong>
+          <strong>{bot?.name ?? node.title}</strong>
           {runtime?.structured
-            ? (showPaneRunState || agentContext?.card) && <small className="pane-agent-summary">{showPaneRunState && <RunStateBadge status={runtime.status} variant="compact" />}{agentContext?.card && <button type="button" title={`Open Plan task: ${agentContext.card.title}`} onClick={() => agentContext.card && onOpenOpsCard(agentContext.card)}>{agentContext.card.title}</button>}</small>
+            ? (showPaneRunState || agentContext?.card || bot) && <small className="pane-agent-summary">{bot && <span>{node.title}</span>}{showPaneRunState && <RunStateBadge status={runtime.status} variant="compact" />}{agentContext?.card && <button type="button" title={`Open Plan task: ${agentContext.card.title}`} onClick={() => agentContext.card && onOpenOpsCard(agentContext.card)}>{agentContext.card.title}</button>}</small>
             : <small>{runtime?.status ?? node.kind.replaceAll("_", " ")}</small>}
         </div>
         {showPaneActions && <div className="pane-actions">
@@ -465,7 +471,7 @@ function Pane({
           {runtime?.structured && <DropdownMenu>
             <DropdownMenuTrigger asChild><button aria-label={`More actions for ${node.title}`} title="More pane actions"><MoreHorizontal /></button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <PaneAgentMenuItems runtime={runtime} agentContext={agentContext} chatView={chatView} onToggleView={onToggleView} onOpenOpsCard={onOpenOpsCard} onResume={onResume} onPrepareHandoff={onPrepareHandoff} onReviewTranscript={onReviewTranscript} onQueryStatus={onQueryStatus} />
+              <PaneAgentMenuItems runtime={runtime} agentContext={agentContext} chatView={chatView} onToggleView={onToggleView} onOpenOpsCard={onOpenOpsCard} onResume={onResume} onPrepareHandoff={onPrepareHandoff} onSaveBot={onSaveBot} onReviewTranscript={onReviewTranscript} onQueryStatus={onQueryStatus} />
             </DropdownMenuContent>
           </DropdownMenu>}
           <button aria-label={`Split ${node.title} right`} title={`Split right (${formatShortcut(shortcuts["pane.splitRight"])})`} onClick={() => onSplit("columns")}><Columns2 /></button>
@@ -514,7 +520,7 @@ function Pane({
           <ContextMenuSeparator />
         </>}
         {runtime?.structured && <>
-          <PaneAgentMenuItems context runtime={runtime} agentContext={agentContext} chatView={chatView} onToggleView={onToggleView} onOpenOpsCard={onOpenOpsCard} onResume={onResume} onPrepareHandoff={onPrepareHandoff} onReviewTranscript={onReviewTranscript} onQueryStatus={onQueryStatus} />
+          <PaneAgentMenuItems context runtime={runtime} agentContext={agentContext} chatView={chatView} onToggleView={onToggleView} onOpenOpsCard={onOpenOpsCard} onResume={onResume} onPrepareHandoff={onPrepareHandoff} onSaveBot={onSaveBot} onReviewTranscript={onReviewTranscript} onQueryStatus={onQueryStatus} />
           <ContextMenuSeparator />
         </>}
         <ContextMenuItem onSelect={() => onSplit("columns")}><Columns2 />Split right<ContextMenuShortcut>{formatShortcut(shortcuts["pane.splitRight"])}</ContextMenuShortcut></ContextMenuItem>

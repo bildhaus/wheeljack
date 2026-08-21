@@ -84,7 +84,7 @@ test("loads projects, probes and verifies exact profile args, and reuses adapter
     appSource.indexOf("const verifyAdapter"),
   );
   expect(rescanSource).toContain("preferredCodingAdapterId(");
-  expect(appSource.match(/callCore<AdapterProbe>\("adapter_verify"/g)).toHaveLength(2);
+  expect(appSource.match(/callCore<AdapterProbe>\("adapter_verify"/g)).toHaveLength(3);
   const verifySource = appSource.slice(
     appSource.indexOf("const verifyAdapter"),
     appSource.indexOf("const repairAdapter"),
@@ -98,7 +98,7 @@ test("loads projects, probes and verifies exact profile args, and reuses adapter
   );
   expect(probeSource).toContain("...agentLaunchConfig(profile)");
   expect(appSource.match(/\.\.\.agentLaunchConfig\(profile\)/g)).toHaveLength(2);
-  expect(appSource.match(/\.\.\.agentLaunchConfig\(profile, project\.agentAccess\)/g)).toHaveLength(2);
+  expect(appSource.match(/agentLaunchConfig\(profile, project\.agentAccess\)/g)).toHaveLength(2);
 });
 
 test("waits for a structured payload instead of treating shell preamble as agent output", () => {
@@ -148,7 +148,9 @@ test("gates the accessible three-step guide until desktop startup has hydrated",
   expect(appSource).toMatch(/\{!onboardingVisible && \(\s*<ProjectSidebar/);
   expect(titleBarSource).toContain('data-onboarding={onboarding || undefined}');
   expect(titleBarSource).toContain('{!onboarding && <span className="wj-title-name">{title}</span>}');
-  expect(titleBarSource).toMatch(/\{!onboarding && \(\s*<div className="wj-title-utilities">/);
+  expect(titleBarSource).toContain('<div className="wj-title-utilities">');
+  expect(titleBarSource).toContain('{!onboarding && <><TitleAction label="Inbox"');
+  expect(titleBarSource).toContain('data-updater-status={updater.status}');
   expect(titleBarSource).toContain('className="wj-window-actions"');
   expect(onboardingSource).toContain('aria-current={number === step ? "step" : undefined}');
   expect(onboardingSource).toContain("headingRef.current?.focus()");
@@ -913,6 +915,15 @@ test("shows build, updater, and storage settings", () => {
   expect(paritySource).toContain("data-updater-status={updater.status}");
 });
 
+test("exits the desktop host explicitly after flushing local state", () => {
+  const closeSource = tauriSource.slice(
+    tauriSource.indexOf("fn close_after_flush"),
+    tauriSource.indexOf("fn open_devtools"),
+  );
+  expect(closeSource).toContain("app.exit(0)");
+  expect(closeSource).not.toContain(".destroy()");
+});
+
 test("keeps distinct icons when terminal toolbar labels collapse", () => {
   expect(appSource).toContain("<Plus /><span>New pane</span>");
   expect(appSource).toContain("<ProviderMark adapterId={selectedAdapterId} /><span>Agent</span>");
@@ -1023,6 +1034,10 @@ test("keeps project creation by Projects and removes the duplicate agent action"
 });
 
 test("sending from a disconnected chat resumes and submits in one action", () => {
+  const spawnSource = appSource.slice(
+    appSource.indexOf("const spawnAgent"),
+    appSource.indexOf("const saveBot"),
+  );
   const sendSource = appSource.slice(
     appSource.indexOf("const sendAgentPrompt"),
     appSource.indexOf("const prepareAgentHandoff"),
@@ -1034,10 +1049,13 @@ test("sending from a disconnected chat resumes and submits in one action", () =>
 
   expect(sendSource).toContain('runtime.status === "disconnected"');
   expect(sendSource).toContain("return resumeAgent(runtime, prompt, displayPrompt, images)");
+  expect(spawnSource).toContain("const launchPrompt = taskPrompt.trim()");
+  expect(spawnSource).toContain("? botStandingPrompt(taskPrompt, bot?.snapshot)");
   expect(sendSource).toContain("provider: profile.provider, model: profile.model, thinking: profile.thinking");
   expect(sendSource).toContain("messages: mergeAgentMessages(current[runtime.nodeId].messages, [userMessage])");
   expect(resumeSource).toContain("resumeSessionId: priorSessionId");
-  expect(resumeSource).toContain("prompt: submittedPrompt");
+  expect(resumeSource).toContain("prompt: effectivePrompt");
+  expect(resumeSource).toContain("botStandingPrompt(submittedPrompt, snapshot)");
   expect(resumeSource).toContain("Resume wheeljack task ${task.id}: ${task.title}");
   expect(resumeSource).toContain("card.reviewerId === runtime.nodeId");
   expect(resumeSource).not.toContain("slice(-8000)");

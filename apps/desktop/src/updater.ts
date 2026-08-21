@@ -29,7 +29,7 @@ interface UpdateCheck {
   message: string;
 }
 
-interface UpdateDownload {
+export interface UpdateDownload {
   version: string;
   assetName: string;
   updatePath: string;
@@ -43,6 +43,12 @@ export interface UpdateProgress {
   totalBytes?: number;
 }
 
+export interface InstalledReleaseInfo {
+  version: string;
+  notes?: string;
+  publishedAt?: string;
+}
+
 export interface UpdateState {
   status: UpdateStatus;
   automaticCheck: boolean;
@@ -54,16 +60,19 @@ export interface UpdateState {
   error?: string;
   recoveryError?: string;
   progress?: UpdateProgress;
+  pendingRelease?: InstalledReleaseInfo;
 }
 
 export interface UpdateController extends UpdateState {
   checkNow: () => Promise<void>;
   downloadNow: () => Promise<UpdateDownload | undefined>;
-  installNow: () => Promise<boolean>;
+  installNow: (updatePath?: string) => Promise<boolean>;
   onProgress: (progress: UpdateProgress) => void;
   setAutomaticCheck: (enabled: boolean) => void;
   setAutomaticDownload: (enabled: boolean) => void;
   dismissError: () => void;
+  acknowledgeInstalledUpdate: (installedVersion: string) => void;
+  dismissInstalledRelease: () => void;
 }
 
 export const UPDATE_STORAGE_KEY = "wheeljack.local.updates";
@@ -105,6 +114,10 @@ export function compareUpdateVersions(left: string, right: string): number {
   return 0;
 }
 
+export function updateVersionsMatch(left: string, right: string): boolean {
+  return left.trim().replace(/^v/i, "") === right.trim().replace(/^v/i, "");
+}
+
 export function shouldAutomaticallyCheck(lastCheckedAt: number | undefined, guardMs: number, now = Date.now()): boolean {
   return !lastCheckedAt || now - lastCheckedAt >= guardMs;
 }
@@ -119,6 +132,14 @@ export function normalizeUpdateState(value: unknown, currentVersion?: string): U
     : undefined;
   const updatePath = typeof stored.updatePath === "string" && stored.updatePath ? stored.updatePath : undefined;
   const stale = Boolean(update && currentVersion && compareUpdateVersions(currentVersion, update.version) >= 0);
+  const storedPendingRelease = stored.pendingRelease
+    && typeof stored.pendingRelease.version === "string"
+    ? stored.pendingRelease
+    : undefined;
+  const pendingRelease = storedPendingRelease
+    && (!currentVersion || updateVersionsMatch(storedPendingRelease.version, currentVersion))
+    ? storedPendingRelease
+    : undefined;
   const status = statuses.has(stored.status as UpdateStatus) ? stored.status as UpdateStatus : "idle";
   const recoveredStatus = updatePath ? "ready" : update ? "available" : status === "up-to-date" ? status : "idle";
   return {
@@ -133,6 +154,19 @@ export function normalizeUpdateState(value: unknown, currentVersion?: string): U
     signatureStatus: stale || typeof stored.signatureStatus !== "string" ? undefined : stored.signatureStatus,
     error: typeof stored.error === "string" ? stored.error : undefined,
     recoveryError: typeof stored.recoveryError === "string" ? stored.recoveryError : undefined,
+    pendingRelease,
+  };
+}
+
+export function installedReleaseAfterHealth(
+  state: UpdateState,
+  installedVersion: string,
+): InstalledReleaseInfo | undefined {
+  if (!state.update || !updateVersionsMatch(state.update.version, installedVersion)) return undefined;
+  return {
+    version: state.update.version,
+    notes: state.update.notes,
+    publishedAt: state.update.publishedAt,
   };
 }
 
@@ -196,10 +230,10 @@ export function useUpdater(
     }
   }, [commit]);
 
-  const runCheck = useCallback((automaticDownload: boolean) => {
+  const runCheck = useCallback((downloadAutomatically: boolean) => {
     if (checkPromiseRef.current) return checkPromiseRef.current;
     const checking = (async () => {
-      if (!currentVersion || import.meta.env.DEV) {
+      if (import.meta.env.DEV) {
         commit((current) => ({ ...current, status: "disabled", error: undefined }));
         return;
       }
@@ -216,7 +250,7 @@ export function useUpdater(
           signatureStatus: undefined,
           error: undefined,
         }));
-        if (checked.update && automaticDownload) await downloadNow();
+        if (checked.update && downloadAutomatically) await downloadNow();
       } catch (cause) {
         commit((current) => ({
           ...current,
@@ -235,7 +269,7 @@ export function useUpdater(
       },
     );
     return checking;
-  }, [commit, currentVersion, downloadNow]);
+  }, [commit, downloadNow]);
 
   useEffect(() => {
     if (!currentVersion || startupVersionRef.current === currentVersion) return;
@@ -277,8 +311,8 @@ export function useUpdater(
     return () => window.clearInterval(timer);
   }, [currentVersion, runCheck]);
 
-  const installNow = useCallback(async () => {
-    const updatePath = stateRef.current.updatePath;
+  const installNow = useCallback(async (requestedUpdatePath?: string) => {
+    const updatePath = requestedUpdatePath ?? stateRef.current.updatePath;
     if (!updatePath) return false;
     commit((current) => ({ ...current, status: "installing", error: undefined }));
     try {
@@ -294,14 +328,48 @@ export function useUpdater(
     commit((current) => ({ ...current, progress }));
   }, [commit]);
 
+  const setAutomaticCheck = useCallback((automaticCheck: boolean) => {
+    const current = stateRef.current;
+    commit((latest) => ({ ...latest, automaticCheck }));
+    if (
+      automaticCheck
+      && !current.automaticCheck
+      && currentVersion
+      && !import.meta.env.DEV
+      && shouldAutomaticallyCheck(current.lastCheckedAt, STARTUP_CHECK_GUARD_MS)
+    ) {
+      void runCheck(current.automaticDownload);
+    }
+  }, [commit, currentVersion, runCheck]);
+
+  const acknowledgeInstalledUpdate = useCallback((installedVersion: string) => {
+    commit((current) => {
+      const pendingRelease = installedReleaseAfterHealth(current, installedVersion);
+      if (!pendingRelease) return current;
+      return {
+        ...current,
+        status: "idle",
+        update: undefined,
+        updatePath: undefined,
+        signatureStatus: undefined,
+        error: undefined,
+        recoveryError: undefined,
+        progress: undefined,
+        pendingRelease,
+      };
+    });
+  }, [commit]);
+
   return useMemo(() => ({
     ...state,
-    checkNow: () => runCheck(stateRef.current.automaticDownload),
+    checkNow: () => runCheck(false),
     downloadNow,
     installNow,
     onProgress,
-    setAutomaticCheck: (automaticCheck: boolean) => commit((current) => ({ ...current, automaticCheck })),
+    setAutomaticCheck,
     setAutomaticDownload: (automaticDownload: boolean) => commit((current) => ({ ...current, automaticDownload })),
     dismissError: () => commit((current) => ({ ...current, error: undefined, recoveryError: undefined })),
-  }), [commit, downloadNow, installNow, onProgress, runCheck, state]);
+    acknowledgeInstalledUpdate,
+    dismissInstalledRelease: () => commit((current) => ({ ...current, pendingRelease: undefined })),
+  }), [acknowledgeInstalledUpdate, commit, downloadNow, installNow, onProgress, runCheck, setAutomaticCheck, state]);
 }

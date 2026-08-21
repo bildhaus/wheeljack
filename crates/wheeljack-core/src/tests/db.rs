@@ -314,6 +314,103 @@ fn adapter_verification_migration_repairs_early_v5_schema() {
 }
 
 #[test]
+fn v15_preserves_verification_and_allows_multiple_launch_fingerprints() {
+    let db = Connection::open_in_memory().unwrap();
+    run_migrations(&db).unwrap();
+    db.execute_batch(
+        "DROP TABLE adapter_verifications;
+         CREATE TABLE adapter_verifications (
+           adapter_id TEXT PRIMARY KEY,
+           executable_path TEXT NOT NULL,
+           version TEXT,
+           verified_at TEXT NOT NULL,
+           verified_args_json TEXT NOT NULL DEFAULT '[]',
+           launch_fingerprint TEXT NOT NULL DEFAULT ''
+         );
+         INSERT INTO adapter_verifications VALUES
+           ('claude-code', '/bin/claude', '1.0', 'now', '[\"--model\",\"sonnet\"]', 'fingerprint-one');
+         PRAGMA user_version = 14;",
+    )
+    .unwrap();
+
+    run_migrations(&db).unwrap();
+    db.execute(
+        "INSERT INTO adapter_verifications
+           (adapter_id, executable_path, version, verified_at, verified_args_json, launch_fingerprint)
+         VALUES ('claude-code', '/bin/claude', '1.0', 'later', '[\"--model\",\"opus\"]', 'fingerprint-two')",
+        [],
+    )
+    .unwrap();
+
+    let fingerprints = db
+        .prepare(
+            "SELECT launch_fingerprint FROM adapter_verifications
+             WHERE adapter_id = 'claude-code' ORDER BY launch_fingerprint",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(fingerprints, vec!["fingerprint-one", "fingerprint-two"]);
+}
+
+#[test]
+fn v16_renames_interim_bot_profiles_without_losing_data() {
+    let db = Connection::open_in_memory().unwrap();
+    run_migrations(&db).unwrap();
+    db.execute_batch(
+        "DROP INDEX idx_bot_profiles_scope_name;
+         DROP INDEX idx_bot_profiles_project_updated;
+         ALTER TABLE bot_profiles RENAME TO coworker_profiles;
+         CREATE UNIQUE INDEX idx_coworker_profiles_scope_name
+           ON coworker_profiles(scope, COALESCE(project_id, ''), name COLLATE NOCASE);
+         CREATE INDEX idx_coworker_profiles_project_updated
+           ON coworker_profiles(project_id, updated_at DESC);
+         INSERT INTO coworker_profiles
+           (id, scope, project_id, name, role_description, avatar_seed, launch_json,
+            launch_count, last_used_at, created_at, updated_at)
+         VALUES
+           ('bot-1', 'global', NULL, 'Release bot', 'Checks release evidence',
+            'release-bot', '{\"adapterId\":\"codex-cli\"}', 3, 'later', 'now', 'later');
+         PRAGMA user_version = 15;",
+    )
+    .unwrap();
+
+    run_migrations(&db).unwrap();
+
+    let schema_version: i32 = db
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    let bot_name: String = db
+        .query_row(
+            "SELECT name FROM bot_profiles WHERE id = 'bot-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let legacy_table_count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'coworker_profiles'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let bot_index_count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_bot_profiles_%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(schema_version, 16);
+    assert_eq!(bot_name, "Release bot");
+    assert_eq!(legacy_table_count, 0);
+    assert_eq!(bot_index_count, 2);
+}
+
+#[test]
 fn copies_old_tauri_data_once() {
     let old_dir = temp_dir("old-app-data");
     let new_dir = temp_dir("new-app-data");

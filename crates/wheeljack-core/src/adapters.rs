@@ -726,7 +726,7 @@ pub(crate) fn probe_adapter(
         .and_then(Value::as_str)
         .map(str::to_string);
     let Some(executable_path) = executable else {
-        clear_persisted_adapter_verification(db, &adapter.id)?;
+        clear_persisted_adapter_verifications(db, &adapter.id)?;
         return Ok(AdapterProbeDto {
             adapter_id: adapter.id,
             executable_path: None,
@@ -833,7 +833,7 @@ pub(crate) fn verify_adapter(
         && custom_launch.is_none()
     {
         probe.verification_status = "failed".to_string();
-        clear_persisted_adapter_verification(db, adapter_id)?;
+        clear_persisted_adapter_verifications(db, adapter_id)?;
         probe.verified_args.clear();
         probe.verification_fingerprint = None;
         return Ok(probe);
@@ -879,14 +879,14 @@ pub(crate) fn verify_adapter(
         Ok((_, output)) => {
             probe.verification_status = "failed".to_string();
             probe.message = adapter_verification_failure_message(&output);
-            clear_persisted_adapter_verification(db, adapter_id)?;
+            clear_persisted_adapter_verification(db, adapter_id, &launch_fingerprint)?;
             probe.verified_args.clear();
             probe.verification_fingerprint = None;
         }
         Err(error) => {
             probe.verification_status = "failed".to_string();
             probe.message = format!("Verification failed: {error}");
-            clear_persisted_adapter_verification(db, adapter_id)?;
+            clear_persisted_adapter_verification(db, adapter_id, &launch_fingerprint)?;
             probe.verified_args.clear();
             probe.verification_fingerprint = None;
         }
@@ -1028,30 +1028,40 @@ fn restore_persisted_adapter_verification(
     probe: &mut AdapterProbeDto,
     launch_fingerprint: &str,
 ) -> Result<()> {
-    let cached = db
-        .query_row(
-            "SELECT executable_path, version, verified_args_json, launch_fingerprint
-             FROM adapter_verifications WHERE adapter_id = ?1",
-            params![probe.adapter_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )
-        .optional()?;
+    let load_cached = |sql: &str, query_params: &[&dyn rusqlite::ToSql]| {
+        db.query_row(sql, query_params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .optional()
+    };
+    let cached = load_cached(
+        "SELECT executable_path, version, verified_args_json, launch_fingerprint
+             FROM adapter_verifications
+             WHERE adapter_id = ?1 AND launch_fingerprint = ?2",
+        &[&probe.adapter_id, &launch_fingerprint],
+    )?
+    .or(load_cached(
+        "SELECT executable_path, version, verified_args_json, launch_fingerprint
+             FROM adapter_verifications
+             WHERE adapter_id = ?1
+             ORDER BY verified_at DESC, launch_fingerprint ASC
+             LIMIT 1",
+        &[&probe.adapter_id],
+    )?);
     let Some((executable_path, version, verified_args_json, verified_fingerprint)) = cached else {
         return Ok(());
     };
     let Ok(verified_args) = serde_json::from_str::<Vec<String>>(&verified_args_json) else {
-        clear_persisted_adapter_verification(db, &probe.adapter_id)?;
+        clear_persisted_adapter_verification(db, &probe.adapter_id, &verified_fingerprint)?;
         return Ok(());
     };
     if matches!(probe.auth_status.as_str(), "missing" | "unauthenticated") {
-        clear_persisted_adapter_verification(db, &probe.adapter_id)?;
+        clear_persisted_adapter_verifications(db, &probe.adapter_id)?;
         return Ok(());
     }
     probe.verified_args = verified_args;
@@ -1100,7 +1110,20 @@ fn persist_adapter_verification(db: &Connection, probe: &AdapterProbeDto) -> Res
     Ok(())
 }
 
-fn clear_persisted_adapter_verification(db: &Connection, adapter_id: &str) -> Result<()> {
+fn clear_persisted_adapter_verification(
+    db: &Connection,
+    adapter_id: &str,
+    launch_fingerprint: &str,
+) -> Result<()> {
+    db.execute(
+        "DELETE FROM adapter_verifications
+         WHERE adapter_id = ?1 AND launch_fingerprint = ?2",
+        params![adapter_id, launch_fingerprint],
+    )?;
+    Ok(())
+}
+
+fn clear_persisted_adapter_verifications(db: &Connection, adapter_id: &str) -> Result<()> {
     db.execute(
         "DELETE FROM adapter_verifications WHERE adapter_id = ?1",
         params![adapter_id],
@@ -1764,6 +1787,32 @@ local/plain
         restarted.verification_status = "untested".to_string();
         restore_persisted_adapter_verification(&db, &mut restarted, "fingerprint-b").unwrap();
         assert_eq!(restarted.verification_status, "stale");
+
+        let verified_b = AdapterProbeDto {
+            verified_args: vec!["--model".to_string(), "second".to_string()],
+            verification_fingerprint: Some("fingerprint-b".to_string()),
+            ..verified.clone()
+        };
+        persist_adapter_verification(&db, &verified_b).unwrap();
+        let mut restored_b = AdapterProbeDto {
+            verification_status: "untested".to_string(),
+            verified_args: Vec::new(),
+            verification_fingerprint: None,
+            ..verified_b.clone()
+        };
+        restore_persisted_adapter_verification(&db, &mut restored_b, "fingerprint-b").unwrap();
+        assert_eq!(restored_b.verification_status, "verified");
+        assert_eq!(restored_b.verified_args, verified_b.verified_args);
+
+        clear_persisted_adapter_verification(&db, "pi-coding-agent", "fingerprint-b").unwrap();
+        let mut restored_a = AdapterProbeDto {
+            verification_status: "untested".to_string(),
+            verified_args: Vec::new(),
+            verification_fingerprint: None,
+            ..verified.clone()
+        };
+        restore_persisted_adapter_verification(&db, &mut restored_a, "fingerprint-a").unwrap();
+        assert_eq!(restored_a.verification_status, "verified");
         let persisted_count: i64 = db
             .query_row("SELECT COUNT(*) FROM adapter_verifications", [], |row| {
                 row.get(0)

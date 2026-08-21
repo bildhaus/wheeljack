@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -261,6 +261,17 @@ try {
     await sleep(500);
 
     const afterHash = await verifyReplacementFiles();
+    if (!expectRollback) {
+      await waitFor(`document.body.innerText.includes("WELCOME TO WHEELJACK")`, "fresh-install onboarding");
+      const shownEarly = await evaluate(`document.body.innerText.includes("What’s new in wheeljack")`);
+      if (shownEarly) throw new Error("What’s New appeared before onboarding finished.");
+      await evaluate(`[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Skip guide")?.click(); true`);
+      await waitFor(`!document.body.innerText.includes("WELCOME TO WHEELJACK")`, "onboarding dismissal");
+      await waitFor(`document.querySelector('[role="dialog"]')?.textContent?.includes("What’s new in wheeljack 0.1.0")`, "post-update release notes");
+      await waitFor(`document.querySelector('[role="dialog"]')?.textContent?.includes("Local updater lifecycle smoke.")`, "release notes body");
+      await evaluate(`[...document.querySelectorAll('[role="dialog"] button')].find(node=>node.textContent?.trim()==="Got it")?.click(); true`);
+      await waitFor(`!document.querySelector('[role="dialog"]') && !JSON.parse(localStorage.getItem("wheeljack.local.updates") || "{}").pendingRelease`, "dismissed release notes persistence");
+    }
     if (expectRollback) {
       await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Settings");button?.click();return Boolean(button)})()`);
       await waitFor(`Boolean(document.querySelector(".wj-settings-page"))`, "settings after rollback");
@@ -296,6 +307,24 @@ try {
     await waitForPageClosed();
   }
 } catch (error) {
+  const diagnostic = socket?.readyState === WebSocket.OPEN
+    ? await evaluate(`(() => ({
+        updaterStatus: document.querySelector("[data-updater-status]")?.getAttribute("data-updater-status"),
+        body: document.body.innerText,
+        stored: localStorage.getItem("wheeljack.local.updates")
+      }))()`).catch(() => undefined)
+    : undefined;
+  if (diagnostic) console.error(`Updater UI diagnostic: ${JSON.stringify(diagnostic)}`);
+  const updateDir = join(profile, "updates");
+  const nativeDiagnostic = {
+    updateFiles: await readdir(updateDir).catch(() => []),
+    installLog: await readFile(join(updateDir, "install.log"), "utf8").catch(() => undefined),
+    recoveryError: await readFile(join(updateDir, "install-error.txt"), "utf8").catch(() => undefined),
+    smokeResult: await readFile(join(profile, "ui-smoke-result.json"), "utf8").catch(() => undefined),
+  };
+  if (nativeDiagnostic.updateFiles.length || nativeDiagnostic.smokeResult) {
+    console.error(`Updater native diagnostic: ${JSON.stringify(nativeDiagnostic)}`);
+  }
   console.error(`Updater smoke failed during ${stage}: ${error instanceof Error ? error.stack : error}`);
   throw error;
 } finally {

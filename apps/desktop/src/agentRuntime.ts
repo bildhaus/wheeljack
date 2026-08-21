@@ -37,6 +37,10 @@ export function isLiveSessionStatus(status: string): boolean {
   return ["starting", "ready", "running", "needs_input"].includes(status);
 }
 
+export function isActiveSessionStatus(status: string): boolean {
+  return status === "canceling" || isLiveSessionStatus(status);
+}
+
 export function isTerminalSessionStatus(status: string): boolean {
   return ["completed", "failed", "disconnected", "canceled"].includes(status);
 }

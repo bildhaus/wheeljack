@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, mkdtemp, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -22,6 +22,10 @@ const temporary = await mkdtemp(join(tmpdir(), "wheeljack-macos-updater-"));
 const targetApp = join(temporary, "wheeljack.app");
 const profile = join(temporary, "profile");
 const archive = join(temporary, "wheeljack.app.zip");
+const binary = join(targetApp, "Contents/MacOS/wheeljack-desktop");
+const binaryPaths = new Set([binary]);
+const installLog = join(profile, "updates/install.log");
+const serverRequests = new Map();
 await mkdir(profile);
 
 const run = async (command, args) => {
@@ -47,10 +51,57 @@ const waitFor = async (predicate, description, milliseconds = 90_000) => {
   }
   throw new Error(`Timed out waiting for ${description}.`);
 };
+const stopProcessGroup = async (processGroupId) => {
+  if (!processGroupId) return;
+  const signalGroup = (signal) => {
+    try {
+      process.kill(-processGroupId, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!signalGroup("SIGTERM")) return;
+  await waitFor(() => !signalGroup(0), `macOS updater smoke process group ${processGroupId} to exit`, 5_000)
+    .catch(() => signalGroup("SIGKILL"));
+};
+const stopTestApps = async (processGroupId) => {
+  await stopProcessGroup(processGroupId);
+  const processes = await run("/bin/ps", ["-axo", "pid=,command="]).catch(() => "");
+  const pids = processes.split("\n")
+    .filter((line) => [...binaryPaths].some((path) => line.includes(path)))
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((pid) => pid && pid !== process.pid);
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      // The process exited after the snapshot.
+    }
+  }
+  await waitFor(() => pids.every((pid) => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }), "macOS updater smoke processes to exit", 5_000).catch(() => {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // The process exited between the timeout and forced cleanup.
+      }
+    }
+  });
+};
 
 let server;
+let processGroupId;
 try {
   await run("/usr/bin/ditto", [sourceApp, targetApp]);
+  binaryPaths.add(await realpath(binary));
   await run("/usr/bin/ditto", ["-c", "-k", "--keepParent", targetApp, archive]);
   const archiveHash = await hashFile(archive);
   const archiveSize = (await stat(archive)).size;
@@ -58,6 +109,7 @@ try {
     port: 0,
     fetch(request) {
       const path = new URL(request.url).pathname;
+      serverRequests.set(path, (serverRequests.get(path) ?? 0) + 1);
       const origin = `http://127.0.0.1:${server.port}`;
       if (path === "/release") {
         return Response.json({
@@ -86,9 +138,9 @@ try {
     },
   });
 
-  const binary = join(targetApp, "Contents/MacOS/wheeljack-desktop");
   const originalInode = await run("/usr/bin/stat", ["-f", "%i", binary]);
   const child = Bun.spawn([binary, "--ui-smoke"], {
+    detached: true,
     env: {
       ...process.env,
       WHEELJACK_DESKTOP_DATA_DIR: profile,
@@ -98,18 +150,27 @@ try {
       WHEELJACK_UPDATE_SMOKE_MODE: expectRollback ? "rollback" : "healthy",
       ...(verifySignature ? {} : { WHEELJACK_SKIP_SIGNATURE_VERIFY: "1" }),
     },
-    stdout: "ignore",
-    stderr: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
   });
+  processGroupId = child.pid;
   await Promise.race([
     child.exited,
-    Bun.sleep(90_000).then(() => {
-      throw new Error("The original macOS app did not exit for update.");
+    Bun.sleep(90_000).then(async () => {
+      const processes = await run("/bin/ps", ["-axo", "pid=,ppid=,pgid=,state=,command="])
+        .catch((error) => `process snapshot failed: ${error}`);
+      const log = await readFile(installLog, "utf8").catch(() => "<not created>");
+      throw new Error(`The original macOS app did not exit for update. Diagnostics: ${JSON.stringify({
+        childPid: child.pid,
+        exitCode: child.exitCode,
+        requests: Object.fromEntries(serverRequests),
+        installLog: log,
+        processes: processes.split("\n").filter((line) => line.includes(String(processGroupId)) || [...binaryPaths].some((path) => line.includes(path))),
+      })}`);
     }),
   ]);
 
   const backup = targetApp.replace(/\.app$/, ".app.previous");
-  const installLog = join(profile, "updates/install.log");
   if (expectRollback) {
     await waitFor(async () => {
       const log = await readFile(installLog, "utf8").catch(() => "");
@@ -127,12 +188,8 @@ try {
     ? "macOS packaged updater rollback passed."
     : "macOS packaged updater replacement and health acknowledgement passed.");
 
-  const processes = await run("/bin/ps", ["-axo", "pid=,command="]);
-  for (const line of processes.split("\n").filter((value) => value.includes(binary))) {
-    const pid = Number.parseInt(line.trim(), 10);
-    if (pid && pid !== process.pid) process.kill(pid, "SIGTERM");
-  }
 } finally {
+  await stopTestApps(processGroupId);
   server?.stop(true);
   await Bun.sleep(500);
   await rm(temporary, { recursive: true, force: true });

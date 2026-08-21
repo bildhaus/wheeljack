@@ -40,6 +40,7 @@ import {
   agentRuntimeCapabilities,
   agentStatusAfterInteraction,
   hydratedRuntimeStatus,
+  isActiveSessionStatus,
   isLiveSessionStatus,
   isSuccessfulOnboardingTurn,
   isTerminalSessionStatus,
@@ -123,6 +124,17 @@ export {
 } from "./opsOrchestration";
 import { deriveAttention, pendingAgentInteraction, type AttentionItem } from "./attention";
 import { AgentAvatar } from "./AgentAvatar";
+import {
+  botInput,
+  botProfileForLaunch,
+  botSnapshot,
+  botSnapshotFromDraft,
+  botSnapshotFromNode,
+  botStandingPrompt,
+  specialistSnapshot,
+  specialistSuggestion,
+} from "./bots";
+import type { SpecialistDialogAction, SpecialistDialogRequest, SpecialistReadiness } from "./SpecialistProposalDialog";
 import { RunStateBadge } from "./RunStateBadge";
 import { resolveRunState, visibleRunStateDetail } from "./runState";
 import { CommandPalette, type CommandPaletteItem } from "./CommandPalette";
@@ -166,10 +178,11 @@ import {
   type LayoutViewport,
   type PanePlacement,
 } from "./splitTree";
-import { Activity, Bell, CheckIcon, ChevronRight, ChevronsLeft, ChevronsRight, Columns2, FileCode2, Folder, GitBranch, History, Home, LayoutDashboard, MonitorCog, MoreHorizontal, Plus, RefreshCw, Square, Terminal, Trash2, X } from "./SargamIcon";
+import { Activity, Bell, Briefcase, CheckIcon, ChevronRight, ChevronsLeft, ChevronsRight, Columns2, FileCode2, Folder, GitBranch, History, Home, LayoutDashboard, MonitorCog, MoreHorizontal, Plus, RefreshCw, Square, Terminal, Trash2, X } from "./SargamIcon";
 import { builtInThemes, themeCss, validateTheme } from "./theme";
 import { agentEffortOptions } from "./types";
-import { useUpdater, type UpdateProgress } from "./updater";
+import { useUpdater, type UpdateDownload, type UpdateProgress } from "./updater";
+import { UpdateReleaseNotesSheet } from "./UpdaterPresentation";
 import {
   defaultShortcutBindings,
   defaultShortcutBindingsForPlatform,
@@ -192,8 +205,12 @@ import type {
   AgentMessage,
   AgentParseResult,
   AgentProfile,
+  AgentSpecialistSuggestion,
   Canvas,
   CanvasNode,
+  BotProfile,
+  BotProfileInput,
+  BotSnapshot,
   CoreConnection,
   CoreEventEnvelope,
   CoreStatus,
@@ -252,6 +269,7 @@ function DevToolsContextItem() {
 interface ConfirmationRequest {
   title: string;
   message: string;
+  confirmLabel?: string;
   resolve: (confirmed: boolean) => void;
 }
 
@@ -281,6 +299,8 @@ export interface AgentTaskCardDraft {
   reviewPolicy: "human" | "agent" | "either";
   dependencyKeys: string[];
   existingDependencyIds: string[];
+  workerSpecialist?: AgentSpecialistSuggestion;
+  reviewerSpecialist?: AgentSpecialistSuggestion;
 }
 
 export interface AgentTaskCardProposal {
@@ -346,7 +366,23 @@ interface AgentSpawnOrigin {
   onSpawned?: (node: CanvasNode, session: Session) => void;
 }
 
+interface BotSpawnContext {
+  snapshot: BotSnapshot;
+  profile?: BotProfile;
+}
+
 type OpsAgentRole = "worker" | "reviewer";
+
+interface SpecialistDialogState extends SpecialistDialogRequest {
+  launch?: {
+    initialPrompt: string;
+    displayPrompt: string;
+    opsTask?: OpsCard;
+    opsRole: OpsAgentRole;
+    placement: PanePlacement;
+  };
+  resolve?: (started: boolean) => void;
+}
 
 interface CoordinationBoardFiles {
   boardId: string;
@@ -378,6 +414,12 @@ const SplitView = lazy(async () => ({
 }));
 const UsageSurface = lazy(async () => ({
   default: (await import("./UsageSurface")).UsageSurface,
+}));
+const BotsSurface = lazy(async () => ({
+  default: (await import("./BotsSurface")).BotsSurface,
+}));
+const SpecialistProposalDialog = lazy(async () => ({
+  default: (await import("./BotsSurface")).SpecialistProposalDialog,
 }));
 
 function readLayoutViewport(
@@ -414,6 +456,9 @@ export function App() {
   const [agentTask, setAgentTask] = useState<OpsCard>();
   const [agentTaskRole, setAgentTaskRole] = useState<OpsAgentRole>("worker");
   const [agentCreatorOpen, setAgentCreatorOpen] = useState(false);
+  const [bots, setBots] = useState<BotProfile[]>([]);
+  const [botsLoading, setBotsLoading] = useState(false);
+  const [specialistDialog, setSpecialistDialog] = useState<SpecialistDialogState>();
   const agentPromptRef = useRef<HTMLTextAreaElement>(null);
   const focusCreatedAgentRef = useRef(false);
   const [teamRailCollapsed, setTeamRailCollapsed] = useState(true);
@@ -712,8 +757,9 @@ export function App() {
     void updater.checkNow()
       .then(async () => {
         if (await updater.installNow()) return true;
-        if (!await updater.downloadNow()) return false;
-        return updater.installNow();
+        const downloaded = await updater.downloadNow();
+        if (!downloaded) return false;
+        return updater.installNow(downloaded.updatePath);
       })
       .then((installed) => {
         if (!installed) setError(`The ${updateSmokeMode} updater smoke could not install its staged update.`);
@@ -788,7 +834,7 @@ export function App() {
     }, 320);
   }, [flushAgentComposition]);
   const persistAgentNodeState = useCallback(
-    (nodeId: string, messages: AgentMessage[], status?: string) => {
+    (nodeId: string, messages: AgentMessage[], status?: string, dataPatch: JsonObject = {}) => {
       const node = nodesRef.current.find((item) => item.id === nodeId);
       const activeCanvas = canvasRef.current;
       if (!node || !activeCanvas) return;
@@ -799,6 +845,8 @@ export function App() {
       const nextStatus = status || nodeData.status;
       const nextPreview = preview || nodeData.chatPreview;
       if (
+        Object.keys(dataPatch).length === 0
+        &&
         !("chatMessages" in node.data)
         && nextStatus === nodeData.status
         && nextPreview === nodeData.chatPreview
@@ -807,6 +855,7 @@ export function App() {
         ...node,
         data: {
           ...nodeData,
+          ...dataPatch,
           ...(nextStatus ? { status: nextStatus } : {}),
           ...(nextPreview ? { chatPreview: nextPreview } : {}),
         },
@@ -1126,8 +1175,9 @@ export function App() {
     void connectCore(handleCoreEvent)
       .then(async (connected) => {
         if (cancelled) return;
-        await completeUpdateHealth();
+        const updateHealthy = await completeUpdateHealth();
         if (cancelled) return;
+        if (updateHealthy) updater.acknowledgeInstalledUpdate(connected.version);
         setConnection(connected);
         const [status, existingProjects, detectedAdapters, existingSessions, existingActivity, savedSettings, legacyWindowsPreferences] = await Promise.all([
           callCore<CoreStatus>("core_status", {}),
@@ -1212,6 +1262,24 @@ export function App() {
     // The core channel is connected exactly once for this webview lifetime.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const refreshBots = useCallback(async () => {
+    if (!connection) return;
+    setBotsLoading(true);
+    try {
+      setBots(await callCore<BotProfile[]>("bot_list", {
+        ...(project?.id ? { projectId: project.id } : {}),
+      }));
+    } catch (cause) {
+      setError(`Could not load bots: ${message(cause)}`);
+    } finally {
+      setBotsLoading(false);
+    }
+  }, [connection, project?.id, setError]);
+
+  useEffect(() => {
+    void refreshBots();
+  }, [refreshBots]);
 
   const activateProject = async (nextProject: Project, targetNodeId?: string) => {
     if (nextProject.pathExists === false) {
@@ -1897,13 +1965,27 @@ export function App() {
     }
   };
 
-  const spawnAgent = async (initialPrompt = agentPrompt, opsTask?: OpsCard, displayPrompt = initialPrompt, opsRole: OpsAgentRole = "worker", schedulerLeaseId?: string, adapterIdOverride?: string, origin?: AgentSpawnOrigin, placement: PanePlacement = "auto"): Promise<boolean> => {
-    const launchAdapterId = adapterIdOverride ?? selectedAdapterId;
+  const spawnAgent = async (initialPrompt = agentPrompt, opsTask?: OpsCard, displayPrompt = initialPrompt, opsRole: OpsAgentRole = "worker", schedulerLeaseId?: string, adapterIdOverride?: string, origin?: AgentSpawnOrigin, placement: PanePlacement = "auto", bot?: BotSpawnContext): Promise<boolean> => {
+    const launchAdapterId = bot?.snapshot.launch.adapterId ?? adapterIdOverride ?? selectedAdapterId;
     if (!canvas || !project || !launchAdapterId) return false;
-    const adapter = adapters.find((candidate) => candidate.id === launchAdapterId);
-    const profile = agentProfiles.find((candidate) => candidate.adapterId === launchAdapterId)
+    let adapter = adapters.find((candidate) => candidate.id === launchAdapterId);
+    const baseProfile = agentProfiles.find((candidate) => candidate.adapterId === launchAdapterId)
       ?? defaultAgentProfiles().find((candidate) => candidate.adapterId === launchAdapterId);
-    const launchArgs = agentLaunchArgs(profile);
+    const profile = botProfileForLaunch(baseProfile, bot?.snapshot);
+    const launchConfig = agentLaunchConfig(profile, project.agentAccess);
+    const launchArgs = launchConfig.args;
+    if (adapter && bot) {
+      try {
+        const probe = await callCore<AdapterProbe>("adapter_probe", {
+          adapterId: launchAdapterId,
+          ...launchConfig,
+        });
+        adapter = { ...adapter, probe };
+      } catch (cause) {
+        setError(`Could not check ${bot.snapshot.name}: ${message(cause)}`);
+        return false;
+      }
+    }
     if (!adapter || !isAdapterReady(adapter, launchArgs)) {
       setError(`${adapter?.displayName ?? launchAdapterId} is not ready. Open Settings, rescan, and complete any sign-in or verification step.`);
       return false;
@@ -1952,6 +2034,8 @@ export function App() {
         parentAgentId: origin?.parentNodeId,
         parentSessionId: origin?.parentSessionId,
         autonomyDepth: origin?.autonomyDepth ?? 0,
+        botSnapshot: bot?.snapshot as unknown as JsonObject | undefined,
+        specialistRolePending: Boolean(bot && !initialPrompt.trim()),
       },
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -1970,6 +2054,7 @@ export function App() {
       structuredLines: [],
       messages: initialMessages,
       turnStartLine: initialPrompt.trim() ? 0 : undefined,
+      botProfileId: bot?.snapshot.profileId,
     };
     const optimisticLayout = insertPane(
       layoutRef.current,
@@ -2010,9 +2095,12 @@ export function App() {
             [nodeTitle],
           ))
         : undefined;
-      const launchPrompt = opsTask && coordination
+      const taskPrompt = opsTask && coordination
         ? opsTaskAgentPrompt(initialPrompt, opsTask, opsRole, project.path, coordination, nodeTitle)
         : initialPrompt;
+      const launchPrompt = taskPrompt.trim()
+        ? botStandingPrompt(taskPrompt, bot?.snapshot)
+        : taskPrompt;
       session = await callCore<Session>("agent_structured_spawn", {
         req: {
           nodeId,
@@ -2023,7 +2111,7 @@ export function App() {
           autonomyDepth: origin?.autonomyDepth ?? 0,
           cwd: workspace.cwd,
           prompt: launchPrompt.trim(),
-          ...agentLaunchConfig(profile, project.agentAccess),
+          ...launchConfig,
         },
       });
       const node = await persistNode(canvas, {
@@ -2043,6 +2131,8 @@ export function App() {
         parentAgentId: origin?.parentNodeId,
         parentSessionId: origin?.parentSessionId,
         autonomyDepth: origin?.autonomyDepth ?? 0,
+        botSnapshot: bot?.snapshot,
+        specialistRolePending: Boolean(bot && !initialPrompt.trim()),
         zIndex: nextZIndex(nodes),
       });
       persisted = true;
@@ -2064,11 +2154,19 @@ export function App() {
         messages: initialMessages,
         turnStartLine: initialPrompt.trim() ? 0 : undefined,
         historyHasMore: false,
+        botProfileId: bot?.snapshot.profileId,
       };
       setNodes((current) => current.map((candidate) => candidate.id === nodeId ? node : candidate));
       setRuntimes((current) => ({ ...current, [nodeId]: runtime }));
       setSessions((current) => session ? [session, ...current] : current);
       origin?.onSpawned?.(node, session);
+      if (bot?.profile) {
+        void callCore<BotProfile>("bot_upsert", {
+          bot: botInput(bot.profile) as unknown as JsonObject,
+          recordLaunch: true,
+        }).then((updated) => setBots((current) => current.map((item) => item.id === updated.id ? updated : item)))
+          .catch((cause) => setError(`Agent started, but bot activity could not be recorded: ${message(cause)}`));
+      }
       if (opsTask && workspace.sharedNonGit) {
         changeOps((current) => {
           const timestamp = new Date().toISOString();
@@ -2142,6 +2240,156 @@ export function App() {
       pendingAgentCallsignsRef.current.delete(nodeTitle);
       setBusy(false);
     }
+  };
+
+  const saveBot = async (input: BotProfileInput): Promise<BotProfile> => {
+    const saved = await callCore<BotProfile>("bot_upsert", {
+      bot: input as unknown as JsonObject,
+      recordLaunch: false,
+    });
+    setBots((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
+    return saved;
+  };
+
+  const specialistReadiness = useCallback(async (draft: BotProfileInput): Promise<SpecialistReadiness> => {
+    const activeProject = projectRef.current;
+    const adapter = adapters.find((candidate) => candidate.id === draft.launch.adapterId);
+    if (!adapter || !activeProject) return { label: "Unavailable", message: "Open a project and choose an installed coding agent." };
+    const baseProfile = agentProfilesRef.current.find((candidate) => candidate.adapterId === draft.launch.adapterId)
+      ?? defaultAgentProfiles().find((candidate) => candidate.adapterId === draft.launch.adapterId);
+    const profile = botProfileForLaunch(baseProfile, botSnapshotFromDraft(draft, draft.id ? "saved" : "one-off"));
+    const launchConfig = agentLaunchConfig(profile, activeProject.agentAccess);
+    const probe = await callCore<AdapterProbe>("adapter_probe", {
+      adapterId: draft.launch.adapterId,
+      ...launchConfig,
+    });
+    const label = adapterReadinessLabel({ ...adapter, probe }, launchConfig.args);
+    return {
+      label: label === "Ready" ? "Ready" : ["Verify", "Reverify"].includes(label) ? "Verify" : "Unavailable",
+      message: probe.message,
+    };
+  }, [adapters]);
+
+  const verifySpecialist = useCallback(async (draft: BotProfileInput): Promise<SpecialistReadiness> => {
+    const activeProject = projectRef.current;
+    const adapter = adapters.find((candidate) => candidate.id === draft.launch.adapterId);
+    if (!adapter || !activeProject) return { label: "Unavailable", message: "Open a project and choose an installed coding agent." };
+    const baseProfile = agentProfilesRef.current.find((candidate) => candidate.adapterId === draft.launch.adapterId)
+      ?? defaultAgentProfiles().find((candidate) => candidate.adapterId === draft.launch.adapterId);
+    const profile = botProfileForLaunch(baseProfile, botSnapshotFromDraft(draft, draft.id ? "saved" : "one-off"));
+    const launchConfig = agentLaunchConfig(profile, activeProject.agentAccess);
+    const probe = await callCore<AdapterProbe>("adapter_verify", {
+      adapterId: draft.launch.adapterId,
+      cwd: activeProject.path,
+      ...launchConfig,
+    });
+    const label = adapterReadinessLabel({ ...adapter, probe }, launchConfig.args);
+    return {
+      label: label === "Ready" ? "Ready" : ["Verify", "Reverify"].includes(label) ? "Verify" : "Unavailable",
+      message: probe.message,
+    };
+  }, [adapters]);
+
+  const defaultBotDraft = (scope: BotProfileInput["scope"] = project ? "project" : "global"): BotProfileInput => {
+    const profile = agentProfiles.find((candidate) => candidate.adapterId === selectedAdapterId)
+      ?? defaultAgentProfiles().find((candidate) => candidate.adapterId === selectedAdapterId)
+      ?? defaultAgentProfiles()[0];
+    return {
+      scope,
+      projectId: scope === "project" ? project?.id : undefined,
+      name: "",
+      roleDescription: "",
+      avatarSeed: `bot_${crypto.randomUUID().replaceAll("-", "")}`,
+      launch: {
+        adapterId: profile.adapterId,
+        provider: profile.provider || undefined,
+        model: profile.model || undefined,
+        thinking: profile.thinking,
+      },
+    };
+  };
+
+  const dismissSpecialistDialog = () => {
+    specialistDialog?.resolve?.(false);
+    setSpecialistDialog(undefined);
+  };
+
+  const handleSpecialistAction = async (action: SpecialistDialogAction, draft: BotProfileInput) => {
+    const request = specialistDialog;
+    if (!request) return;
+    let saved: BotProfile | undefined;
+    if (action === "save" || action === "save-and-launch") {
+      saved = await saveBot(draft);
+      if (action === "save-and-launch") {
+        setSpecialistDialog((current) => current === request ? {
+          ...current,
+          key: crypto.randomUUID(),
+          initial: botInput(saved!),
+        } : current);
+      }
+    }
+    if (action === "launch-once" || action === "save-and-launch") {
+      if (!request.launch) throw new Error("This specialist has no launch target.");
+      const snapshot = saved ? botSnapshot(saved) : botSnapshotFromDraft(draft, "one-off");
+      const started = await spawnAgent(
+        request.launch.initialPrompt,
+        request.launch.opsTask,
+        request.launch.displayPrompt,
+        request.launch.opsRole,
+        undefined,
+        snapshot.launch.adapterId,
+        undefined,
+        request.launch.placement,
+        { snapshot, profile: saved },
+      );
+      if (!started) throw new Error(saved ? `${saved.name} was saved, but the agent could not start. Fix the launch profile and retry.` : "The specialist could not start. Fix the launch profile and retry.");
+    }
+    request.resolve?.(true);
+    setSpecialistDialog(undefined);
+  };
+
+  const openCreateBot = (launch?: SpecialistDialogState["launch"]) => {
+    setSpecialistDialog({
+      key: crypto.randomUUID(),
+      intent: "create",
+      initial: defaultBotDraft(),
+      allowLaunch: Boolean(launch),
+      launch,
+    });
+  };
+
+  const openSaveOneOff = (snapshot: BotSnapshot) => {
+    setSpecialistDialog({
+      key: crypto.randomUUID(),
+      intent: "save-one-off",
+      initial: {
+        scope: project ? "project" : "global",
+        projectId: project?.id,
+        name: snapshot.name,
+        roleDescription: snapshot.roleDescription,
+        avatarSeed: snapshot.avatarSeed,
+        launch: { ...snapshot.launch },
+      },
+      allowLaunch: false,
+    });
+  };
+
+  const startSavedBot = async (profile: BotProfile) => {
+    if (!project || !canvas) {
+      setError("Open a project before starting a bot.");
+      return;
+    }
+    setSurface("terminal");
+    await spawnAgent("", undefined, "", "worker", undefined, profile.launch.adapterId, undefined, "auto", {
+      snapshot: botSnapshot(profile),
+      profile,
+    });
+  };
+
+  const deleteSavedBot = async (profile: BotProfile) => {
+    if (!await requestConfirmation(`Delete ${profile.name}?`, "Running and historical sessions keep their saved bot snapshot. This removes the reusable profile from your roster.")) return;
+    const result = await callCore<{ deleted: boolean }>("bot_delete", { botId: profile.id });
+    if (result.deleted) setBots((current) => current.filter((item) => item.id !== profile.id));
   };
 
   const closePane = async (
@@ -2339,6 +2587,10 @@ export function App() {
       return resumeAgent(runtime, prompt, displayPrompt, images);
     }
     const previousStatus = runtime.status;
+    const agentNode = nodesRef.current.find((node) => node.id === runtime.nodeId);
+    const snapshot = agentNode ? botSnapshotFromNode(agentNode.data) : undefined;
+    const rolePending = Boolean(agentNode?.data.specialistRolePending && snapshot);
+    const submittedPrompt = rolePending ? botStandingPrompt(prompt, snapshot) : prompt;
     const userMessage: AgentMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -2363,17 +2615,18 @@ export function App() {
       },
     }));
     try {
-      const profile = agentProfiles.find((candidate) => candidate.adapterId === runtime.adapterId);
+      const baseProfile = agentProfiles.find((candidate) => candidate.adapterId === runtime.adapterId);
+      const profile = botProfileForLaunch(baseProfile, snapshot);
       await callCore("session_prompt_send", {
         sessionId: runtime.sessionId,
         nodeId: runtime.nodeId,
         adapterId: runtime.adapterId,
-        prompt: prompt.trim(),
+        prompt: submittedPrompt.trim(),
         imagePaths: images.map((image) => image.path),
         terminalText: runtime.transcript,
         canvasId: canvas.id,
         workspacePath: project.path,
-        taskId: stringValue(nodesRef.current.find((node) => node.id === runtime.nodeId)?.data ?? {}, "taskId") || undefined,
+        taskId: stringValue(agentNode?.data ?? {}, "taskId") || undefined,
         ...(profile ? { provider: profile.provider, model: profile.model, thinking: profile.thinking } : {}),
         ...agentProjectAccessConfig(profile, project.agentAccess),
       });
@@ -2396,6 +2649,7 @@ export function App() {
         runtime.nodeId,
         liveRuntime?.messages ?? nextMessages,
         liveRuntime?.status ?? "running",
+        rolePending ? { specialistRolePending: false } : {},
       );
       return true;
     } catch (cause) {
@@ -2629,9 +2883,19 @@ export function App() {
       return false;
     }
     const node = nodes.find((candidate) => candidate.id === runtime.nodeId);
-    const adapter = adapters.find((candidate) =>
-      candidate.id === runtime.adapterId && isAdapterReady(candidate, agentLaunchArgs(agentProfiles.find((profile) => profile.adapterId === runtime.adapterId))),
-    );
+    const snapshot = node ? botSnapshotFromNode(node.data) : undefined;
+    const baseProfile = agentProfiles.find((candidate) => candidate.adapterId === runtime.adapterId);
+    const profile = botProfileForLaunch(baseProfile, snapshot);
+    const launchConfig = agentLaunchConfig(profile, project.agentAccess);
+    let adapter = adapters.find((candidate) => candidate.id === runtime.adapterId);
+    if (adapter && snapshot) {
+      const probe = await callCore<AdapterProbe>("adapter_probe", {
+        adapterId: runtime.adapterId,
+        ...launchConfig,
+      }).catch(() => undefined);
+      if (probe) adapter = { ...adapter, probe };
+    }
+    if (adapter && !isAdapterReady(adapter, launchConfig.args)) adapter = undefined;
     if (!node || !adapter) {
       setError(`${runtime.adapterId} is not ready. Open Settings and rescan adapters.`);
       return false;
@@ -2654,6 +2918,8 @@ export function App() {
         ? `Resume wheeljack task ${task.id}: ${task.title}\n\nContinue from the saved task state and coordination history. Report new evidence or blockers before finishing.`
         : "");
       const submittedDisplayPrompt = displayPrompt.trim() || submittedPrompt;
+      const rolePending = Boolean(node.data.specialistRolePending && snapshot && submittedPrompt);
+      const effectivePrompt = rolePending ? botStandingPrompt(submittedPrompt, snapshot) : submittedPrompt;
       const nextMessages = submittedPrompt || images.length
         ? appendPendingAgentUserMessage(runtime.messages, {
             id: crypto.randomUUID(),
@@ -2667,7 +2933,6 @@ export function App() {
       const cwd = task?.taskLane
         ? (await ensureOpsTaskLane(task)).cwd
         : resolveAgentCwd(project.path, undefined, persistedCwd);
-      const profile = agentProfiles.find((candidate) => candidate.adapterId === runtime.adapterId);
       spawned = runtime.structured
         ? await callCore<Session>("agent_structured_spawn", {
             req: {
@@ -2678,10 +2943,10 @@ export function App() {
               parentSessionId: stringValue(node.data, "parentSessionId") || undefined,
               autonomyDepth: numberValue(node.data, "autonomyDepth") ?? 0,
               cwd,
-              prompt: submittedPrompt,
+              prompt: effectivePrompt,
               imagePaths: images.map((image) => image.path),
               resumeSessionId: priorSessionId,
-              ...agentLaunchConfig(profile, project.agentAccess),
+              ...launchConfig,
             },
           })
         : await callCore<Session>("pty_spawn", {
@@ -2699,6 +2964,7 @@ export function App() {
             protocol: spawned.protocol ?? runtime.protocol,
             runtimeCapabilities: spawned.capabilities,
             runtimeInstanceId: spawned.runtimeInstanceId ?? spawned.id,
+            specialistRolePending: rolePending ? false : node.data.specialistRolePending,
             chatPreview: [...nextMessages].reverse().find((message) => message.text.trim())?.text.trim().slice(0, 320),
           },
           updatedAt: new Date().toISOString(),
@@ -3975,10 +4241,11 @@ export function App() {
       "Inspect the repository README, documentation, source, tests, and build configuration enough to ground scope and verification in real project evidence. Do not edit files or implement the task.",
       "Return the smallest coherent set of cards. Use one card when the work should stay together; split only when separate outcomes, ordering, or verification justify it. Return at most 8 cards and avoid duplicating existing work.",
       "Each card needs a unique lowercase key, a concise action title, a complete outcome-focused detail, priority (`low`, `normal`, or `high`), observable definitionOfDone, optional constraints, a repository-valid verificationCommand, and reviewPolicy (`human`, `agent`, or `either`). Default reviewPolicy to `agent`.",
+      `For work that needs a distinct specialist, optionally add workerSpecialist or reviewerSpecialist with name, standing roleDescription, rationale, and an adapterId from ${JSON.stringify(readyCodingAdapters.map((adapter) => adapter.id))}. Otherwise omit it.`,
       "Use dependencyKeys for dependencies among the new cards and existingDependencyIds only for dependencies on the existing cards listed below. Dependencies must be acyclic and every referenced key or ID must exist.",
       `Existing board cards:\n${JSON.stringify(existingCards, null, 2)}`,
       "Return exactly one final control line with no prose or code fence:",
-      `wheeljack.task_cards ${JSON.stringify({ requestId, cards: [{ key: "task-key", title: "Concise action title", detail: "Complete outcome and context", priority: "normal", definitionOfDone: "Observable acceptance criteria", constraints: "", verificationCommand: "repository-valid command", reviewPolicy: "agent", dependencyKeys: [], existingDependencyIds: [] }] })}`,
+      `wheeljack.task_cards ${JSON.stringify({ requestId, cards: [{ key: "task-key", title: "Concise action title", detail: "Complete outcome and context", priority: "normal", definitionOfDone: "Observable acceptance criteria", constraints: "", verificationCommand: "repository-valid command", reviewPolicy: "agent", dependencyKeys: [], existingDependencyIds: [], workerSpecialist: { name: "Focused specialist", roleDescription: "Standing role for this task", rationale: "Why this specialization helps", adapterId: selectedAdapterId } }] })}`,
       "Replace the example card with the complete card array.",
     ].join("\n\n");
     const displayPrompt = `Create wheeljack backlog cards from this brief:\n\n${brief.trim()}`;
@@ -4568,6 +4835,12 @@ export function App() {
         expectedFiles: ["path/to/file"],
         dependencyKeys: [],
         agentId: agents[0]?.id,
+        workerSpecialist: {
+          name: "Focused specialist",
+          roleDescription: "Standing role for this child task",
+          rationale: "Why specialization improves this task",
+          adapterId: runtime.adapterId,
+        },
       }],
     };
     void sendAgentPrompt(runtime, [
@@ -4578,6 +4851,7 @@ export function App() {
       `Available agents:\n${JSON.stringify(agents, null, 2)}`,
       "Plan 2-6 implementation-ready child tasks. Dependencies must reference task keys. Keep file scopes non-overlapping where possible. Do not edit files or start work.",
       "Every child task must include a non-empty, observable definitionOfDone and a repository-valid verificationCommand. Do not use placeholders.",
+      `When useful, add workerSpecialist or reviewerSpecialist with name, roleDescription, rationale, and an adapterId from ${JSON.stringify(readyCodingAdapters.map((adapter) => adapter.id))}; otherwise omit it.`,
       "Return exactly one final line and no prose before or after it:",
       `wheeljack.ops_decomposition ${JSON.stringify(example)}`,
     ].filter(Boolean).join("\n\n"));
@@ -4650,6 +4924,8 @@ export function App() {
             constraints: task.constraints,
             verificationCommand: task.verificationCommand,
             reviewPolicy: parent.reviewPolicy ?? "agent",
+            workerSpecialist: task.workerSpecialist,
+            reviewerSpecialist: task.reviewerSpecialist,
             events: [{
               id: `manual:decompose:${timestamp}:${task.key}`,
               kind: "update",
@@ -4711,7 +4987,74 @@ export function App() {
     schedulerLeaseId?: string,
     adapterIdOverride?: string,
   ): Promise<boolean> => {
-    const launchAdapterId = adapterIdOverride ?? selectedAdapterId;
+    const suggestion = role === "reviewer" ? card.reviewerSpecialist : card.workerSpecialist;
+    const launchAdapterId = suggestion?.adapterId ?? adapterIdOverride ?? selectedAdapterId;
+    const suggestedProfile = agentProfiles.find((candidate) => candidate.adapterId === launchAdapterId)
+      ?? defaultAgentProfiles().find((candidate) => candidate.adapterId === launchAdapterId);
+    const suggestedSnapshot = suggestion && suggestedProfile
+      ? specialistSnapshot(suggestion, suggestedProfile, `${project?.id ?? "project"}:${card.id}:${role}`)
+      : undefined;
+
+    if (suggestion && suggestedSnapshot && !schedulerLeaseId) {
+      return new Promise<boolean>((resolve) => {
+        setSpecialistDialog({
+          key: `${card.id}:${role}:${suggestedSnapshot.avatarSeed}`,
+          intent: "proposal",
+          initial: {
+            scope: "project",
+            projectId: project?.id,
+            name: suggestedSnapshot.name,
+            roleDescription: suggestedSnapshot.roleDescription,
+            avatarSeed: suggestedSnapshot.avatarSeed,
+            launch: { ...suggestedSnapshot.launch },
+          },
+          rationale: suggestion.rationale,
+          targetTask: card.title,
+          allowLaunch: true,
+          launch: { initialPrompt: prompt, displayPrompt: prompt, opsTask: card, opsRole: role, placement: "auto" },
+          resolve,
+        });
+      });
+    }
+
+    if (schedulerLeaseId && suggestedSnapshot && suggestion) {
+      const readiness = await specialistReadiness({
+        scope: "project",
+        projectId: project?.id,
+        name: suggestedSnapshot.name,
+        roleDescription: suggestedSnapshot.roleDescription,
+        avatarSeed: suggestedSnapshot.avatarSeed,
+        launch: suggestedSnapshot.launch,
+      }).catch(() => ({ label: "Unavailable" as const, message: "Suggested adapter unavailable." }));
+      let snapshot = suggestedSnapshot;
+      let fallbackReason = "";
+      if (readiness.label !== "Ready") {
+        const fallbackId = adapterIdOverride ?? selectedAdapterId;
+        const fallbackProfile = agentProfiles.find((candidate) => candidate.adapterId === fallbackId)
+          ?? defaultAgentProfiles().find((candidate) => candidate.adapterId === fallbackId);
+        if (!fallbackProfile) return false;
+        snapshot = specialistSnapshot({ ...suggestion, adapterId: fallbackId }, fallbackProfile, `${project?.id ?? "project"}:${card.id}:${role}`);
+        fallbackReason = ` Suggested ${launchAdapterId} was unavailable; used ${fallbackId}.`;
+      }
+      const started = await spawnAgent(prompt, card, prompt, role, schedulerLeaseId, snapshot.launch.adapterId, undefined, "auto", { snapshot });
+      if (started) {
+        const timestamp = new Date().toISOString();
+        changeOps((current) => ({
+          ...current,
+          cards: current.cards.map((item) => item.id === card.id
+            ? appendOpsTaskEvent(item, {
+                id: `automatic:bot:${timestamp}:${snapshot.avatarSeed}`,
+                kind: "update",
+                timestamp,
+                message: `Auto-selected ${snapshot.name} for ${role}.${fallbackReason}`,
+                botSnapshot: snapshot,
+              })
+            : item),
+        }));
+      }
+      return started;
+    }
+
     const launchAdapter = adapters.find((adapter) => adapter.id === launchAdapterId);
     const launchAdapterReady = isAdapterReady(
       launchAdapter,
@@ -5325,6 +5668,20 @@ export function App() {
     () => Object.fromEntries(nodes.map((node) => [node.id, node])),
     [nodes],
   );
+  const botRuntimes = useMemo(() => Object.values(runtimes).map((runtime) => ({
+    ...runtime,
+    botProfileId: botSnapshotFromNode(nodeById[runtime.nodeId]?.data ?? {})?.profileId,
+  })), [nodeById, runtimes]);
+  const recentOneOffs = useMemo(() => {
+    const savedSeeds = new Set(bots.map((bot) => bot.avatarSeed));
+    const unique = new Map<string, BotSnapshot>();
+    for (const node of nodes) {
+      const snapshot = botSnapshotFromNode(node.data);
+      if (snapshot?.source === "one-off" && !savedSeeds.has(snapshot.avatarSeed)) unique.set(snapshot.avatarSeed, snapshot);
+    }
+    return [...unique.values()].slice(0, 8);
+  }, [bots, nodes]);
+  const botActiveCount = botRuntimes.filter((runtime) => runtime.botProfileId && isActiveSessionStatus(runtime.status)).length;
   const attentionItems = useMemo(() => deriveAttention({
     runtimes: Object.values(runtimes),
     activity,
@@ -5491,7 +5848,7 @@ export function App() {
       for (const node of nodesRef.current) {
         const leaseId = stringValue(node.data, "schedulerLeaseId");
         const status = currentRuntimes()[node.id]?.status;
-        if (!leaseId || !["starting", "ready", "running", "needs_input", "canceling"].includes(status ?? "")) continue;
+        if (!leaseId || !isActiveSessionStatus(status ?? "")) continue;
         void callCore("ops_scheduler_heartbeat", {
           leaseId,
           ownerId: schedulerOwnerIdRef.current,
@@ -5573,11 +5930,16 @@ export function App() {
   const terminalAgents = Object.values(runtimes).filter((runtime) => runtime.structured);
   const terminalAgentContexts: Record<string, TerminalAgentContext> = Object.fromEntries(terminalAgents.map((runtime) => [
     runtime.nodeId,
-    {
-      label: nodeById[runtime.nodeId]?.title ?? runtime.nodeId,
-      card: opsCurrentCardForAgent(opsState, runtime.nodeId),
-      attentionReason: opsStatusAttentionReason(runtime.status),
-    },
+    (() => {
+      const snapshot = botSnapshotFromNode(nodeById[runtime.nodeId]?.data ?? {});
+      return {
+        label: snapshot?.name ?? nodeById[runtime.nodeId]?.title ?? runtime.nodeId,
+        avatarSeed: snapshot?.avatarSeed,
+        botSnapshot: snapshot?.source === "one-off" && !bots.some((bot) => bot.avatarSeed === snapshot.avatarSeed) ? snapshot : undefined,
+        card: opsCurrentCardForAgent(opsState, runtime.nodeId),
+        attentionReason: opsStatusAttentionReason(runtime.status),
+      };
+    })(),
   ]));
   const terminalAttentionAgents = terminalAgents.filter((runtime) => terminalAgentContexts[runtime.nodeId]?.attentionReason);
   const terminalRailAgents = [
@@ -5606,6 +5968,7 @@ export function App() {
         onOpenOpsCard={openOpsCard}
         onResume={() => void resumeAgent(runtime)}
         onPrepareHandoff={() => prepareAgentHandoff(runtime)}
+        onSaveBot={openSaveOneOff}
         onReviewTranscript={() => void reviewTranscript(runtime)}
         onQueryStatus={() => void queryAgentStatus(runtime)}
       />
@@ -5619,10 +5982,10 @@ export function App() {
       projectForSession(session)?.id === removeProject.id),
   );
 
-  const requestConfirmation = useCallback((title: string, message: string) => {
+  const requestConfirmation = useCallback((title: string, message: string, confirmLabel?: string) => {
     if (confirmationRef.current) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
-      const request = { title, message, resolve };
+      const request = { title, message, confirmLabel, resolve };
       confirmationRef.current = request;
       setConfirmation(request);
     });
@@ -5880,9 +6243,9 @@ export function App() {
     }
   };
 
-  const installReadyUpdate = async () => {
+  const installReadyUpdate = async (downloaded?: UpdateDownload) => {
     if (
-      updater.signatureStatus === "unsigned"
+      (downloaded?.signatureStatus ?? updater.signatureStatus) === "unsigned"
       && !await requestConfirmation(
         "Install unsigned wheeljack update?",
         "This update passed its SHA-256 check but is not signed by a trusted Windows publisher. Continue only if you trust this release.",
@@ -5890,7 +6253,7 @@ export function App() {
     ) {
       return;
     }
-    await updater.installNow();
+    await updater.installNow(downloaded?.updatePath);
   };
 
   const startTitleBarUpdate = async () => {
@@ -5901,14 +6264,15 @@ export function App() {
     if (
       updater.status !== "available"
       || !await requestConfirmation(
-        `Download wheeljack ${updater.update?.version ?? "update"}?`,
-        "wheeljack will verify and stage the update now. It will only restart after you confirm installation.",
+        `Update wheeljack to ${updater.update?.version ?? "the latest version"}?`,
+        "wheeljack will download and verify the update, close, replace itself, and reopen.",
+        "Update now",
       )
     ) {
       return;
     }
     const downloaded = await updater.downloadNow();
-    if (downloaded) await installReadyUpdate();
+    if (downloaded) await installReadyUpdate(downloaded);
   };
 
   const commandPaletteItems: CommandPaletteItem[] = [
@@ -6052,6 +6416,14 @@ export function App() {
         void createCanvas();
       },
     }] : []),
+    {
+      id: "bots",
+      group: "Utilities",
+      label: "Open Bots",
+      keywords: ["specialists", "agents", "profiles", "roster"],
+      icon: <Briefcase />,
+      onSelect: () => showSurface("bots"),
+    },
     {
       id: "usage",
       group: "Utilities",
@@ -6235,11 +6607,31 @@ export function App() {
               showAgentRail={preferences.showAgentRail}
               showProjectPaths={preferences.showProjectPaths}
               agentReady={selectedAdapterReady}
+              bots={bots}
+              botActiveCount={botActiveCount}
+              onBots={() => setSurface("bots")}
               onAgentSettings={() => {
                 setSettingsPage("agents");
                 setSurface("settings");
               }}
             />
+          )}
+          {surface === "bots" && (
+            <Suspense fallback={<div className="wj-usage-loading" role="status">Loading bots…</div>}>
+              <BotsSurface
+                bots={bots}
+                oneOffs={recentOneOffs}
+                adapters={adapters}
+                project={project}
+                runtimes={botRuntimes}
+                loading={botsLoading}
+                onCreate={() => openCreateBot()}
+                onSave={saveBot}
+                onDelete={(profile) => void deleteSavedBot(profile).catch((cause) => setError(message(cause)))}
+                onStart={(profile) => void startSavedBot(profile)}
+                onSaveOneOff={openSaveOneOff}
+              />
+            </Suspense>
           )}
           {surface === "usage" && (
             <Suspense fallback={<div className="wj-usage-loading" role="status">Loading usage…</div>}>
@@ -6327,6 +6719,19 @@ export function App() {
                       }}>
                         <div><strong>{agentTask ? `New task ${agentTaskRole}` : "Agent options"}</strong><p>{agentTask ? "Choose a ready adapter. wheeljack will open a fresh dedicated agent in this task’s workspace." : "Leave the prompt blank to open a focused composer, or add one to start immediately."}</p></div>
                         <div className="wj-agent-creator-options">
+                          <Select value="ad-hoc" onValueChange={(value) => {
+                            if (value === "ad-hoc") return;
+                            const bot = bots.find((candidate) => candidate.id === value);
+                            if (!bot) return;
+                            setAgentCreatorOpen(false);
+                            void startSavedBot(bot);
+                          }}>
+                            <SelectTrigger aria-label="Agent or bot"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="ad-hoc">Ad hoc agent</SelectItem>
+                              {bots.map((bot) => <SelectItem key={bot.id} value={bot.id}>{bot.name} · {bot.scope === "global" ? "Global" : "Project"}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
                           <Select value={selectedAdapterId} onValueChange={selectAgentAdapter}>
                             <SelectTrigger aria-label="Structured agent adapter"><SelectValue placeholder="Choose an adapter" /></SelectTrigger>
                             <SelectContent>{adapters.filter((adapter) => adapter.id !== "generic-shell").map((adapter) => <SelectItem disabled={!isAdapterReady(adapter, adapterArgsById[adapter.id] ?? [])} key={adapter.id} value={adapter.id}><span className="wj-provider-label"><ProviderMark adapterId={adapter.id} /><span>{adapter.displayName} · {adapterReadinessLabel(adapter, adapterArgsById[adapter.id] ?? [])}</span></span></SelectItem>)}</SelectContent>
@@ -6344,7 +6749,11 @@ export function App() {
                           event.currentTarget.form?.requestSubmit();
                         }} placeholder="What should this agent work on?" />
                         <div className="flex items-center justify-between">
-                          <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => void rescanAdapters()}>Rescan adapters</Button>
+                          <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => {
+                            const launch = { initialPrompt: agentPrompt, displayPrompt: agentPrompt, opsTask: agentTask, opsRole: agentTaskRole, placement: agentPlacement };
+                            setAgentCreatorOpen(false);
+                            openCreateBot(launch);
+                          }}>Create bot</Button>
                           <Button type="submit" aria-label="Create agent" size="sm" disabled={!selectedAdapterReady}>{agentPrompt.trim() ? "Create & start" : "Create & focus"}</Button>
                         </div>
                       </form>
@@ -6462,6 +6871,7 @@ export function App() {
                       onRepair={(runtime) => repairAdapter(runtime.adapterId)}
                       onResume={(runtime) => void resumeAgent(runtime)}
                       onPrepareHandoff={prepareAgentHandoff}
+                      onSaveBot={openSaveOneOff}
                       onReviewTranscript={(runtime) => void reviewTranscript(runtime)}
                       onQueryStatus={(runtime) => void queryAgentStatus(runtime)}
                       onLoadOlderHistory={loadOlderAgentHistory}
@@ -6487,13 +6897,13 @@ export function App() {
                   {teamRailCollapsed
                     ? <div className="wj-agent-rail-stack">{terminalRailAgents.slice(0, 6).map((runtime) => {
                       const context = terminalAgentContexts[runtime.nodeId];
-                      return <ContextMenu key={runtime.nodeId}><ContextMenuTrigger asChild><button type="button" className="wj-terminal-agent-target" aria-label={`Focus ${context.label}`} onClick={() => focusAgentPane(runtime.nodeId)}><AgentAvatar id={runtime.nodeId} label={context.label} status={runtime.status} /></button></ContextMenuTrigger><ContextMenuContent className="min-w-52">{renderTerminalAgentMenu(runtime)}</ContextMenuContent></ContextMenu>;
+                      return <ContextMenu key={runtime.nodeId}><ContextMenuTrigger asChild><button type="button" className="wj-terminal-agent-target" aria-label={`Focus ${context.label}`} onClick={() => focusAgentPane(runtime.nodeId)}><AgentAvatar id={context.avatarSeed ?? runtime.nodeId} label={context.label} status={runtime.status} /></button></ContextMenuTrigger><ContextMenuContent className="min-w-52">{renderTerminalAgentMenu(runtime)}</ContextMenuContent></ContextMenu>;
                     })}</div>
                     : <div className="wj-agent-list">{terminalRailAgents.map((runtime) => {
                       const context = terminalAgentContexts[runtime.nodeId];
                       const runtimeDetail = visibleRunStateDetail(runtime.status, runtime.statusSummary);
                       return <ContextMenu key={runtime.nodeId}><ContextMenuTrigger asChild><article className="wj-agent-status" data-status={runtime.status} data-attention={context.attentionReason ? "true" : undefined}>
-                        <button type="button" className="wj-terminal-agent-target" aria-label={`Focus ${context.label}`} onClick={() => focusAgentPane(runtime.nodeId)}><AgentAvatar id={runtime.nodeId} label={context.label} status={runtime.status} /></button>
+                        <button type="button" className="wj-terminal-agent-target" aria-label={`Focus ${context.label}`} onClick={() => focusAgentPane(runtime.nodeId)}><AgentAvatar id={context.avatarSeed ?? runtime.nodeId} label={context.label} status={runtime.status} /></button>
                         <div className="min-w-0"><div><button type="button" className="wj-terminal-agent-name" onClick={() => focusAgentPane(runtime.nodeId)}>{context.label}</button><RunStateBadge status={runtime.status} variant="compact" /></div>
                           {context.card ? <button type="button" className="wj-terminal-agent-task" onClick={() => context.card && openOpsCard(context.card)}>{context.card.title}</button> : <small>Available</small>}
                           {(runtimeDetail ?? context.attentionReason) && <p className={context.attentionReason ? "waiting" : ""}>{runtimeDetail ?? context.attentionReason}</p>}
@@ -6548,6 +6958,8 @@ export function App() {
               onUpdate={updateOpsTask}
               onDelete={deleteOpsTask}
               onStartAgent={startAgentForOpsTask}
+              onSaveBot={openSaveOneOff}
+              savedBotAvatarSeeds={bots.map((bot) => bot.avatarSeed)}
               autonomousPickup={autonomousPickup}
               autonomousConcurrency={autonomousConcurrency}
               onAutonomousPickupChange={updateAutonomousPickup}
@@ -6752,6 +7164,17 @@ export function App() {
         onRequestChanges={requestReviewChanges}
         onUpdateContract={updateOpsTask}
       />
+      {specialistDialog && <Suspense fallback={null}>
+        <SpecialistProposalDialog
+          request={specialistDialog}
+          project={project}
+          adapters={adapters}
+          onDismiss={dismissSpecialistDialog}
+          onReadiness={specialistReadiness}
+          onVerify={verifySpecialist}
+          onAction={handleSpecialistAction}
+        />
+      </Suspense>}
       <AlertDialog open={Boolean(pendingDocumentWrite)} onOpenChange={(open) => !open && setPendingDocumentWrite(undefined)}>
         {pendingDocumentWrite && <ProjectDocumentReviewDialog
           key={pendingDocumentWrite.preview.previewId}
@@ -6762,7 +7185,7 @@ export function App() {
       <AlertDialog open={Boolean(confirmation)} onOpenChange={(open) => !open && completeConfirmation(false)}>
         <AlertDialogContent className="wj-dialog">
           <AlertDialogHeader><AlertDialogTitle>{confirmation?.title}</AlertDialogTitle><AlertDialogDescription>{confirmation?.message}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel onClick={() => completeConfirmation(false)}>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => completeConfirmation(true)}>Confirm</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogFooter><AlertDialogCancel onClick={() => completeConfirmation(false)}>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => completeConfirmation(true)}>{confirmation?.confirmLabel ?? "Confirm"}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
       {customizeProject && <ProjectIdentitySheet project={customizeProject} onOpenChange={(open) => !open && setCustomizeProject(undefined)} onSave={saveProjectIdentity} />}
@@ -6779,6 +7202,13 @@ export function App() {
         </AlertDialogContent>
       </AlertDialog>
     </div>
+    {updater.pendingRelease && (
+      <UpdateReleaseNotesSheet
+        open={startupReady && !onboardingVisible}
+        release={updater.pendingRelease}
+        onDismiss={updater.dismissInstalledRelease}
+      />
+    )}
     </Toast.Provider>
     </>
   );
@@ -7043,6 +7473,8 @@ async function persistNode(
     parentAgentId?: string;
     parentSessionId?: string;
     autonomyDepth?: number;
+    botSnapshot?: BotSnapshot;
+    specialistRolePending?: boolean;
     zIndex: number;
   },
 ): Promise<CanvasNode> {
@@ -7074,6 +7506,8 @@ async function persistNode(
       parentAgentId: input.parentAgentId,
       parentSessionId: input.parentSessionId,
       autonomyDepth: input.autonomyDepth ?? 0,
+      botSnapshot: input.botSnapshot as unknown as JsonObject | undefined,
+      specialistRolePending: input.specialistRolePending,
       transcript: [],
       chatPreview: [...(input.messages ?? [])].reverse().find((message) => message.text.trim())?.text.trim().slice(0, 320),
     },
@@ -7848,6 +8282,8 @@ export function parseAgentTaskCardProposals(text: string): AgentTaskCardProposal
           const reviewPolicy = typeof card.reviewPolicy === "string" ? card.reviewPolicy : "agent";
           const dependencyKeys = card.dependencyKeys ?? [];
           const existingDependencyIds = card.existingDependencyIds ?? [];
+          const workerSpecialist = specialistSuggestion(card.workerSpecialist);
+          const reviewerSpecialist = specialistSuggestion(card.reviewerSpecialist);
           if (
             typeof card.key !== "string"
             || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(card.key)
@@ -7865,6 +8301,8 @@ export function parseAgentTaskCardProposals(text: string): AgentTaskCardProposal
             || dependencyKeys.some((key) => typeof key !== "string")
             || !Array.isArray(existingDependencyIds)
             || existingDependencyIds.some((id) => typeof id !== "string")
+            || (card.workerSpecialist !== undefined && !workerSpecialist)
+            || (card.reviewerSpecialist !== undefined && !reviewerSpecialist)
           ) return [];
           return [{
             key: card.key,
@@ -7877,6 +8315,8 @@ export function parseAgentTaskCardProposals(text: string): AgentTaskCardProposal
             reviewPolicy: reviewPolicy as AgentTaskCardDraft["reviewPolicy"],
             dependencyKeys: dependencyKeys.map((key) => key.trim()),
             existingDependencyIds: existingDependencyIds.map((id) => id.trim()),
+            workerSpecialist,
+            reviewerSpecialist,
           }];
         });
         if (cards.length !== raw.cards.length || new Set(cards.map((card) => card.key)).size !== cards.length) continue;
@@ -7934,6 +8374,8 @@ export function agentTaskCardsFromProposal(
     constraints: card.constraints,
     verificationCommand: card.verificationCommand,
     reviewPolicy: card.reviewPolicy,
+    workerSpecialist: card.workerSpecialist,
+    reviewerSpecialist: card.reviewerSpecialist,
     dependencyIds: [...new Set([
       ...card.dependencyKeys.map((key) => idsByKey.get(key)!),
       ...card.existingDependencyIds,
@@ -8130,11 +8572,19 @@ export function parseOpsDecompositionProposal(line: string): OpsDecompositionPro
           expectedFiles: Array.isArray(task.expectedFiles) ? task.expectedFiles.filter((file): file is string => typeof file === "string") : [],
           dependencyKeys: Array.isArray(task.dependencyKeys) ? task.dependencyKeys.filter((key): key is string => typeof key === "string") : [],
           agentId: typeof task.agentId === "string" ? task.agentId : undefined,
+          workerSpecialist: specialistSuggestion(task.workerSpecialist),
+          reviewerSpecialist: specialistSuggestion(task.reviewerSpecialist),
         }];
       });
       const keys = new Set(tasks.map((task) => task.key));
       if (
         tasks.length !== raw.tasks.length ||
+        raw.tasks.some((candidate) => {
+          if (!candidate || typeof candidate !== "object") return true;
+          const task = candidate as Record<string, unknown>;
+          return (task.workerSpecialist !== undefined && !specialistSuggestion(task.workerSpecialist))
+            || (task.reviewerSpecialist !== undefined && !specialistSuggestion(task.reviewerSpecialist));
+        }) ||
         keys.size !== tasks.length ||
         tasks.some((task) => task.dependencyKeys.some((key) => !keys.has(key) || key === task.key)) ||
         opsDecompositionHasCycle(tasks)

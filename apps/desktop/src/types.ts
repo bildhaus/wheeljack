@@ -179,6 +179,56 @@ export interface AgentProfile {
   approvalPolicy: string;
 }
 
+export type BotScope = "global" | "project";
+
+export interface BotLaunch {
+  adapterId: string;
+  provider?: string;
+  model?: string;
+  thinking?: AgentEffort;
+}
+
+export interface BotProfile {
+  id: string;
+  scope: BotScope;
+  projectId?: string;
+  name: string;
+  roleDescription: string;
+  avatarSeed: string;
+  launch: BotLaunch;
+  launchCount: number;
+  lastUsedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BotProfileInput {
+  id?: string;
+  scope: BotScope;
+  projectId?: string;
+  name: string;
+  roleDescription: string;
+  avatarSeed?: string;
+  launch: BotLaunch;
+}
+
+export interface AgentSpecialistSuggestion {
+  name: string;
+  roleDescription: string;
+  rationale: string;
+  adapterId?: string;
+}
+
+export interface BotSnapshot {
+  profileId?: string;
+  scope?: BotScope;
+  source: "saved" | "one-off";
+  name: string;
+  roleDescription: string;
+  avatarSeed: string;
+  launch: BotLaunch;
+}
+
 export interface SessionTranscriptPage extends SessionTranscript {
   totalChunkCount: number;
   startSeq?: number;
@@ -334,6 +384,8 @@ export interface OpsCard {
   taskLane?: OpsTaskLane;
   runProgress?: OpsRunProgress;
   steeringDirective?: OpsSteeringDirective;
+  workerSpecialist?: AgentSpecialistSuggestion;
+  reviewerSpecialist?: AgentSpecialistSuggestion;
 }
 
 export type OpsRunStepState = "pending" | "running" | "blocked" | "done" | "failed";
@@ -401,6 +453,8 @@ export interface OpsDecompositionTaskDraft {
   expectedFiles: string[];
   dependencyKeys: string[];
   agentId?: string;
+  workerSpecialist?: AgentSpecialistSuggestion;
+  reviewerSpecialist?: AgentSpecialistSuggestion;
 }
 
 export interface OpsDecompositionProposal {
@@ -436,6 +490,7 @@ export interface OpsTaskEvent {
   files?: string[];
   status?: string;
   runId?: string;
+  botSnapshot?: BotSnapshot;
 }
 
 export type OpsOrchestrationAction = "assign" | "transfer" | "resume" | "review" | "pause" | "release" | "approve" | "complete";
@@ -716,6 +771,7 @@ export interface TerminalFrame {
 
 export interface PaneRuntime {
   nodeId: string;
+  botProfileId?: string;
   sessionId: string;
   terminalSessionId?: string;
   historySessionId: string;
