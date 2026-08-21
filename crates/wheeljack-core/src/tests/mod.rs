@@ -4,6 +4,7 @@ mod adapters;
 mod agent_control;
 mod agent_protocol;
 mod bento;
+mod bots;
 mod canvas;
 mod coordination;
 mod core_init;

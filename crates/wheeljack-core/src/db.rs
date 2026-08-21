@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 14;
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 16;
 type Migration = (i32, fn(&Connection) -> Result<()>);
 const SQLITE_WRITE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(25),
@@ -259,7 +259,9 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
         (11, remove_duplicate_agent_chat),
         (12, add_ops_runtime),
         (13, add_canvas_layout_mode),
-        (LATEST_SCHEMA_VERSION, add_usage_ledger),
+        (14, add_usage_ledger),
+        (15, add_bot_profiles),
+        (LATEST_SCHEMA_VERSION, migrate_interim_bot_profiles),
     ];
     for (version, migration) in migrations {
         if current_version >= *version {
@@ -741,6 +743,97 @@ fn add_adapter_verification_profile(connection: &Connection) -> Result<()> {
         "launch_fingerprint",
         "TEXT NOT NULL DEFAULT ''",
     )
+}
+
+fn add_bot_profiles(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS bot_profiles (
+          id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL CHECK (scope IN ('global', 'project')),
+          project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          role_description TEXT NOT NULL,
+          avatar_seed TEXT NOT NULL,
+          launch_json TEXT NOT NULL,
+          launch_count INTEGER NOT NULL DEFAULT 0 CHECK (launch_count >= 0),
+          last_used_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK (
+            (scope = 'global' AND project_id IS NULL) OR
+            (scope = 'project' AND project_id IS NOT NULL)
+          )
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_profiles_scope_name
+        ON bot_profiles(scope, COALESCE(project_id, ''), name COLLATE NOCASE);
+
+        CREATE INDEX IF NOT EXISTS idx_bot_profiles_project_updated
+        ON bot_profiles(project_id, updated_at DESC);
+
+        ALTER TABLE adapter_verifications RENAME TO adapter_verifications_v14;
+
+        CREATE TABLE adapter_verifications (
+          adapter_id TEXT NOT NULL,
+          executable_path TEXT NOT NULL,
+          version TEXT,
+          verified_at TEXT NOT NULL,
+          verified_args_json TEXT NOT NULL DEFAULT '[]',
+          launch_fingerprint TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY (adapter_id, launch_fingerprint)
+        );
+
+        INSERT OR REPLACE INTO adapter_verifications
+          (adapter_id, executable_path, version, verified_at, verified_args_json, launch_fingerprint)
+        SELECT adapter_id, executable_path, version, verified_at, verified_args_json, launch_fingerprint
+        FROM adapter_verifications_v14;
+
+        DROP TABLE adapter_verifications_v14;
+        "#,
+    )?;
+    Ok(())
+}
+
+fn migrate_interim_bot_profiles(connection: &Connection) -> Result<()> {
+    let has_legacy_table = table_exists(connection, "coworker_profiles")?;
+    let has_bot_table = table_exists(connection, "bot_profiles")?;
+
+    if has_legacy_table && has_bot_table {
+        bail!(
+            "database contains both coworker_profiles and bot_profiles; refusing to merge profile data automatically"
+        );
+    }
+
+    if has_legacy_table {
+        connection.execute_batch(
+            r#"
+            ALTER TABLE coworker_profiles RENAME TO bot_profiles;
+            DROP INDEX IF EXISTS idx_coworker_profiles_scope_name;
+            DROP INDEX IF EXISTS idx_coworker_profiles_project_updated;
+            "#,
+        )?;
+    }
+
+    connection.execute_batch(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_profiles_scope_name
+        ON bot_profiles(scope, COALESCE(project_id, ''), name COLLATE NOCASE);
+
+        CREATE INDEX IF NOT EXISTS idx_bot_profiles_project_updated
+        ON bot_profiles(project_id, updated_at DESC);
+        "#,
+    )?;
+    Ok(())
+}
+
+fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
+    let count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 fn ensure_table_column(

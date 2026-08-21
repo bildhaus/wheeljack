@@ -6,11 +6,13 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from "./components/ui/dropdown-menu";
-import { LayoutDashboard, MonitorCog, RefreshCw, Terminal } from "./SargamIcon";
-import type { OpsCard, PaneRuntime } from "./types";
+import { Briefcase, LayoutDashboard, MonitorCog, RefreshCw, Terminal } from "./SargamIcon";
+import type { BotSnapshot, OpsCard, PaneRuntime } from "./types";
 
 export interface TerminalAgentContext {
   label: string;
+  avatarSeed?: string;
+  botSnapshot?: BotSnapshot;
   card?: OpsCard;
   attentionReason?: string;
 }
@@ -28,6 +30,7 @@ export function PaneAgentMenuItems({
   onOpenOpsCard,
   onResume,
   onPrepareHandoff,
+  onSaveBot,
   onReviewTranscript,
   onQueryStatus,
 }: {
@@ -39,6 +42,7 @@ export function PaneAgentMenuItems({
   onOpenOpsCard: (card: OpsCard) => void;
   onResume: () => void;
   onPrepareHandoff: () => void;
+  onSaveBot?: (snapshot: BotSnapshot) => void;
   onReviewTranscript: () => void;
   onQueryStatus: () => void;
 }) {
@@ -52,6 +56,7 @@ export function PaneAgentMenuItems({
         {["failed", "disconnected"].includes(runtime.status) && <Item onSelect={onResume}><RefreshCw />Resume session</Item>}
         <Separator />
       </>}
+      {agentContext?.botSnapshot?.source === "one-off" && onSaveBot && <Item onSelect={() => onSaveBot(agentContext.botSnapshot!)}><Briefcase />Save as bot</Item>}
       {["running", "starting", "needs_input"].includes(runtime.status) && <Item onSelect={onPrepareHandoff}>Prepare handoff</Item>}
       <Item onSelect={onReviewTranscript}>Review transcript</Item>
       <Item onSelect={onQueryStatus}><RefreshCw />Refresh status</Item>

@@ -96,7 +96,6 @@ import {
 } from "./components/ui/dropdown-menu";
 import { Input } from "./components/ui/input";
 import { Label } from "./components/ui/label";
-import { Progress } from "./components/ui/progress";
 import { ScrollArea } from "./components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "./components/ui/sheet";
@@ -146,6 +145,12 @@ import { activeVsCodeThemeName, parseImportedThemeDocument, type ThemeImportResu
 import { discoverVsCodeThemes, readThemeDocument, writeThemeDocument, type VsCodeThemeSource } from "./core";
 import type { UpdateController } from "./updater";
 import {
+  formatUpdateDate,
+  UpdateProgressView,
+  updateAttentionLabel,
+  updateStatusLabel,
+} from "./UpdaterPresentation";
+import {
   bindingFromKeyboardEvent,
   defaultShortcutBindings,
   formatShortcut,
@@ -164,6 +169,8 @@ import type {
   AgentControlAudit,
   AgentProfile,
   CanvasNode,
+  BotProfile,
+  BotSnapshot,
   GitDiff,
   GitStatus,
   OpsCard,
@@ -184,7 +191,7 @@ import type {
   UtilityPanelTab,
 } from "./types";
 
-export type ShellSurface = "home" | "usage" | "terminal" | "ops" | "settings";
+export type ShellSurface = "home" | "bots" | "usage" | "terminal" | "ops" | "settings";
 type ProjectSurface = Extract<ShellSurface, "terminal" | "ops">;
 export type OpsPage = "floor" | "board" | "spec";
 export type SettingsPage = "appearance" | "workspace" | "shortcuts" | "agents" | "application";
@@ -472,6 +479,8 @@ export function TitleBar({
   const title =
     surface === "home"
       ? "Home"
+      : surface === "bots"
+        ? "Bots"
       : surface === "usage"
         ? "API Usage"
       : surface === "settings"
@@ -501,7 +510,6 @@ export function TitleBar({
         {!onboarding && project && projectSurface && <nav className="wj-title-navigation" aria-label="Project navigation"><ProjectModeSwitch surface={projectSurface} onSurface={onSurface} page={opsPage} onPage={onOpsPage} /></nav>}
       </div>
       <div className="wj-title-actions">
-        {!onboarding && (
         <div className="wj-title-utilities">
           {updateActionVisible && (
             <Tooltip>
@@ -517,22 +525,23 @@ export function TitleBar({
                 >
                   {updater.status === "downloading" || updater.status === "installing"
                     ? <DotMatrixLoader size={18} />
-                    : <RefreshCw />}
+                    : updater.status === "available"
+                      ? <Cloud />
+                      : <RefreshCw />}
                 </Button>
               </TooltipTrigger>
               <TooltipContent>{updateLabel}</TooltipContent>
             </Tooltip>
           )}
-          <TitleAction label="Inbox" ariaLabel={`Inbox, ${inboxCount} ${inboxCount === 1 ? "item" : "items"} need attention`} pressed={utilityPanelOpen && utilityPanelTab === "inbox"} onClick={() => onUtilityPanel("inbox")}>
+          {!onboarding && <><TitleAction label="Inbox" ariaLabel={`Inbox, ${inboxCount} ${inboxCount === 1 ? "item" : "items"} need attention`} pressed={utilityPanelOpen && utilityPanelTab === "inbox"} onClick={() => onUtilityPanel("inbox")}>
             <span className="relative inline-flex items-center justify-center">
               <Bell />
               {inboxCount > 0 && <Badge className="wj-count-badge">{inboxCount}</Badge>}
             </span>
           </TitleAction>
           <TitleAction label="Git" pressed={utilityPanelOpen && utilityPanelTab === "git"} onClick={() => onUtilityPanel("git")}><GitBranch /></TitleAction>
-          <TitleAction label="History" pressed={utilityPanelOpen && utilityPanelTab === "history"} onClick={() => onUtilityPanel("history")}><History /></TitleAction>
+          <TitleAction label="History" pressed={utilityPanelOpen && utilityPanelTab === "history"} onClick={() => onUtilityPanel("history")}><History /></TitleAction></>}
         </div>
-        )}
         <div className="wj-window-actions">
           <Button aria-label="Minimize window" variant="ghost" className={windowIconButton} onClick={() => void getCurrentWindow().minimize()}><Minus /></Button>
           <Button aria-label="Maximize or restore window" variant="ghost" className={windowIconButton} onClick={() => void getCurrentWindow().toggleMaximize()}><Maximize2 className="size-3" /></Button>
@@ -551,27 +560,6 @@ function TitleAction({ label, ariaLabel = label, pressed, onClick, children }: {
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
-  );
-}
-
-function UpdateProgressView({ updater }: { updater: UpdateController }) {
-  const progress = updater.progress;
-  const total = progress?.totalBytes;
-  const percent = updater.status === "downloading" && total && total > 0
-    ? Math.min(100, Math.round(((progress?.downloadedBytes ?? 0) / total) * 100))
-    : undefined;
-  const label = updater.status === "installing"
-    ? "Installing update"
-    : percent === undefined
-      ? "Downloading update"
-      : `Downloading update, ${percent}%`;
-  return (
-    <div className="space-y-1.5">
-      <Progress value={percent} aria-label={label} aria-valuetext={label} />
-      <small className="text-muted-foreground">
-        {label}{progress?.phase ? ` · ${progress.phase}` : ""}
-      </small>
-    </div>
   );
 }
 
@@ -703,6 +691,7 @@ export function ProjectSidebar({
       <ScrollArea className="min-h-0 flex-1">
         <nav aria-label="Project navigation" className="wj-sidebar-nav">
           <SidebarButton collapsed={collapsed} active={surface === "home"} label="Home" icon={<Home />} onClick={() => onSurface("home")} />
+          <SidebarButton collapsed={collapsed} active={surface === "bots"} label="Bots" icon={<Briefcase />} onClick={() => onSurface("bots")} />
           <SidebarButton collapsed={collapsed} active={surface === "usage"} label="Usage" icon={<Activity />} onClick={() => onSurface("usage")} />
           {collapsed
             ? <SidebarButton collapsed label={loading ? "Loading projects" : "Open folder"} icon={loading ? <DotMatrixLoader variant="boot" size={16} /> : <Plus />} disabled={loading} loading={loading} onClick={onOpen} />
@@ -823,6 +812,9 @@ export function HomeSurface({
   showProjectPaths,
   agentReady,
   onAgentSettings,
+  bots,
+  botActiveCount,
+  onBots,
 }: {
   projects: Project[];
   sessions: Session[];
@@ -849,6 +841,9 @@ export function HomeSurface({
   showProjectPaths: boolean;
   agentReady: boolean;
   onAgentSettings: () => void;
+  bots: BotProfile[];
+  botActiveCount: number;
+  onBots: () => void;
 }) {
   const live = sessions.filter((session) => session.status === "running");
   if (!loading && projects.length === 0) {
@@ -882,6 +877,14 @@ export function HomeSurface({
             </CardContent>
           </Card>
         )}
+        <button type="button" className="wj-home-bots" onClick={onBots}>
+          <span className="wj-home-bots-avatars">
+            {bots.slice(0, 5).map((bot) => <AgentAvatar key={bot.id} id={bot.avatarSeed} label={bot.name} status="idle" />)}
+            {bots.length === 0 && <span className="wj-home-bots-empty"><Briefcase /></span>}
+          </span>
+          <span><strong>Bots</strong><small>{bots.length ? `${bots.length} saved · ${botActiveCount} active` : "Create reusable specialist profiles"}</small></span>
+          <ChevronRight />
+        </button>
         {projects.length > 0 && <section className="wj-command-row" aria-label="Quick starts">
           <button className="wj-quick-launch" disabled={!agentReady} onClick={onResearch}><Search /><span><strong>Research</strong><small>Spawn a research lane and turn findings into scoped tasks.</small></span></button>
           <button className="wj-quick-launch" disabled={!agentReady} onClick={onBootstrapPlan}><LayoutDashboard /><span><strong>Bootstrap plan</strong><small>Analyze this project and propose PRD, TDD, and Kanban files together.</small></span></button>
@@ -1200,6 +1203,8 @@ export function OpsSurface({
   onUpdate,
   onDelete,
   onStartAgent,
+  onSaveBot,
+  savedBotAvatarSeeds,
   autonomousPickup,
   autonomousConcurrency,
   onAutonomousPickupChange,
@@ -1264,6 +1269,8 @@ export function OpsSurface({
   onUpdate: (card: OpsCard, change: OpsTaskEditablePatch) => void;
   onDelete: (card: OpsCard) => void;
   onStartAgent: (card: OpsCard) => Promise<boolean>;
+  onSaveBot: (snapshot: BotSnapshot) => void;
+  savedBotAvatarSeeds: string[];
   autonomousPickup: boolean;
   autonomousConcurrency: number;
   onAutonomousPickupChange: (enabled: boolean) => void;
@@ -1406,6 +1413,9 @@ export function OpsSurface({
   const inspectedTaskLaneLive = inspectedCard?.assigneeIds.some((id) => runtimes.some((runtime) =>
     runtime.nodeId === id && !isTerminalSessionStatus(runtime.status))) ?? false;
   const inspectedTimeline = inspectedCard ? opsTaskTimeline(inspectedCard, Object.values(nodes)) : [];
+  const inspectedOneOff = [...(inspectedCard?.events ?? [])].reverse().find((event) =>
+    event.botSnapshot?.source === "one-off"
+    && !savedBotAvatarSeeds.includes(event.botSnapshot.avatarSeed))?.botSnapshot;
   const recoveryRole = recoveryCard ? roleByColumnId.get(recoveryCard.columnId) ?? "queued" : "queued";
   const recoveryConflictFiles = recoveryCard
     ? fileConflicts.filter((conflict) => conflict.cardIds.includes(recoveryCard.id)).map((conflict) => conflict.file)
@@ -2378,6 +2388,7 @@ export function OpsSurface({
               </section>
             </ScrollArea>
             <footer className="wj-execution-inspector-actions">
+              {inspectedOneOff && <Button variant="outline" onClick={() => { setInspectedCardId(undefined); onSaveBot(inspectedOneOff); }}><Briefcase />Save bot</Button>}
               {inspectedRole === "done"
                 ? inspectedCard.taskLane && !inspectedCard.taskLane.closedAt && !inspectedTaskLaneLive
                   ? <Button variant="outline" onClick={() => onRemoveTaskLane(inspectedCard)}><Trash2 />Remove worktree</Button>
@@ -3049,6 +3060,10 @@ export function SettingsSurface({
       setThemeStatus(cause instanceof Error ? cause.message : String(cause));
     }
   };
+  const updateAttention = updateAttentionLabel(updater);
+  const updateStatus = updateStatusLabel(updater);
+  const latestVersion = updater.update?.version
+    ?? (updater.status === "up-to-date" ? coreVersion : undefined);
   return (
     <section className="flex h-full min-h-0 flex-col bg-background">
       <div className="wj-settings-header">
@@ -3059,7 +3074,10 @@ export function SettingsSurface({
             <TabsTrigger value="workspace">Workspace</TabsTrigger>
             <TabsTrigger value="shortcuts">Shortcuts</TabsTrigger>
             <TabsTrigger value="agents">Agents</TabsTrigger>
-            <TabsTrigger value="application">Application</TabsTrigger>
+            <TabsTrigger value="application">
+              Application
+              {updateAttention && <Badge className="ml-2" variant={updateAttention === "Error" ? "destructive" : "outline"}>{updateAttention}</Badge>}
+            </TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
@@ -3222,21 +3240,37 @@ export function SettingsSurface({
               </SettingsCard>
               <SettingsCard
                 title="Updates"
-                description="Updates can download automatically, but wheeljack only installs after you restart it."
-                action={<Badge variant={updater.status === "error" ? "destructive" : "outline"}>{updater.status}</Badge>}
+                description="wheeljack can check and stage verified updates automatically. Installing an update always requires your confirmation and restarts the app."
+                action={<Badge variant={updateAttention === "Error" ? "destructive" : "outline"}>{updateStatus}</Badge>}
               >
                 <div className="space-y-3" aria-live="polite">
                   <p className="text-sm" role="status">
-                    {updater.update
-                      ? `wheeljack ${updater.update.version} is ${updater.status === "ready" ? "ready to install" : "available"}.`
-                      : updater.status === "up-to-date"
-                        ? "wheeljack is up to date."
-                        : updater.status === "disabled"
-                          ? "Updates are disabled in development builds."
-                          : "Check GitHub Releases for an update."}
+                    {updater.recoveryError
+                      ? "wheeljack rolled back the previous update because the new build did not start successfully."
+                      : updater.error
+                        ? "wheeljack could not complete the last update action. You can retry safely."
+                        : updater.update
+                          ? `wheeljack ${updater.update.version} is ${updater.status === "ready" ? "ready to install" : updater.status === "downloading" ? "downloading" : "available"}.`
+                          : updater.status === "up-to-date"
+                            ? "wheeljack is up to date."
+                            : updater.status === "disabled"
+                              ? "Updates are disabled in development builds."
+                              : "Check for the latest release when you’re ready."}
                   </p>
+                  <dl className="grid gap-2 rounded-md border p-3 text-sm">
+                    <div className="flex items-center justify-between gap-4"><dt className="text-muted-foreground">Current version</dt><dd><code>{coreVersion ?? "Connecting…"}</code></dd></div>
+                    <div className="flex items-center justify-between gap-4"><dt className="text-muted-foreground">Latest version</dt><dd><code>{latestVersion ?? "Not checked"}</code></dd></div>
+                    <div className="flex items-center justify-between gap-4"><dt className="text-muted-foreground">Last checked</dt><dd>{formatUpdateDate(updater.lastCheckedAt)}</dd></div>
+                    {updater.update?.publishedAt && <div className="flex items-center justify-between gap-4"><dt className="text-muted-foreground">Published</dt><dd>{formatUpdateDate(updater.update.publishedAt)}</dd></div>}
+                  </dl>
                   {(updater.status === "downloading" || updater.status === "installing") && (
                     <UpdateProgressView updater={updater} />
+                  )}
+                  {updater.update?.notes && (
+                    <details className="rounded-md border p-3">
+                      <summary className="cursor-pointer text-sm font-medium">Release notes</summary>
+                      <div className="agent-prose mt-3"><Markdown skipHtml>{updater.update.notes}</Markdown></div>
+                    </details>
                   )}
                   <div className="flex flex-wrap gap-2">
                     <Button
@@ -3266,7 +3300,7 @@ export function SettingsSurface({
                     />
                     <ToggleSetting
                       label="Automatically download updates"
-                      description="Stage verified updates without restarting the app."
+                      description="Download verified updates after automatic checks without restarting the app."
                       checked={updater.automaticDownload}
                       onChecked={updater.setAutomaticDownload}
                     />

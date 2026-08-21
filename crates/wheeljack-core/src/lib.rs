@@ -41,6 +41,7 @@ mod adapters;
 mod agent_control;
 mod agent_protocol;
 mod bento_layout;
+mod bots;
 mod canvas_store;
 mod coordination;
 mod db;
@@ -77,6 +78,7 @@ use agent_protocol::{
     parse_agent_protocol_request, reduce_agent_stream_events, AgentProtocolStreamState,
 };
 use bento_layout::build_bento_layout;
+use bots::{delete_bot, list_bots, upsert_bot};
 #[cfg(test)]
 use canvas_store::MAX_PERSISTED_TRANSCRIPT_CHUNKS;
 use canvas_store::{
@@ -1037,6 +1039,9 @@ impl Core {
                 .callsign_panel_input_route(payload)
                 .map_err(CommandError::failed),
             "project_list" => self.project_list().map_err(CommandError::failed),
+            "bot_list" => self.bot_list(payload).map_err(CommandError::failed),
+            "bot_upsert" => self.bot_upsert(payload).map_err(CommandError::failed),
+            "bot_delete" => self.bot_delete(payload).map_err(CommandError::failed),
             "project_get" => self.project_get(payload).map_err(CommandError::failed),
             "project_open" => self.project_open(payload).map_err(CommandError::failed),
             "project_update" => self.project_update(payload).map_err(CommandError::failed),
@@ -1487,6 +1492,27 @@ impl Core {
         })?;
         let projects = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(serde_json::to_value(projects)?)
+    }
+
+    fn bot_list(&self, payload: Value) -> Result<Value> {
+        let project_id = payload
+            .get("projectId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        let db = self.lock_db()?;
+        Ok(serde_json::to_value(list_bots(&db, project_id)?)?)
+    }
+
+    fn bot_upsert(&self, payload: Value) -> Result<Value> {
+        let request = serde_json::from_value::<BotUpsertRequest>(payload)?;
+        let db = self.lock_db()?;
+        Ok(serde_json::to_value(upsert_bot(&db, request)?)?)
+    }
+
+    fn bot_delete(&self, payload: Value) -> Result<Value> {
+        let bot_id = required_str(&payload, "botId")?;
+        let db = self.lock_db()?;
+        Ok(json!({ "deleted": delete_bot(&db, bot_id)? }))
     }
 
     fn project_get(&self, payload: Value) -> Result<Value> {
