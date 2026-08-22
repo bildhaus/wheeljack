@@ -175,6 +175,10 @@ describe("workflow ownership contract", () => {
     const site = await readFile(join(import.meta.dirname, "../.github/workflows/site.yml"), "utf8");
     expect(site).toContain("github.ref == 'refs/heads/main'");
     expect(site).toContain("vars.PUBLIC_SITE_ENABLED == 'true'");
+    expect(site).toContain("needs.release.outputs.published == 'true'");
+    expect(site).toContain('gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag"');
+    expect(site).toContain('jq -r .draft');
+    expect(site).toContain('jq -r .prerelease');
     expect(site).toContain("name: site-production");
     expect(site).toContain("--project-name wheeljack --branch main");
     expect(site).toContain("CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}");

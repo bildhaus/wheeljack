@@ -19,9 +19,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release:
+    name: Resolve public release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      published: ${{ steps.release.outputs.published }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - id: release
+        name: Match the public release to VERSION
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$(tr -d '\r\n' < VERSION)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" 2>/dev/null)" &&
+             [[ "$(jq -r .draft <<<"$release_json")" == "false" ]] &&
+             [[ "$(jq -r .prerelease <<<"$release_json")" == "false" ]]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "Matching public release $tag is not available; production deployment remains gated."
+          fi
+
   deploy:
     name: Deploy
-    if: github.ref == 'refs/heads/main' && vars.PUBLIC_SITE_ENABLED == 'true'
+    needs: release
+    if: github.ref == 'refs/heads/main' && vars.PUBLIC_SITE_ENABLED == 'true' && needs.release.outputs.published == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:

@@ -128,8 +128,10 @@ conflicting assets are never changed. Publish the verified draft manually so
 partial releases never reach the app's `/releases/latest` check.
 
 Site changes on `main` deploy `apps/site/dist` to the Cloudflare Pages project
-through the main-only `site-production` environment. Deployment remains disabled
-unless the `PUBLIC_SITE_ENABLED` repository variable is exactly `true`.
+through the main-only `site-production` environment only after `vVERSION` is a
+published, non-prerelease GitHub Release. Deployment remains disabled unless the
+`PUBLIC_SITE_ENABLED` repository variable is exactly `true`; release-bearing
+promotions dispatch the site workflow again after publication.
 
 ## Contributing and support
 
