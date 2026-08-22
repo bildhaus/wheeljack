@@ -16,7 +16,6 @@ import {
   CircleDot,
   Columns2,
   Cloud,
-  DragIndicator,
   FileCode2,
   Files,
   Flag,
@@ -1848,7 +1847,7 @@ export function OpsSurface({
                               >
                               {latestEvent && eventFlashes[card.id] === latestEvent.id && <span className="wj-task-event-flash" data-kind={latestEvent.kind} key={latestEvent.id} />}
                               <div
-                                className={`wj-task-card-bar ${showCardMeta ? "" : "quiet"}`}
+                                className="wj-task-card-bar"
                                 data-draggable={boardWritable && !editing || undefined}
                                 title={boardWritable && !editing ? `Drag ${card.title} to another workflow stage` : undefined}
                                 onClick={(event) => event.stopPropagation()}
@@ -1905,7 +1904,7 @@ export function OpsSurface({
                                   {card.priority !== "normal" && <span className="wj-task-priority">{card.priority}</span>}
                                   {!showCardMeta && <span className="sr-only">Drag task</span>}
                                 </span>
-                                {boardWritable && !editing && <span className="wj-task-drag-indicator"><DragIndicator /></span>}
+                                {boardWritable && !editing && <span aria-hidden="true" className="wj-task-drag-rail"><span>Move</span></span>}
                               </div>
                               <CardHeader
                                 className={!editing ? "wj-task-summary" : undefined}
