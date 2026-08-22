@@ -278,7 +278,7 @@ test("keeps live reasoning compact within the turn activity disclosure", async (
   expect(completedReasoning.getAttribute("aria-expanded")).toBe("true");
 });
 
-test("rolls alternating progress, reasoning, and tools into one completed turn activity", async () => {
+test("keeps assistant messages visible while grouping only explicit turn activity", async () => {
   const user = userEvent.setup();
   renderChat({
     status: "completed",
@@ -294,12 +294,17 @@ test("rolls alternating progress, reasoning, and tools into one completed turn a
     ],
   });
 
-  const activity = screen.getByRole("button", { name: /Activity.*3 tools used.*2 updates.*Completed/i });
+  const firstUpdate = screen.getByText("I’ll inspect the command boundary next.");
+  const secondUpdate = screen.getByText("The decoder contract is the blocker.");
+  expect(firstUpdate.closest('[data-chat-part="answer"]')).not.toBeNull();
+  expect(secondUpdate.closest('[data-chat-part="answer"]')).not.toBeNull();
+  const activity = screen.getByRole("button", { name: /Activity.*3 tools used.*Completed/i });
+  expect(activity.textContent).not.toContain("updates");
   expect(screen.getAllByRole("button", { name: /Activity/i })).toHaveLength(1);
   expect(screen.getByText("Implemented the decoder-boundary coverage.")).toBeTruthy();
   await user.click(activity);
-  expect(screen.getByText("I’ll inspect the command boundary next.")).toBeTruthy();
-  expect(screen.getByText("The decoder contract is the blocker.")).toBeTruthy();
+  expect(screen.getByText("Read the task")).toBeTruthy();
+  expect(screen.getByText("Compare signatures")).toBeTruthy();
 });
 
 test("loads durable earlier history on demand", async () => {

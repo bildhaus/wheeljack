@@ -190,7 +190,7 @@ export function AgentMessageContent({ text, streaming = false }: { text: string;
 }
 
 function isProgressUpdate(item: AgentMessage): boolean {
-  return item.kind === "commentary" || (item.role === "assistant" && item.kind === "message");
+  return item.kind === "commentary";
 }
 
 function AgentActivityMessage({ items, active }: { items: AgentMessage[]; active: boolean }) {
@@ -983,27 +983,30 @@ export const AgentChat = memo(AgentChatComponent);
 
 function isActivityMessage(messages: AgentMessage[], index: number): boolean {
   const item = messages[index];
-  if (["commentary", "reasoning", "tool"].includes(item.kind)) return true;
-  return isProgressUpdate(item) && !item.streaming && ["commentary", "reasoning", "tool"].includes(messages[index + 1]?.kind);
+  return ["commentary", "reasoning", "tool"].includes(item.kind);
 }
 
 export function groupAgentMessages(messages: AgentMessage[]): Array<AgentMessage | AgentMessage[]> {
   const grouped: Array<AgentMessage | AgentMessage[]> = [];
+  let activityGroup: AgentMessage[] | undefined;
   messages.forEach((item, index) => {
     if (!isActivityMessage(messages, index)) {
       grouped.push(item);
+      if (item.role === "user") activityGroup = undefined;
       return;
     }
-    const previous = grouped.at(-1);
-    const previousItem = Array.isArray(previous) ? previous.at(-1) : undefined;
-    if (Array.isArray(previous) && item.kind === "tool" && previousItem?.kind === "tool" && /-agent-\d+-tool$/.test(item.id)) {
-      previous[previous.length - 1] = {
+    if (!activityGroup) {
+      activityGroup = [];
+      grouped.push(activityGroup);
+    }
+    const previousItem = activityGroup.at(-1);
+    if (item.kind === "tool" && previousItem?.kind === "tool" && /-agent-\d+-tool$/.test(item.id)) {
+      activityGroup[activityGroup.length - 1] = {
         ...previousItem,
         text: `${previousItem.text}${item.text}`,
         streaming: Boolean(previousItem.streaming && item.streaming),
       };
-    } else if (Array.isArray(previous)) previous.push(item);
-    else grouped.push([item]);
+    } else activityGroup.push(item);
   });
   return grouped;
 }
