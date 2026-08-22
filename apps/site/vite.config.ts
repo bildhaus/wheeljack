@@ -3,11 +3,18 @@ import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 
 const notFoundPage = readFileSync(new URL("./public/404.html", import.meta.url));
+const wheeljackVersion = readFileSync(new URL("../../VERSION", import.meta.url), "utf8").trim();
 
 export default defineConfig({
   appType: "mpa",
   plugins: [
     react(),
+    {
+      name: "wheeljack-version-html",
+      transformIndexHtml(html) {
+        return html.replaceAll("%WHEELJACK_VERSION%", wheeljackVersion);
+      },
+    },
     {
       name: "wheeljack-preview-404",
       configurePreviewServer(server) {
@@ -21,6 +28,9 @@ export default defineConfig({
       },
     },
   ],
+  define: {
+    __WHEELJACK_VERSION__: JSON.stringify(wheeljackVersion),
+  },
   clearScreen: false,
   server: {
     strictPort: true,

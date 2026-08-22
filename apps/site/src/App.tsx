@@ -1,10 +1,9 @@
 import { useGSAP } from "@gsap/react";
 import { createAvatarRecipe, defineShatzAvatar } from "@oshtz/shatz-avatars";
-import { Dithering, PaperTexture } from "@paper-design/shaders-react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { ReactLenis, type LenisRef } from "lenis/react";
-import { createElement, lazy, Suspense, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { createElement, lazy, Suspense, useEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import addIcon from "sargam-icons/Icons/Line/si_Add.svg";
 import aiMonitorIcon from "sargam-icons/Icons/Line/si_AI_monitor.svg";
 import arrowRightSquareIcon from "sargam-icons/Icons/Line/si_Arrow_right_square.svg";
@@ -31,10 +30,16 @@ defineShatzAvatar();
 const downloadsLive = true;
 const paperField = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Cpath fill='%23f3f2ee' d='M0 0h8v8H0z'/%3E%3C/svg%3E";
 const WjHeroModel = lazy(() => import("./WjHeroModel"));
+const DitherEffect = lazy(async () => ({ default: (await import("./PaperEffects")).DitherEffect }));
+const PaperTextureEffect = lazy(async () => ({ default: (await import("./PaperEffects")).PaperTextureEffect }));
+const BotsFeatureSurface = lazy(() => import("./BotsFeatureSurface"));
+const ProductDepthSection = lazy(() => import("./ProductDepthSection"));
 
 const downloads = {
   windows: "https://github.com/bildhaus/wheeljack/releases/latest/download/wheeljack-windows-x64-portable.exe",
   macos: "https://github.com/bildhaus/wheeljack/releases/latest/download/wheeljack-macos-universal.dmg",
+  release: "https://github.com/bildhaus/wheeljack/releases/latest",
+  checksums: "https://github.com/bildhaus/wheeljack/releases/latest/download/SHA256SUMS.txt",
 };
 
 const integrations = [
@@ -80,7 +85,14 @@ const features = [
     lead: "Evidence before delivery.",
     detail: "See changed files, handoff notes, acceptance criteria, and checks before work is marked complete.",
   },
+  {
+    id: "bots",
+    title: "Bots",
+    lead: "Save the specialists worth keeping.",
+    detail: "Create reusable project or global profiles with a standing role, agent, model, effort, and an immutable launch snapshot.",
+  },
 ] as const;
+
 
 const workflowCards = [
   {
@@ -107,7 +119,7 @@ export function App() {
   const pageRef = useRef<HTMLDivElement>(null);
   const [activeFeature, setActiveFeature] = useState<number | null>(null);
   const [smoothScroll, setSmoothScroll] = useState(() => !window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-  const [showHeroModel, setShowHeroModel] = useState(() => !window.matchMedia("(max-width: 580px)").matches);
+  const [showHeroModel, setShowHeroModel] = useState(false);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -117,10 +129,40 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const media = window.matchMedia("(max-width: 580px)");
-    const syncPreference = () => setShowHeroModel(!media.matches);
-    media.addEventListener("change", syncPreference);
-    return () => media.removeEventListener("change", syncPreference);
+    const desktop = window.matchMedia("(min-width: 581px)");
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const connection = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string; addEventListener?: (type: string, listener: () => void) => void; removeEventListener?: (type: string, listener: () => void) => void } }).connection;
+    let idleHandle: number | undefined;
+    let timeoutHandle: number | undefined;
+
+    const cancelPending = () => {
+      if (idleHandle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(idleHandle);
+      if (timeoutHandle !== undefined) window.clearTimeout(timeoutHandle);
+      idleHandle = undefined;
+      timeoutHandle = undefined;
+    };
+    const syncPreference = () => {
+      cancelPending();
+      const slowConnection = connection?.effectiveType === "slow-2g" || connection?.effectiveType === "2g";
+      if (!desktop.matches || reducedMotion.matches || connection?.saveData || slowConnection) {
+        setShowHeroModel(false);
+        return;
+      }
+      const reveal = () => setShowHeroModel(true);
+      if ("requestIdleCallback" in window) idleHandle = window.requestIdleCallback(reveal, { timeout: 1_500 });
+      else timeoutHandle = setTimeout(reveal, 900);
+    };
+
+    syncPreference();
+    desktop.addEventListener("change", syncPreference);
+    reducedMotion.addEventListener("change", syncPreference);
+    connection?.addEventListener?.("change", syncPreference);
+    return () => {
+      cancelPending();
+      desktop.removeEventListener("change", syncPreference);
+      reducedMotion.removeEventListener("change", syncPreference);
+      connection?.removeEventListener?.("change", syncPreference);
+    };
   }, []);
 
   useGSAP(() => {
@@ -308,22 +350,9 @@ export function App() {
         </div>
 
         <div className="feature-paper-chapter">
-          <PaperTexture
+          <DeferredPaperTexture
             className="feature-paper-texture"
-            aria-hidden="true"
             image={paperField}
-            colorFront="#e2e1dc"
-            colorBack="#f3f2ee"
-            contrast={0.16}
-            roughness={0.28}
-            fiber={0.2}
-            fiberSize={0.16}
-            crumples={0.1}
-            crumpleSize={0.28}
-            folds={0}
-            drops={0}
-            scale={1}
-            maxPixelCount={1_500_000}
           />
           <IntegrationStrip />
 
@@ -364,7 +393,7 @@ export function App() {
                         <strong>{feature.lead}</strong>
                         <span>{feature.detail}</span>
                       </span>
-                      <FeatureSurface kind={feature.id} />
+                      <FeatureSurface kind={feature.id} active={active} />
                     </button>
                   );
                 })}
@@ -403,6 +432,7 @@ export function App() {
           </div>
         </section>
 
+        <DeferredProductDepthSection />
         <DitherTransition animated={smoothScroll} />
         <DownloadSection />
       </main>
@@ -429,7 +459,41 @@ function DitherTransition({ animated }: { animated: boolean }) {
 }
 
 function PaperDither({ animated, colorBack = "#101010" }: { animated: boolean; colorBack?: string }) {
-  return <Dithering colorBack={colorBack} colorFront="#f3f2ee" shape="wave" type="random" size={2.5} speed={animated ? 0.08 : 0} scale={1.34} />;
+  const [hostRef, visible] = useNearViewport();
+  return (
+    <div className="paper-effect-host" ref={hostRef}>
+      {visible && <Suspense fallback={null}><DitherEffect colorBack={colorBack} colorFront="#f3f2ee" shape="wave" type="random" size={2.5} speed={animated ? 0.08 : 0} scale={1.34} /></Suspense>}
+    </div>
+  );
+}
+
+function DeferredPaperTexture({ className, image }: { className: string; image: string }) {
+  const [hostRef, visible] = useNearViewport("600px");
+  return (
+    <div className={className} ref={hostRef} aria-hidden="true">
+      {visible && <Suspense fallback={null}><PaperTextureEffect image={image} colorFront="#e2e1dc" colorBack="#f3f2ee" contrast={0.16} roughness={0.28} fiber={0.2} fiberSize={0.16} crumples={0.1} crumpleSize={0.28} folds={0} drops={0} scale={1} maxPixelCount={1_500_000} /></Suspense>}
+    </div>
+  );
+}
+
+function useNearViewport(rootMargin = "400px"): [RefObject<HTMLDivElement | null>, boolean] {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const target = ref.current;
+    if (!target || !("IntersectionObserver" in window)) {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting) return;
+      setVisible(true);
+      observer.disconnect();
+    }, { rootMargin });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [rootMargin]);
+  return [ref, visible];
 }
 
 function SmoothScroll({ children }: { children: ReactNode }) {
@@ -462,6 +526,7 @@ function SiteNav() {
       <nav className="site-nav" aria-label="Primary navigation">
         <a className="nav-brand" href="#top" aria-label="wheeljack home">
           <img className="nav-wordmark" src="/wheeljack-lockup.svg" alt="" />
+          <img className="nav-mark" src="/favicon.svg" alt="" />
         </a>
         <div className="nav-links">
           <a href="#features">Features</a>
@@ -641,7 +706,12 @@ function IntegrationStrip() {
   );
 }
 
-function FeatureSurface({ kind }: { kind: typeof features[number]["id"] }) {
+function DeferredProductDepthSection() {
+  const [hostRef, visible] = useNearViewport("800px");
+  return <div className={`product-depth-placeholder${visible ? " loaded" : ""}`} ref={hostRef}>{visible && <Suspense fallback={null}><ProductDepthSection /></Suspense>}</div>;
+}
+
+function FeatureSurface({ kind, active }: { kind: typeof features[number]["id"]; active: boolean }) {
   return (
     <span className={`feature-surface surface-${kind}`} aria-hidden="true">
       {kind === "terminal" && <>
@@ -683,6 +753,10 @@ function FeatureSurface({ kind }: { kind: typeof features[number]["id"] }) {
           <span className="surface-inspector-section"><span><strong>Verification evidence</strong><small>3/3</small></span><span className="surface-inspector-checks"><i>✓ Acceptance criteria</i><i>✓ 47 tests passed</i><i>✓ Changed files reviewed</i></span></span>
         </span>
       </>}
+      {kind === "bots" && active && <Suspense fallback={null}><BotsFeatureSurface
+        releaseAvatar={<ProductAgentAvatar id="bot-release" label="Release verifier" status="completed" />}
+        researchAvatar={<ProductAgentAvatar id="bot-research" label="Research scout" status="running" />}
+      /></Suspense>}
     </span>
   );
 }
@@ -792,32 +866,25 @@ function MiniOpsToolbar() {
 function DownloadSection() {
   return (
     <section className="download-section" id="download" aria-labelledby="download-title">
-      <PaperTexture
+      <DeferredPaperTexture
         className="download-texture"
-        aria-hidden="true"
         image={paperField}
-        colorFront="#e2e1dc"
-        colorBack="#f3f2ee"
-        contrast={0.16}
-        roughness={0.28}
-        fiber={0.2}
-        fiberSize={0.16}
-        crumples={0.1}
-        crumpleSize={0.28}
-        folds={0}
-        drops={0}
-        scale={1}
-        maxPixelCount={1_500_000}
       />
       <div className="download-grid page-width">
         <div className="download-copy">
           <img className="app-icon" src="/app-icon.png" alt="" />
-          <p>Built for your machine</p>
+          <p>Built for your machine · v{__WHEELJACK_VERSION__}</p>
           <h2 id="download-title">Your workspace is ready.</h2>
           <p className="download-deck">
             macOS builds are signed and notarized. Windows builds are currently unsigned.
-            Workspace state stays local. Agent credentials stay with their CLIs.
+            Workspace state stays local, and agent credentials stay with their CLIs.
           </p>
+          <p className="download-requirement">Regular shells work immediately. Structured chat and managed Plan work require a supported coding-agent CLI installed and authenticated separately.</p>
+          <div className="release-links" aria-label="Release resources">
+            <a href={downloads.release}>Latest release</a>
+            <a href={downloads.release}>Release notes</a>
+            <a href={downloads.checksums}>SHA256 checksums</a>
+          </div>
         </div>
         <div className="download-options">
           <DownloadOption
@@ -830,6 +897,10 @@ function DownloadSection() {
             detail="Apple silicon + Intel · Universal DMG · Signed & notarized"
             href={downloads.macos}
           />
+          <article className="update-proof">
+            <span><SargamIcon src={checkIcon} /></span>
+            <div><strong>Updates include a recovery path.</strong><p>Check manually or automatically, follow verified progress, read release notes, and restart into an update. If the replacement does not report a healthy UI, wheeljack restores the previous app.</p></div>
+          </article>
         </div>
       </div>
     </section>
@@ -858,8 +929,12 @@ function SiteFooter() {
           <span>wheeljack</span>
         </a>
         <p>Built for agent-first project work.</p>
-        <span>
+        <span className="footer-links">
           <a href="https://github.com/bildhaus/wheeljack">GitHub</a> ·{" "}
+          <a href="https://github.com/bildhaus/wheeljack/releases/latest">Releases</a> ·{" "}
+          <a href="https://github.com/bildhaus/wheeljack/blob/main/LICENSE">License</a> ·{" "}
+          <a href="https://github.com/bildhaus/wheeljack/blob/main/SECURITY.md">Security</a> ·{" "}
+          <a href="https://github.com/bildhaus/wheeljack/blob/main/SUPPORT.md">Support</a> ·{" "}
           <a href="https://github.com/bildhaus/wheeljack/issues/new/choose">Report an issue</a> ·{" "}
           <a href="https://sketchfab.com/3d-models/heavy-metal-wheeljack-7f43f465554a48d3b40b3976aa658c82">3D credit</a>
         </span>

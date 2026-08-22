@@ -1,0 +1,11 @@
+.surface-bots { grid-template-rows: 42px auto 1fr; background: #0d0d0d; }
+.surface-bots-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid #292929; padding: 0 11px; background: #151515; }
+.surface-bots-toolbar > span, .surface-bots-toolbar > b { display: flex; align-items: center; gap: 6px; }
+.surface-bots-toolbar .sargam-icon { width: 10px; height: 10px; color: #888; }
+.surface-bots-toolbar strong { color: #ddd; font-size: 9px; font-weight: 600; }.surface-bots-toolbar small { color: #6f6f6f; font-size: 6px; }
+.surface-bots-toolbar > b { border: 1px solid #343434; border-radius: 4px; padding: 5px 7px; color: #c8c8c8; font-size: 6px; font-weight: 570; }
+.surface-bot-suggestion { display: grid; gap: 3px; margin: 10px 11px 0; border: 1px solid color-mix(in srgb, var(--orange) 28%, #303030); border-radius: 6px; padding: 9px 10px; background: color-mix(in srgb, var(--orange) 5%, #151515); }
+.surface-bot-suggestion small { color: var(--orange); font: 6px var(--wj-code-font); text-transform: uppercase; }.surface-bot-suggestion strong { color: #d8d8d8; font-size: 9px; }.surface-bot-suggestion em { color: #757575; font-size: 6px; font-style: normal; }
+.surface-bot-list { display: grid; align-content: start; gap: 8px; padding: 10px 11px; }
+.surface-bot-card { display: grid; min-width: 0; grid-template-columns: 30px minmax(0, 1fr) auto; align-items: center; gap: 9px; border: 1px solid #2b2b2b; border-radius: 6px; padding: 10px; background: #141414; }
+.surface-bot-card .product-agent-avatar { width: 28px; height: 28px; }.surface-bot-card > span { display: grid; min-width: 0; gap: 3px; }.surface-bot-card strong { overflow: hidden; color: #d7d7d7; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }.surface-bot-card small { color: #818181; font-size: 6px; }.surface-bot-card em { overflow: hidden; color: #686868; font-size: 6px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }.surface-bot-card > b { color: #777; font-size: 6px; font-weight: 540; white-space: nowrap; }

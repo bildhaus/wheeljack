@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#0c0c0c" />
     <meta
       name="description"
-      content="Local-first wheeljack runs coding agents and shell sessions in split terminals, routes tasks through isolated Git worktrees, and keeps review evidence close."
+      content="Local-first wheeljack runs coding agents, reusable specialist Bots, split terminals, isolated task lanes, and review evidence in one desktop workspace."
     />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="wheeljack" />
@@ -14,16 +14,20 @@
     <meta property="og:title" content="wheeljack — local-first workspace for coding agents" />
     <meta
       property="og:description"
-      content="Local-first wheeljack runs coding agents and shell sessions in split terminals, routes tasks through isolated Git worktrees, and keeps review evidence close."
+      content="Run coding agents, reusable specialist Bots, isolated task lanes, and review-before-delivery workflows on your machine."
     />
-    <meta property="og:image" content="https://wheeljack.dev/app-icon.png" />
-    <meta name="twitter:card" content="summary" />
+    <meta property="og:image" content="https://wheeljack.dev/og-wheeljack.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="wheeljack desktop workspace with split terminals, coding agents, and Plan review lanes" />
+    <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="wheeljack — local-first workspace for coding agents" />
     <meta
       name="twitter:description"
-      content="Run coding agents and shell sessions in split terminals, isolated Git worktrees, and review-ready task lanes."
+      content="Run coding agents, reusable specialist Bots, isolated task lanes, and review-before-delivery workflows on your machine."
     />
-    <meta name="twitter:image" content="https://wheeljack.dev/app-icon.png" />
+    <meta name="twitter:image" content="https://wheeljack.dev/og-wheeljack.png" />
+    <meta name="twitter:image:alt" content="wheeljack desktop workspace with split terminals, coding agents, and Plan review lanes" />
     <link rel="canonical" href="https://wheeljack.dev/" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>wheeljack — local-first workspace for coding agents</title>
@@ -35,6 +39,7 @@
         "description": "A local-first workspace for coding agents, split terminals, isolated task lanes, and review evidence.",
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "Windows, macOS",
+        "softwareVersion": "%WHEELJACK_VERSION%",
         "url": "https://wheeljack.dev/",
         "downloadUrl": "https://github.com/bildhaus/wheeljack/releases/latest"
       }
@@ -80,6 +85,7 @@
               <article><h3>Agents</h3><p>Run your coding-agent CLIs or a plain shell side by side while wheeljack keeps sessions legible.</p></article>
               <article><h3>Plan</h3><p>Turn scoped tasks into isolated Git worktree lanes with constraints and verification commands attached.</p></article>
               <article><h3>Review</h3><p>Inspect changed files, handoff notes, acceptance criteria, and checks before delivery.</p></article>
+              <article><h3>Bots</h3><p>Save reusable project or global specialists with a standing role, coding agent, model, effort, and immutable launch snapshot.</p></article>
             </div>
           </section>
           <section id="workflow" aria-labelledby="workflow-title">
@@ -90,14 +96,29 @@
               <li>Review decisions and verification evidence before delivery.</li>
             </ol>
           </section>
+          <section aria-labelledby="depth-title">
+            <h2 id="depth-title">The details stay visible.</h2>
+            <div class="static-grid">
+              <article><h3>Controlled autonomy</h3><p>Allow, ask, or deny peer messages, bounded child agents, handoffs, and review requests with an audit trail.</p></article>
+              <article><h3>Floor, Board, and Spec</h3><p>Move between live execution, Kanban, PRD/TDD documents, and dependency-aware task decomposition.</p></article>
+              <article><h3>Recorded execution</h3><p>Trace Run Graph, activity, history, transcripts, and provider API usage.</p></article>
+              <article><h3>Durable local state</h3><p>Projects, canvases, themes, sessions, and Plan state stay on-device with restart recovery.</p></article>
+            </div>
+          </section>
           <section id="download" aria-labelledby="download-title">
             <h2 id="download-title">Download wheeljack.</h2>
-            <p><a href="https://github.com/bildhaus/wheeljack/releases/latest/download/wheeljack-windows-x64-portable.exe">Windows</a> · <a href="https://github.com/bildhaus/wheeljack/releases/latest/download/wheeljack-macos-universal.dmg">macOS</a></p>
+            <p>Latest public release: v%WHEELJACK_VERSION%. Regular shells work immediately; structured sessions require a supported coding-agent CLI installed and authenticated separately.</p>
+            <p><a href="https://github.com/bildhaus/wheeljack/releases/latest/download/wheeljack-windows-x64-portable.exe">Windows</a> · <a href="https://github.com/bildhaus/wheeljack/releases/latest/download/wheeljack-macos-universal.dmg">macOS</a> · <a href="https://github.com/bildhaus/wheeljack/releases/latest">Release notes</a> · <a href="https://github.com/bildhaus/wheeljack/releases/latest/download/SHA256SUMS.txt">SHA256 checksums</a></p>
+            <p>In-app updates show verified progress and release notes, restart into the replacement, and restore the previous app if health checks fail.</p>
           </section>
         </main>
         <footer>
           <p>
             <a href="https://github.com/bildhaus/wheeljack">GitHub</a> ·
+            <a href="https://github.com/bildhaus/wheeljack/releases/latest">Releases</a> ·
+            <a href="https://github.com/bildhaus/wheeljack/blob/main/LICENSE">License</a> ·
+            <a href="https://github.com/bildhaus/wheeljack/blob/main/SECURITY.md">Security</a> ·
+            <a href="https://github.com/bildhaus/wheeljack/blob/main/SUPPORT.md">Support</a> ·
             <a href="https://github.com/bildhaus/wheeljack/issues/new/choose">Report an issue</a>
           </p>
         </footer>

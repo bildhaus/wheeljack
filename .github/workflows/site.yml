@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - '.bun-version'
+      - 'VERSION'
       - 'apps/site/**'
       - '.github/workflows/site.yml'
   workflow_dispatch:
