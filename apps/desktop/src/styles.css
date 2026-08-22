@@ -1641,8 +1641,6 @@ html[data-dragging-pane] { cursor: grabbing; user-select: none; }
 .messages > [data-slot="message-scroller-content"] { width: min(100%, 760px); min-height: 100%; margin: 0 auto; }
 .messages [data-slot="message-scroller-item"] { width: 100%; content-visibility: auto; contain-intrinsic-size: auto 96px; }
 .messages [data-chat-part="activity"] { position: relative; padding-left: 13px; }
-.messages [data-chat-part="activity"]::before { position: absolute; top: 3px; bottom: 8px; left: 2px; width: 1px; background: color-mix(in srgb, var(--border) 76%, transparent); content: ""; }
-.messages [data-chat-part="activity"] + [data-chat-part="activity"]::before { top: -8px; }
 .messages [data-chat-part="activity"] + [data-chat-part="answer"] .message.assistant { padding-top: 10px; }
 .chat-history-more { display: flex; justify-content: center; padding: 0 0 14px; }
 .messages:focus-visible { outline: 1px solid var(--ring); outline-offset: -1px; }

@@ -535,9 +535,13 @@ fn agent_chat_message(
 }
 
 fn remove_duplicate_opencode_reasoning(messages: &mut Vec<AgentChatMessageDto>, output_role: &str) {
-    let reasoning = messages
+    let visible_messages = messages
         .iter()
-        .filter(|message| message.kind == "reasoning" && !message.text.trim().is_empty())
+        .filter(|message| {
+            message.role == output_role
+                && message.kind == "message"
+                && !message.text.trim().is_empty()
+        })
         .filter_map(|message| {
             Some((
                 message.source_message_id.clone()?,
@@ -546,10 +550,9 @@ fn remove_duplicate_opencode_reasoning(messages: &mut Vec<AgentChatMessageDto>, 
         })
         .collect::<HashSet<_>>();
     messages.retain(|message| {
-        message.role != output_role
-            || message.kind != "message"
+        message.kind != "reasoning"
             || message.source_message_id.as_ref().is_none_or(|message_id| {
-                !reasoning.contains(&(message_id.clone(), message.text.trim().to_string()))
+                !visible_messages.contains(&(message_id.clone(), message.text.trim().to_string()))
             })
     });
 }

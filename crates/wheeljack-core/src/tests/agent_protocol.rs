@@ -1264,7 +1264,7 @@ fn agent_protocol_orders_late_opencode_parts_and_dedupes_tool_lifecycle() {
 }
 
 #[test]
-fn agent_protocol_hides_opencode_text_that_duplicates_reasoning_in_the_same_message() {
+fn agent_protocol_keeps_opencode_text_and_hides_duplicate_reasoning() {
     let core = Core::new(
         test_init("agent-protocol-opencode-duplicate-reasoning"),
         Arc::new(NullEventSink),
@@ -1315,7 +1315,8 @@ fn agent_protocol_hides_opencode_text_that_duplicates_reasoning_in_the_same_mess
     let parsed: Value = serde_json::from_str(&core.call_json(&request.to_string())).unwrap();
     let messages = parsed["payload"]["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["kind"], "reasoning");
+    assert_eq!(messages[0]["role"], "assistant");
+    assert_eq!(messages[0]["kind"], "message");
     assert_eq!(messages[0]["text"], repeated);
 }
 
