@@ -54,6 +54,7 @@ describe("ops presence", () => {
     expect(opsReviewLabel(review)).toBe("Agent · Automatic");
     expect(opsReviewLabel({ ...review, reviewPolicy: "human" })).toBe("Human approval · Required");
     expect(opsReviewLabel({ ...review, reviewerId: "reviewer", agentStatuses: { reviewer: "running" } }, "Codex")).toBe("Codex · Running");
+    expect(opsReviewLabel({ ...review, reviewerId: "removed-reviewer", agentStatuses: { "removed-reviewer": "completed" } })).toBe("Reviewer · Completed");
     expect(opsReviewLabel({
       ...review,
       reviewerId: "reviewer",

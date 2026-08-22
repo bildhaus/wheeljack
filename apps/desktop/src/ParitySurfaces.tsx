@@ -1388,6 +1388,7 @@ export function OpsSurface({
   const waitingByCard = new Map(waitingRelationships.map((relationship) => [relationship.cardId, relationship]));
   const dependencyPath = dependencyFocusCardId ? opsDependencyPath(state.cards, dependencyFocusCardId) : new Set<string>();
   const roleByColumnId = new Map(state.columns.map((column) => [column.id, column.role]));
+  const reviewerName = (id?: string) => id ? nodes[id]?.title ?? state.agentLabels?.[id] : undefined;
   const cardRuntimeStatuses = (card: OpsCard) => opsCardParticipantIds(card, structuredRuntimes).flatMap((id) => {
     const runtime = structuredRuntimes.find((candidate) => candidate.nodeId === id);
     return runtime ? [runtime.status] : [];
@@ -1421,7 +1422,7 @@ export function OpsSurface({
   const inspectedVerification = inspectedCard ? opsVerificationProgress(inspectedCard, inspectedConflictFiles.length > 0) : undefined;
   const inspectedReview = inspectedCard ? opsReviewLabel(
     inspectedCard,
-    inspectedCard.reviewerId ? nodes[inspectedCard.reviewerId]?.title : undefined,
+    reviewerName(inspectedCard.reviewerId),
   ) : undefined;
   const inspectedChildProgress = inspectedCard ? opsChildProgress(state.cards, inspectedCard.id, doneColumnIds) : { done: 0, total: 0 };
   const inspectedTaskLaneLive = inspectedCard?.assigneeIds.some((id) => runtimes.some((runtime) =>
@@ -1810,7 +1811,7 @@ export function OpsSurface({
                           const verification = opsVerificationProgress(card, cardConflictFiles.length > 0);
                           const review = opsReviewLabel(
                             card,
-                            card.reviewerId ? nodes[card.reviewerId]?.title : undefined,
+                            reviewerName(card.reviewerId),
                           );
                           const liveSummary = opsCardActivitySummary(card, cardRuntimes, cardConflictFiles.length);
                           const runtimeOwners = cardRuntimes.map((runtime) => nodes[runtime.nodeId]?.title ?? runtime.nodeId).join(", ");

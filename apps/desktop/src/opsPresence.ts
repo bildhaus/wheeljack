@@ -165,7 +165,7 @@ export function opsReviewLabel(
       : status === "running" || status === "in_progress"
         ? "Running"
         : status ? resolveRunState(status).label : "Assigned";
-  return `${reviewerName || card.reviewerId} · ${state}`;
+  return `${reviewerName || "Reviewer"} · ${state}`;
 }
 
 function opsHasReviewEvidence(card: OpsCard): boolean {
