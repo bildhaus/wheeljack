@@ -196,6 +196,7 @@ describe("workflow ownership contract", () => {
     expect(app).toContain("macOS builds are signed and notarized. Windows builds are currently unsigned.");
     expect(app).toContain('id: "bots"');
     expect(app).toContain("Updates include a recovery path.");
+    expect(app).toContain("Upgrading from v0.1.0 requires this one-time manual download");
     expect(app).toContain("__WHEELJACK_VERSION__");
     expect(app).toContain("SHA256SUMS.txt");
     expect(app).toContain('href="https://github.com/bildhaus/wheeljack">Source</a>');
@@ -204,6 +205,7 @@ describe("workflow ownership contract", () => {
     expect(fallback).toContain("%WHEELJACK_VERSION%");
     expect(fallback).toContain("og-wheeljack.png");
     expect(fallback).toContain("Controlled autonomy");
+    expect(fallback).toContain("Upgrading from v0.1.0 requires a one-time manual download");
     expect(fallback).toContain("https://github.com/bildhaus/wheeljack/issues/new/choose");
   });
 });

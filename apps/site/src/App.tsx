@@ -899,7 +899,7 @@ function DownloadSection() {
           />
           <article className="update-proof">
             <span><SargamIcon src={checkIcon} /></span>
-            <div><strong>Updates include a recovery path.</strong><p>Check manually or automatically, follow verified progress, read release notes, and restart into an update. If the replacement does not report a healthy UI, wheeljack restores the previous app.</p></div>
+            <div><strong>Updates include a recovery path.</strong><p>Check manually or automatically, follow verified progress, read release notes, and restart into an update. If the replacement does not report a healthy UI, wheeljack restores the previous app. Upgrading from v0.1.0 requires this one-time manual download; in-app updates work from v0.1.1 onward.</p></div>
           </article>
         </div>
       </div>
