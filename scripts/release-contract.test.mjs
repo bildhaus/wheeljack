@@ -168,6 +168,7 @@ describe("workflow ownership contract", () => {
     expect(release).not.toContain("push:\n    tags:");
     expect(release).toContain("release_environment: desktop-release");
     expect(release).toContain("environment: desktop-release");
+    expect(release).toContain("require_signed_windows: true");
   });
 
   test("keeps public site delivery main-only and explicitly gated", async () => {
@@ -182,10 +183,15 @@ describe("workflow ownership contract", () => {
 
   test("keeps published download controls live and signing status explicit", async () => {
     const app = await readFile(join(import.meta.dirname, "../apps/site/src/App.tsx"), "utf8");
+    const fallback = await readFile(join(import.meta.dirname, "../apps/site/index.html"), "utf8");
     expect(app).toContain("const downloadsLive = true;");
     expect(app).toContain("releases/latest/download/wheeljack-windows-x64-portable.exe");
     expect(app).toContain("releases/latest/download/wheeljack-macos-universal.dmg");
     expect(app).toContain("Your workspace is ready.");
     expect(app).toContain("macOS builds are signed and notarized. Windows builds are currently unsigned.");
+    expect(app).toContain('href="https://github.com/bildhaus/wheeljack">Source</a>');
+    expect(app).toContain("https://github.com/bildhaus/wheeljack/issues/new/choose");
+    expect(fallback).toContain('href="https://github.com/bildhaus/wheeljack">Source</a>');
+    expect(fallback).toContain("https://github.com/bildhaus/wheeljack/issues/new/choose");
   });
 });

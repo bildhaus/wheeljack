@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible wheeljack problem
+description: Report a reproducible wheeljack problem.
 title: "[Bug]: "
 labels:
   - bug
@@ -7,29 +7,56 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. Do not include credentials, provider tokens, private transcripts, project source, or app databases.
-  - type: checkboxes
-    id: preflight
+        Thanks for helping improve wheeljack. Remove credentials, provider tokens,
+        private transcripts, project source, app databases, and unrelated environment data.
+  - type: input
+    id: wheeljack-version
     attributes:
-      label: Preflight
-      options:
-        - label: I reproduced this on the latest wheeljack release.
-          required: true
-        - label: I searched existing issues for the same problem.
-          required: true
-        - label: This report does not contain secrets or private project data.
-          required: true
-  - type: textarea
-    id: description
-    attributes:
-      label: What happened?
-      description: Describe the observed behavior and its impact.
+      label: wheeljack version
+      description: Find this in Settings or the GitHub Release you installed.
+      placeholder: 0.1.0
     validations:
       required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - macOS
+        - Source build on another platform
+    validations:
+      required: true
+  - type: input
+    id: platform-version
+    attributes:
+      label: Platform version
+      placeholder: Windows 11 24H2 or macOS 15.6
+    validations:
+      required: true
+  - type: dropdown
+    id: adapter
+    attributes:
+      label: Agent or terminal
+      options:
+        - Claude Code
+        - Codex CLI
+        - OpenCode
+        - Pi Coding Agent
+        - Generic shell
+        - Not applicable
+    validations:
+      required: true
+  - type: input
+    id: adapter-version
+    attributes:
+      label: Agent CLI version
+      description: Leave blank for generic shell or unrelated problems.
   - type: textarea
     id: reproduction
     attributes:
       label: Reproduction steps
+      description: Give the smallest reliable sequence that triggers the problem.
       placeholder: |
         1. Open...
         2. Select...
@@ -42,31 +69,26 @@ body:
       label: Expected behavior
     validations:
       required: true
-  - type: dropdown
-    id: operating-system
+  - type: textarea
+    id: actual
     attributes:
-      label: Operating system
-      options:
-        - Windows
-        - macOS
+      label: Actual behavior
     validations:
       required: true
-  - type: input
-    id: wheeljack-version
-    attributes:
-      label: wheeljack version
-      placeholder: 0.1.8
-    validations:
-      required: true
-  - type: input
-    id: adapter
-    attributes:
-      label: Agent adapter and CLI version
-      description: Use "generic shell" when no structured agent is involved.
-      placeholder: Codex CLI 0.x, Claude Code 1.x, OpenCode 1.x, Pi 0.x, or generic shell
   - type: textarea
     id: diagnostics
     attributes:
       label: Safe diagnostics
-      description: Include only the smallest redacted error or diagnostic excerpt needed to understand the failure.
+      description: Paste the smallest relevant excerpt or the sanitized Settings diagnostics report.
       render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Preflight
+      options:
+        - label: I reproduced this on the latest wheeljack release or identified the source build above.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed credentials, tokens, private transcripts, project source, app databases, and unrelated environment data.
+          required: true

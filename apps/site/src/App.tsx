@@ -467,6 +467,7 @@ function SiteNav() {
           <a href="#features">Features</a>
           <a href="#workflow">Workflow</a>
           <a href="#download">Downloads</a>
+          <a href="https://github.com/bildhaus/wheeljack">Source</a>
         </div>
         <a className="nav-cta" href="#download">
           <span>Get wheeljack</span>
@@ -858,7 +859,9 @@ function SiteFooter() {
         </a>
         <p>Built for agent-first project work.</p>
         <span>
-          Local-first · 2026 · <a href="https://sketchfab.com/3d-models/heavy-metal-wheeljack-7f43f465554a48d3b40b3976aa658c82">3D credit</a>
+          <a href="https://github.com/bildhaus/wheeljack">GitHub</a> ·{" "}
+          <a href="https://github.com/bildhaus/wheeljack/issues/new/choose">Report an issue</a> ·{" "}
+          <a href="https://sketchfab.com/3d-models/heavy-metal-wheeljack-7f43f465554a48d3b40b3976aa658c82">3D credit</a>
         </span>
       </div>
     </footer>

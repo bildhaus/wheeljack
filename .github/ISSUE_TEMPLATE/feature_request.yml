@@ -1,48 +1,49 @@
 name: Feature request
-description: Propose a focused wheeljack improvement
+description: Propose a focused improvement to a real wheeljack workflow.
 title: "[Feature]: "
 labels:
   - enhancement
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the workflow and failure you want to improve. Large behavior or
+        architecture changes should include the proof that would show the idea works.
   - type: textarea
     id: problem
     attributes:
-      label: Problem
-      description: What workflow is difficult today, and who encounters it?
+      label: Problem and workflow
+      description: What are you trying to do, and where does the current flow break down?
     validations:
       required: true
   - type: textarea
-    id: proposal
+    id: outcome
     attributes:
-      label: Proposed behavior
-      description: Describe the smallest useful behavior change.
+      label: Desired outcome
+      description: Describe the smallest user-visible result that would solve the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Proof
+      description: How should maintainers verify that the workflow is actually improved?
+      placeholder: A concrete interaction, failure case, performance target, or packaged-platform check.
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered
-      description: Include current workarounds or simpler options.
-  - type: dropdown
-    id: surface
-    attributes:
-      label: Primary surface
-      options:
-        - Terminal and panes
-        - Structured agent chat
-        - Plan and orchestration
-        - Projects, files, and Git
-        - Settings, themes, and shortcuts
-        - Packaging and updates
-        - Website and documentation
-    validations:
-      required: true
+      description: Optional workarounds or simpler approaches you already tried.
   - type: checkboxes
-    id: checks
+    id: scope
     attributes:
-      label: Checks
+      label: Scope check
       options:
         - label: I searched existing issues for a similar request.
+          required: true
+        - label: This request describes a user problem rather than only prescribing an implementation.
           required: true
         - label: This request does not include private project data or credentials.
           required: true
