@@ -508,6 +508,7 @@ export interface OpsState {
   prd: string;
   tdd: string;
   eventCursors: Record<string, number>;
+  agentLabels?: Record<string, string>;
 }
 
 export type ProjectDocumentKind = "kanban" | "prd" | "tdd";

@@ -2763,7 +2763,7 @@ export function FloorSurface({
     </section>
     <div className="wj-floor-run-graph" data-collapsed={!runGraphExpanded || undefined}>
       {runGraphExpanded
-        ? <OpsRunGraph embedded summary={runGraphSummary} model={runGraphModel} cards={state.cards} agentNodes={nodes} selection={runGraphSelection} onRangeChange={onRunGraphRange} onSelectionChange={selectRunGraphEvidence} onCollapse={() => setRunGraphExpanded(false)} />
+        ? <OpsRunGraph embedded summary={runGraphSummary} model={runGraphModel} cards={state.cards} agentNodes={nodes} agentLabels={state.agentLabels} selection={runGraphSelection} onRangeChange={onRunGraphRange} onSelectionChange={selectRunGraphEvidence} onCollapse={() => setRunGraphExpanded(false)} />
         : <button type="button" className="wj-floor-run-graph-summary" aria-expanded="false" onClick={() => setRunGraphExpanded(true)}><span className="wj-section-label">Recorded execution</span><strong>Run Graph</strong><small>{runGraphSummary}</small><span>Show graph</span></button>}
     </div>
     <div className="wj-floor-layout" data-inspecting={Boolean(dockedInspector) || undefined} style={{ "--wj-floor-rail-width": `${railWidth}px` } as React.CSSProperties}>

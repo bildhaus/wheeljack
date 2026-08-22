@@ -381,6 +381,7 @@ test("canonicalizes coordination callsigns to pane identities", () => {
   ]);
   const current = parseOpsState({
     version: 2,
+    agentLabels: { "node-pi": "Pi 2" },
     cards: [{
       id: "task-1",
       title: "Identity",
@@ -417,6 +418,7 @@ test("canonicalizes coordination callsigns to pane identities", () => {
   expect(updated.cards[0].agentStatuses).toEqual({ "node-claude": "completed", "node-pi": "completed" });
   expect(updated.cards[0].agentFiles?.["node-claude"]).toEqual(["src/App.tsx", "src/types.ts"]);
   expect(updated.cards[0].events?.[0].callsign).toBe("node-pi");
+  expect(updated.agentLabels).toEqual({ "node-pi": "Pi 2" });
 });
 
 test("migrates only the former bundled UI font defaults", () => {

@@ -29,6 +29,7 @@ export function OpsRunGraph({
   model,
   cards,
   agentNodes,
+  agentLabels = {},
   selection,
   onRangeChange,
   onSelectionChange,
@@ -39,6 +40,7 @@ export function OpsRunGraph({
   model: OpsRunGraphModel;
   cards: OpsCard[];
   agentNodes: Record<string, CanvasNode>;
+  agentLabels?: Record<string, string>;
   selection?: OpsRunGraphSelection;
   onRangeChange: (range: OpsRunGraphRange) => void;
   onSelectionChange: (selection?: OpsRunGraphSelection) => void;
@@ -48,14 +50,10 @@ export function OpsRunGraph({
 }) {
   const [announcement, setAnnouncement] = useState(`Run Graph range: ${rangeLabel(model.range)}.`);
   const cardTitleById = useMemo(() => new Map(cards.map((card) => [card.id, card.title])), [cards]);
-  const agentLabelById = useMemo(() => {
-    const labels = new Map(Object.entries(agentNodes).map(([id, node]) => [id, node.title || id]));
-    for (const card of cards) {
-      if (!card.assignee.trim() || card.assignee === "Unassigned" || card.assigneeIds.length !== 1) continue;
-      if (!labels.has(card.assigneeIds[0])) labels.set(card.assigneeIds[0], card.assignee);
-    }
-    return labels;
-  }, [agentNodes, cards]);
+  const agentLabelById = useMemo(() => new Map([
+    ...Object.entries(agentLabels),
+    ...Object.entries(agentNodes).map(([id, node]) => [id, node.title || id] as const),
+  ]), [agentLabels, agentNodes]);
   const laneIndex = useMemo(() => new Map(model.lanes.map((lane, index) => [lane.id, index])), [model.lanes]);
   const selectedTaskIds = useMemo(() => new Set(selection?.taskIds ?? []), [selection]);
   const causalTaskIds = useMemo(() => {
