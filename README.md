@@ -7,6 +7,8 @@ review-before-delivery routing, themes, activity drawers, and restart recovery.
 
 Website: [wheeljack.dev](https://wheeljack.dev)
 
+[![wheeljack workspace with split terminals, structured agents, and review evidence](docs/assets/wheeljack-workspace.png)](https://wheeljack.dev)
+
 `wheeljack-core` is the durable authority for SQLite state, PTY and structured
 agent sessions, routing, Git operations, and updates. The WebView owns
 presentation and transient interaction only.
@@ -117,8 +119,9 @@ every lane. The stable required check is `wheeljack CI / required`.
 A manual `release_tag` dispatch from `main` prepares a release from the tagged
 commit after confirming that it is contained in `main` and equals `vVERSION`;
 tag pushes alone do not start signing or packaging.
-Windows Authenticode signing is optional and reported explicitly; macOS
-Developer ID signing and notarization are mandatory. Packages, updater
+New release drafts require Windows Authenticode signing plus macOS Developer
+ID signing and notarization. The existing `v0.1.0` Windows asset remains
+unsigned and reports that status explicitly. Packages, updater
 payloads, sidecar hashes, and `SHA256SUMS.txt` are uploaded to an unpublished
 draft from jobs gated by the main-only `desktop-release` environment, with
 server-reported digests verified. Existing published releases and
