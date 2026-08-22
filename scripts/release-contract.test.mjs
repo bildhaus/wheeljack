@@ -168,7 +168,7 @@ describe("workflow ownership contract", () => {
     expect(release).not.toContain("push:\n    tags:");
     expect(release).toContain("release_environment: desktop-release");
     expect(release).toContain("environment: desktop-release");
-    expect(release).toContain("require_signed_windows: true");
+    expect(release).toContain("require_signed_windows: false");
   });
 
   test("keeps public site delivery main-only and explicitly gated", async () => {

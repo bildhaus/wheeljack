@@ -119,9 +119,8 @@ every lane. The stable required check is `wheeljack CI / required`.
 A manual `release_tag` dispatch from `main` prepares a release from the tagged
 commit after confirming that it is contained in `main` and equals `vVERSION`;
 tag pushes alone do not start signing or packaging.
-New release drafts require Windows Authenticode signing plus macOS Developer
-ID signing and notarization. The existing `v0.1.0` Windows asset remains
-unsigned and reports that status explicitly. Packages, updater
+Windows Authenticode signing is optional and reported explicitly; macOS
+Developer ID signing and notarization are mandatory. Packages, updater
 payloads, sidecar hashes, and `SHA256SUMS.txt` are uploaded to an unpublished
 draft from jobs gated by the main-only `desktop-release` environment, with
 server-reported digests verified. Existing published releases and

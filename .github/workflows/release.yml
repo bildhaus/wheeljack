@@ -60,7 +60,7 @@ jobs:
       source_sha: ${{ needs.resolve.outputs.sha }}
       windows_artifact_name: wheeljack-release-windows
       macos_artifact_name: wheeljack-release-macos
-      require_signed_windows: true
+      require_signed_windows: false
       require_signed_macos: true
       release_mode: true
       release_environment: desktop-release
