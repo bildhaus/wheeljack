@@ -718,11 +718,12 @@ test("keeps document policy notices inline and separates durable saves from proj
 });
 
 test("uses the card workspace bar as the full-width drag target", () => {
-  expect(paritySource).toContain('className={`wj-task-card-bar ${showCardMeta ? "" : "quiet"}`}');
-  expect(paritySource).toContain('className="wj-task-drag-indicator"');
+  expect(paritySource).toContain('className="wj-task-card-bar"');
+  expect(paritySource).toContain('className="wj-task-drag-rail"');
   expect(paritySource).not.toContain("data-drop-agent-id");
   expect(stylesSource).toContain(".wj-task-card-bar[data-draggable=\"true\"]");
-  expect(stylesSource).toContain("@keyframes wj-drag-indicator-cue");
+  expect(stylesSource).toContain(".wj-task-drag-rail::before, .wj-task-drag-rail::after");
+  expect(stylesSource).toContain("grid-template-columns: minmax(12px, 1fr) auto minmax(12px, 1fr)");
   expect(stylesSource).toMatch(/\.wj-task-card-bar \{[^}]*border-bottom: 1px solid/);
   expect(stylesSource).toContain(".wj-board-list .wj-task-card-bar { grid-column: 1 / -1;");
 });

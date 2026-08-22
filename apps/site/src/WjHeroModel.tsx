@@ -2,8 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import * as THREE from "three";
-import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -155,8 +153,11 @@ export default function WjHeroModel({ animated }: { animated: boolean }) {
     let transformAction: THREE.AnimationAction | null = null;
     let model: THREE.Group | null = null;
     let disposed = false;
+    let renderVisible = true;
+    let documentVisible = document.visibilityState === "visible";
 
     const render = (time: number) => {
+      animationFrame = 0;
       if (disposed) return;
 
       const progress = scrollState.progress;
@@ -177,41 +178,72 @@ export default function WjHeroModel({ animated }: { animated: boolean }) {
       ditherTime.value = time * 0.001;
       renderer.render(scene, camera);
 
-      if (animated) animationFrame = requestAnimationFrame(render);
+      if (animated) scheduleRender();
     };
 
-    const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
-    loader.load(
-      "/models/wheeljack-web.glb",
-      (gltf) => {
-        if (disposed) return;
+    const scheduleRender = () => {
+      if (disposed || animationFrame || !renderVisible || !documentVisible) return;
+      animationFrame = requestAnimationFrame(render);
+    };
+    const syncDocumentVisibility = () => {
+      documentVisible = document.visibilityState === "visible";
+      if (documentVisible) scheduleRender();
+      else {
+        cancelAnimationFrame(animationFrame);
+        animationFrame = 0;
+      }
+    };
+    const visibilityObserver = "IntersectionObserver" in window
+      ? new IntersectionObserver(([entry]) => {
+          renderVisible = entry.isIntersecting;
+          if (renderVisible) scheduleRender();
+          else {
+            cancelAnimationFrame(animationFrame);
+            animationFrame = 0;
+          }
+        }, { rootMargin: "160px" })
+      : null;
+    visibilityObserver?.observe(host);
+    document.addEventListener("visibilitychange", syncDocumentVisibility);
 
-        model = gltf.scene;
-        model.position.set(0.14, -0.72, 0);
-        model.traverse((object) => {
-          if (object instanceof THREE.Mesh) object.material = material;
-        });
-        modelGroup.add(model);
+    void Promise.all([
+      import("three/addons/loaders/GLTFLoader.js"),
+      import("three/addons/libs/meshopt_decoder.module.js"),
+    ]).then(([{ GLTFLoader }, { MeshoptDecoder }]) => {
+      if (disposed) return;
+      const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+      loader.load(
+        "/models/wheeljack-web.glb",
+        (gltf) => {
+          if (disposed) return;
 
-        idleClip = THREE.AnimationClip.findByName(gltf.animations, "MapIdle") ?? null;
-        transformClip = THREE.AnimationClip.findByName(gltf.animations, "MapTransformToAlt") ?? null;
-        if (idleClip && transformClip) {
-          mixer = new THREE.AnimationMixer(model);
-          idleAction = mixer.clipAction(idleClip);
-          idleAction.setLoop(THREE.LoopRepeat, Infinity).play();
-          transformAction = mixer.clipAction(transformClip);
-          transformAction.setLoop(THREE.LoopOnce, 1);
-          transformAction.clampWhenFinished = true;
-          transformAction.play();
-          mixer.update(0);
-        }
+          model = gltf.scene;
+          model.position.set(0.14, -0.72, 0);
+          model.traverse((object) => {
+            if (object instanceof THREE.Mesh) object.material = material;
+          });
+          modelGroup.add(model);
 
-        setReady(true);
-        render(performance.now());
-      },
-      undefined,
-      () => setReady(false),
-    );
+          idleClip = THREE.AnimationClip.findByName(gltf.animations, "MapIdle") ?? null;
+          transformClip = THREE.AnimationClip.findByName(gltf.animations, "MapTransformToAlt") ?? null;
+          if (idleClip && transformClip) {
+            mixer = new THREE.AnimationMixer(model);
+            idleAction = mixer.clipAction(idleClip);
+            idleAction.setLoop(THREE.LoopRepeat, Infinity).play();
+            transformAction = mixer.clipAction(transformClip);
+            transformAction.setLoop(THREE.LoopOnce, 1);
+            transformAction.clampWhenFinished = true;
+            transformAction.play();
+            mixer.update(0);
+          }
+
+          setReady(true);
+          render(performance.now());
+        },
+        undefined,
+        () => setReady(false),
+      );
+    }).catch(() => setReady(false));
 
     return () => {
       disposed = true;
@@ -219,6 +251,8 @@ export default function WjHeroModel({ animated }: { animated: boolean }) {
       cancelAnimationFrame(animationFrame);
       scrollTrigger?.kill();
       travelTrigger?.kill();
+      visibilityObserver?.disconnect();
+      document.removeEventListener("visibilitychange", syncDocumentVisibility);
       resizeObserver.disconnect();
       mixer?.stopAllAction();
 

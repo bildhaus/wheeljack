@@ -31,19 +31,19 @@ const server = Bun.serve({
     const base = `http://127.0.0.1:${server.port}`;
     if (url.pathname === "/release") {
       return Response.json({
-        tagName: "v0.1.0",
+        tag_name: "v0.1.0",
         name: "wheeljack 0.1.0 update smoke",
         body: "Local updater lifecycle smoke.",
-        publishedAt: new Date().toISOString(),
+        published_at: new Date().toISOString(),
         assets: [
           {
             name: assetName,
-            browserDownloadUrl: `${base}/${assetName}`,
+            browser_download_url: `${base}/${assetName}`,
             size: assetBytes.byteLength,
           },
           {
             name: `${assetName}.sha256`,
-            browserDownloadUrl: `${base}/${assetName}.sha256`,
+            browser_download_url: `${base}/${assetName}.sha256`,
             size: assetHash.length + assetName.length + 3,
           },
         ],

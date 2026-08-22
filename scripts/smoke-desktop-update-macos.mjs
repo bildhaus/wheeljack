@@ -113,18 +113,18 @@ try {
       const origin = `http://127.0.0.1:${server.port}`;
       if (path === "/release") {
         return Response.json({
-          tagName: `v${nextVersion}`,
+          tag_name: `v${nextVersion}`,
           body: "macOS updater smoke",
-          publishedAt: new Date().toISOString(),
+          published_at: new Date().toISOString(),
           assets: [
             {
               name: "wheeljack.app.zip",
-              browserDownloadUrl: `${origin}/wheeljack.app.zip`,
+              browser_download_url: `${origin}/wheeljack.app.zip`,
               size: archiveSize,
             },
             {
               name: "wheeljack.app.zip.sha256",
-              browserDownloadUrl: `${origin}/wheeljack.app.zip.sha256`,
+              browser_download_url: `${origin}/wheeljack.app.zip.sha256`,
               size: 64,
             },
           ],

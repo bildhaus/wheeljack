@@ -713,7 +713,6 @@ pub struct UpdaterDownloadDto {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct GithubRelease {
     pub(crate) tag_name: Option<String>,
     pub(crate) name: Option<String>,
@@ -723,7 +722,6 @@ pub(crate) struct GithubRelease {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct GithubReleaseAsset {
     pub(crate) name: String,
     pub(crate) browser_download_url: String,

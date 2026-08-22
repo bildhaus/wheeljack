@@ -4072,6 +4072,7 @@ export function App() {
           : current;
         return {
           ...moved,
+          agentLabels: { ...moved.agentLabels, [node.id]: node.title },
           cards: moved.cards.map((card) => card.id === taskId
             ? { ...card, agentStatuses: { ...card.agentStatuses, [node.id]: "completed" } }
             : card),

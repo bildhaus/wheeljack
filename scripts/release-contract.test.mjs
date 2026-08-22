@@ -175,10 +175,15 @@ describe("workflow ownership contract", () => {
     const site = await readFile(join(import.meta.dirname, "../.github/workflows/site.yml"), "utf8");
     expect(site).toContain("github.ref == 'refs/heads/main'");
     expect(site).toContain("vars.PUBLIC_SITE_ENABLED == 'true'");
+    expect(site).toContain("needs.release.outputs.published == 'true'");
+    expect(site).toContain('gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag"');
+    expect(site).toContain('jq -r .draft');
+    expect(site).toContain('jq -r .prerelease');
     expect(site).toContain("name: site-production");
     expect(site).toContain("--project-name wheeljack --branch main");
     expect(site).toContain("CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}");
     expect(site).toContain("CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}");
+    expect(site).toContain("- 'VERSION'");
   });
 
   test("keeps published download controls live and signing status explicit", async () => {
@@ -189,9 +194,16 @@ describe("workflow ownership contract", () => {
     expect(app).toContain("releases/latest/download/wheeljack-macos-universal.dmg");
     expect(app).toContain("Your workspace is ready.");
     expect(app).toContain("macOS builds are signed and notarized. Windows builds are currently unsigned.");
+    expect(app).toContain('id: "bots"');
+    expect(app).toContain("Updates include a recovery path.");
+    expect(app).toContain("__WHEELJACK_VERSION__");
+    expect(app).toContain("SHA256SUMS.txt");
     expect(app).toContain('href="https://github.com/bildhaus/wheeljack">Source</a>');
     expect(app).toContain("https://github.com/bildhaus/wheeljack/issues/new/choose");
     expect(fallback).toContain('href="https://github.com/bildhaus/wheeljack">Source</a>');
+    expect(fallback).toContain("%WHEELJACK_VERSION%");
+    expect(fallback).toContain("og-wheeljack.png");
+    expect(fallback).toContain("Controlled autonomy");
     expect(fallback).toContain("https://github.com/bildhaus/wheeljack/issues/new/choose");
   });
 });

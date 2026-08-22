@@ -62,6 +62,10 @@ fn updater_check_and_download_roundtrip_uses_test_feed_override() {
     .unwrap();
     assert_eq!(check["ok"], true);
     assert_eq!(check["payload"]["update"]["version"], "0.1.1");
+    assert_eq!(
+        check["payload"]["update"]["publishedAt"],
+        "2026-07-07T00:00:00Z"
+    );
     assert!(check["payload"]["update"]["downloadUrl"]
         .as_str()
         .unwrap()
@@ -356,19 +360,19 @@ fn start_fake_update_server(
     let sidecar_url = format!("{asset_url}.sha256");
     let mut release_assets = vec![json!({
         "name": asset_name,
-        "browserDownloadUrl": asset_url,
+        "browser_download_url": asset_url,
         "size": size
     })];
     if sidecar_text.is_some() {
         release_assets.push(json!({
             "name": format!("{asset_name}.sha256"),
-            "browserDownloadUrl": sidecar_url
+            "browser_download_url": sidecar_url
         }));
     }
     let release = json!({
-        "tagName": "0.1.1",
+        "tag_name": "0.1.1",
         "body": "test release",
-        "publishedAt": "2026-07-07T00:00:00Z",
+        "published_at": "2026-07-07T00:00:00Z",
         "assets": release_assets
     });
     let mut routes = HashMap::<String, (Vec<u8>, &'static str)>::new();

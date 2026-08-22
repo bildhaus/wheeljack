@@ -1,3 +1,4 @@
+# Public product site: search and AI crawling are intentionally allowed.
 User-agent: *
 Allow: /
 

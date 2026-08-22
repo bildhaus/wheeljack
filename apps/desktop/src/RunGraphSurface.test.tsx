@@ -141,6 +141,26 @@ describe("OpsRunGraph", () => {
     expect(html).toContain('aria-label="Run Graph time range"');
   });
 
+  test("renders a recorded label after the agent node has been removed", () => {
+    const graph = model();
+    const removedNodeId = "node_b536ef7ddcb4208ab834f6f8b2d";
+    graph.lanes = [{ id: removedNodeId, connected: false, latestEvidenceAt: now }];
+    graph.segments = [];
+    graph.nodes = [{ ...graph.nodes[0], laneId: removedNodeId }];
+    graph.currentSignals = [];
+    const html = renderToStaticMarkup(<OpsRunGraph
+      model={graph}
+      cards={[card()]}
+      agentNodes={{}}
+      agentLabels={{ [removedNodeId]: "Osprey" }}
+      onRangeChange={vi.fn()}
+      onSelectionChange={vi.fn()}
+    />);
+
+    expect(html).toContain(">Osprey</span>");
+    expect(html).not.toContain(`>${removedNodeId}</span>`);
+  });
+
   test("renders a selected current conflict as one knot spanning every affected task", () => {
     const graph = model();
     graph.currentSignals = [{

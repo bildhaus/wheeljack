@@ -1056,7 +1056,7 @@ html[data-project-empty-exiting] .wj-project-empty .wj-empty-type-caret { displa
 .wj-board-list .wj-task-card-bar { grid-column: 1 / -1; margin-bottom: 0; }
 .wj-board-list .wj-task-card [data-slot="card-description"] { -webkit-line-clamp: 1; }
 .wj-board-list .wj-task-card [data-slot="card-content"] { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
-.wj-board-list :is(.wj-task-execution, .wj-task-coordination, .wj-verification-progress) { min-width: 120px; flex: 1 1 auto; margin: 0; border: 0; padding: 0; }
+.wj-board-list :is(.wj-task-execution, .wj-task-coordination, .wj-verification-progress, .wj-task-review-state) { min-width: 120px; flex: 1 1 auto; margin: 0; border: 0; padding: 0; }
 .wj-board-list .wj-task-intervention { width: auto; min-width: 190px; margin: 0; }
 .wj-board-list .wj-task-actions { min-height: 26px; flex: 0 0 auto; align-items: center; margin: 0 0 0 auto; border: 0; padding: 0; }
 .wj-column-empty { display: grid; min-height: 80px; place-items: center; border: 1px dashed color-mix(in srgb, var(--border) 72%, transparent); border-radius: 8px; color: var(--muted-foreground); font-size: 11px; }
@@ -1086,12 +1086,13 @@ html[data-project-empty-exiting] .wj-project-empty .wj-empty-type-caret { displa
 .wj-task-card-bar[data-draggable="true"] { cursor: grab; user-select: none; touch-action: none; }
 .wj-task-card-bar[data-draggable="true"]:active { cursor: grabbing; }
 .wj-task-card-meta { display: flex; min-width: 0; align-items: center; gap: 8px; }
-.wj-task-drag-indicator { display: inline-flex; width: 14px; height: 14px; flex: 0 0 auto; align-items: center; justify-content: center; opacity: 0; transform: translateX(-4px) scale(.9); transition: opacity 140ms var(--wj-ease-out, ease), transform 180ms var(--wj-ease-out, ease); }
-.wj-task-drag-indicator .sargam-icon { width: 14px; height: 14px; }
-.wj-task-card:is(:hover, :focus-within) .wj-task-card-bar[data-draggable="true"] .wj-task-drag-indicator { opacity: .78; transform: none; animation: wj-drag-indicator-cue 360ms var(--wj-ease-out, ease) both; }
-@keyframes wj-drag-indicator-cue { 0% { transform: translateX(-4px) scale(.9); } 58% { transform: translateX(1px) scale(1); } 100% { transform: none; } }
+.wj-task-drag-rail { display: grid; min-width: 48px; height: 14px; flex: 1 1 auto; grid-template-columns: minmax(12px, 1fr) auto minmax(12px, 1fr); align-items: center; gap: 7px; overflow: hidden; color: var(--muted-foreground); opacity: .28; transition: color 140ms var(--wj-ease-out, ease), opacity 140ms var(--wj-ease-out, ease); }
+.wj-task-drag-rail::before, .wj-task-drag-rail::after { height: 1px; background: repeating-linear-gradient(90deg, currentColor 0 6px, transparent 6px 10px); content: ""; }
+.wj-task-drag-rail > span { max-width: 0; overflow: hidden; font: 8px var(--wj-code-font); letter-spacing: .16em; opacity: 0; text-transform: uppercase; transform: translateX(4px); transition: max-width 180ms var(--wj-ease-out, ease), opacity 140ms var(--wj-ease-out, ease), transform 180ms var(--wj-ease-out, ease); }
+.wj-task-card:is(:hover, :focus-within) .wj-task-card-bar[data-draggable="true"] .wj-task-drag-rail { color: var(--foreground); opacity: .62; }
+.wj-task-card:is(:hover, :focus-within) .wj-task-card-bar[data-draggable="true"] .wj-task-drag-rail > span { max-width: 38px; opacity: .72; transform: none; }
+.wj-task-card-bar[data-draggable="true"]:active .wj-task-drag-rail { opacity: .9; transform: scaleX(.985); }
 .wj-task-card-bar [data-slot="badge"] { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wj-task-card-bar.quiet { min-height: 8px; margin-bottom: 4px; border-bottom: 0; padding-bottom: 0; }
 .wj-task-summary { border-radius: 4px; cursor: pointer; }
 .wj-task-summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
 .wj-task-heading { min-width: 0; }
@@ -1136,6 +1137,8 @@ button.wj-task-team:focus-visible { outline: 2px solid var(--ring); outline-offs
 .wj-verification-progress > div strong { color: var(--foreground); font: 10px var(--wj-code-font); }
 .wj-verification-progress > span { display: block; height: 2px; margin-top: 5px; overflow: hidden; border-radius: 2px; background: var(--muted); }
 .wj-verification-progress > span::after { display: block; width: var(--wj-progress); height: 100%; background: var(--success); content: ""; transition: width 220ms var(--wj-ease, ease); }
+.wj-task-review-state { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent); padding-top: 7px; color: var(--muted-foreground); font-size: 10px; }
+.wj-task-review-state strong { overflow: hidden; color: var(--foreground); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .wj-task-actions { display: flex; min-height: 28px; align-items: end; margin: 8px -2px -2px; border-top: 1px solid color-mix(in srgb, var(--border) 68%, transparent); padding-top: 5px; }
 .wj-task-actions[data-quiet="true"] { min-height: 18px; margin-top: 2px; border-top: 0; padding-top: 0; }
 .wj-task-card:is([data-lane="running"], [data-lane="attention"]) .wj-task-actions[data-quiet="true"] button { opacity: 0; transition: opacity 140ms var(--wj-ease-out, ease); }
@@ -1164,7 +1167,7 @@ button.wj-task-team:focus-visible { outline: 2px solid var(--ring); outline-offs
 
 @container ops-board (max-width: 560px) {
   .wj-board:not(.wj-board-empty) { padding: 10px; }
-  .wj-board-list :is(.wj-task-execution, .wj-task-coordination, .wj-verification-progress),
+  .wj-board-list :is(.wj-task-execution, .wj-task-coordination, .wj-verification-progress, .wj-task-review-state),
   .wj-board:not(.wj-board-list) :is(.wj-task-coordination, .wj-task-note) { display: none; }
   .wj-board-list .wj-task-intervention { width: 100%; }
 }
@@ -1946,7 +1949,7 @@ html[data-dragging-pane] { cursor: grabbing; user-select: none; }
   .wj-agent-avatar::after, .wj-task-activity { animation: none !important; transform: none !important; }
   .wj-task-event-flash, .wj-task-event-flash::after { animation: none !important; }
   .wj-run-graph :is(path, button) { animation: none !important; transition: none !important; }
-  .wj-task-drag-indicator, .wj-usage-session-row, .wj-usage-session-row > .sargam-icon { animation: none !important; transition: none !important; transform: none !important; }
+  .wj-task-drag-rail, .wj-task-drag-rail > span, .wj-usage-session-row, .wj-usage-session-row > .sargam-icon { animation: none !important; transition: none !important; transform: none !important; }
   .wj-sticker-lens > span { transition: none !important; }
   .wj-error-toast[data-state] { animation: agent-fade-in 120ms var(--wj-ease-out) both; transform: none; }
   .wj-error-toast[data-state="closed"] { animation-direction: reverse; }

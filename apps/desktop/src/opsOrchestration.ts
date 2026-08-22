@@ -312,6 +312,7 @@ export function parseOpsState(value?: JsonObject): OpsState {
     eventCursors: value.eventCursors && typeof value.eventCursors === "object"
       ? value.eventCursors as Record<string, number>
       : {},
+    agentLabels: value.agentLabels as Record<string, string> ?? {},
   };
 }
 

@@ -53,6 +53,7 @@ jobs:
               - '.github/workflows/release.yml'
             site:
               - '.bun-version'
+              - 'VERSION'
               - 'apps/site/**'
               - '.github/workflows/ci.yml'
               - '.github/workflows/site.yml'
@@ -84,6 +85,7 @@ jobs:
           cd apps/site
           bun install --frozen-lockfile
           bun run build
+          bun run check:bundle
 
   desktop:
     needs: repo
