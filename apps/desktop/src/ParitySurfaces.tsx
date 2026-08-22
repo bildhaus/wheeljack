@@ -124,6 +124,7 @@ import {
   opsCurrentCardForAgent,
   opsDependencyPath,
   opsExecutionLane,
+  opsReviewLabel,
   opsReviewVerdict,
   opsVerificationContractIssues,
   opsVerificationProgress,
@@ -208,6 +209,16 @@ const settingsPageDetails: Record<SettingsPage, { title: string; description: st
   agents: { title: "Agents", description: "Configure installed coding agents and their launch defaults." },
   application: { title: "Application", description: "Inspect this build, local storage, and preference recovery." },
 };
+
+const reviewPolicyLabels = {
+  agent: "Agent reviewer (automatic)",
+  human: "Require human approval",
+  either: "Agent or human",
+} as const;
+
+function ReviewPolicyOptions() {
+  return <>{Object.entries(reviewPolicyLabels).map(([value, label]) => <SelectItem value={value} key={value}>{label}</SelectItem>)}</>;
+}
 
 const uiFontPresets = ["Geist Variable", "Open Sans Variable", "Inter Variable", "system-ui", "Segoe UI Variable Text", "Segoe UI", "SF Pro Text", "Helvetica Neue", "Arial"];
 const headingFontPresets = ["Geist Pixel", ...uiFontPresets];
@@ -1409,6 +1420,10 @@ export function OpsSurface({
     ? fileConflicts.filter((conflict) => conflict.cardIds.includes(inspectedCard.id)).map((conflict) => conflict.file)
     : [];
   const inspectedVerification = inspectedCard ? opsVerificationProgress(inspectedCard, inspectedConflictFiles.length > 0) : undefined;
+  const inspectedReview = inspectedCard ? opsReviewLabel(
+    inspectedCard,
+    inspectedCard.reviewerId ? nodes[inspectedCard.reviewerId]?.title : undefined,
+  ) : undefined;
   const inspectedChildProgress = inspectedCard ? opsChildProgress(state.cards, inspectedCard.id, doneColumnIds) : { done: 0, total: 0 };
   const inspectedTaskLaneLive = inspectedCard?.assigneeIds.some((id) => runtimes.some((runtime) =>
     runtime.nodeId === id && !isTerminalSessionStatus(runtime.status))) ?? false;
@@ -1794,6 +1809,10 @@ export function OpsSurface({
                           const agentsCoordinating = opsAgentsCoordinating(runtimeStatuses, cardConflictFiles.length > 0);
                           const attentionReason = opsAttentionReason(card, cardRole, runtimeStatuses, cardConflictFiles.length > 0);
                           const verification = opsVerificationProgress(card, cardConflictFiles.length > 0);
+                          const review = opsReviewLabel(
+                            card,
+                            card.reviewerId ? nodes[card.reviewerId]?.title : undefined,
+                          );
                           const liveSummary = opsCardActivitySummary(card, cardRuntimes, cardConflictFiles.length);
                           const runtimeOwners = cardRuntimes.map((runtime) => nodes[runtime.nodeId]?.title ?? runtime.nodeId).join(", ");
                           const recordedOwner = card.assignee?.trim() && card.assignee !== "Unassigned" ? card.assignee.trim() : "";
@@ -1937,6 +1956,7 @@ export function OpsSurface({
                                   Waiting on {dependencyCards.length}
                                 </button>}
                                 </div>}
+                                {cardRole === "review" && <div className="wj-task-review-state"><span>Review</span><strong>{review}</strong></div>}
                                 {cardRole === "review" && <div className="wj-verification-progress" aria-label={`${verification.passed} of ${verification.total} verification signals`}>
                                   <div><span>Verification</span><strong>{verification.passed}/{verification.total}</strong></div>
                                   <span style={{ "--wj-progress": `${verification.passed / verification.total * 100}%` } as React.CSSProperties} />
@@ -2285,7 +2305,7 @@ export function OpsSurface({
             <div><Label htmlFor="edit-task-definition">Definition of done</Label><Textarea id="edit-task-definition" value={contractEditDefinition} onChange={(event) => setContractEditDefinition(event.target.value)} placeholder="Observable acceptance criteria" /></div>
             <div><Label htmlFor="edit-task-constraints">Constraints</Label><Textarea id="edit-task-constraints" value={contractEditConstraints} onChange={(event) => setContractEditConstraints(event.target.value)} placeholder="Boundaries and compatibility requirements" /></div>
             <div><Label htmlFor="edit-task-verification">Verification command</Label><Input className="font-mono" id="edit-task-verification" value={contractEditVerification} onChange={(event) => setContractEditVerification(event.target.value)} placeholder="bun run test" /></div>
-            <div><Label>Review policy</Label><Select value={contractEditReviewPolicy} onValueChange={(value) => setContractEditReviewPolicy(value as OpsTaskContractDraft["reviewPolicy"])}><SelectTrigger aria-label="Edit review policy"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="agent">Agent reviewer</SelectItem><SelectItem value="human">Human approval</SelectItem><SelectItem value="either">Either</SelectItem></SelectContent></Select></div>
+            <div><Label>Review policy</Label><Select value={contractEditReviewPolicy} onValueChange={(value) => setContractEditReviewPolicy(value as OpsTaskContractDraft["reviewPolicy"])}><SelectTrigger aria-label="Edit review policy"><SelectValue /></SelectTrigger><SelectContent><ReviewPolicyOptions /></SelectContent></Select></div>
             {contractCard?.taskLane && (!contractEditDefinition.trim() || !contractEditVerification.trim()) && <p className="text-sm text-destructive" role="alert">An isolated task needs both a definition of done and a verification command.</p>}
           </div>
           <AlertDialogFooter>
@@ -2356,7 +2376,7 @@ export function OpsSurface({
                 <div className="wj-inspector-section-title"><span>Execution</span>{formatOpsElapsed(inspectedCard.startedAt, inspectedCard.completedAt ?? inspectedCard.pausedAt, now) && <time>{formatOpsElapsed(inspectedCard.startedAt, inspectedCard.completedAt ?? inspectedCard.pausedAt, now)}</time>}</div>
                 <div className="wj-inspector-team">
                   <div><span>Owner</span><strong>{inspectedCard.assigneeIds.length ? inspectedCard.assigneeIds.map((id) => nodes[id]?.title ?? id).join(", ") : "Unassigned"}</strong></div>
-                  <div><span>Reviewer</span><strong>{inspectedCard.reviewerId ? nodes[inspectedCard.reviewerId]?.title ?? inspectedCard.reviewerId : inspectedCard.reviewPolicy === "human" ? "Human approval" : "Unassigned"}</strong></div>
+                  <div><span>Review</span><strong>{inspectedReview}</strong></div>
                 </div>
                 <div className="wj-inspector-current"><span>Workspace</span><p>{taskWorkspaceLabel(inspectedCard, projectIsRepo)}{inspectedCard.taskLane && <><br /><code>{inspectedCard.taskLane.branch}</code><br /><code>{inspectedCard.taskLane.cwd}</code></>}</p></div>
                 {inspectedCard.lastNote && <div className="wj-inspector-current"><span>Current action</span><p>{inspectedCard.lastNote}</p></div>}
@@ -2368,7 +2388,7 @@ export function OpsSurface({
                   <div><dt>Definition of done</dt><dd>{inspectedCard.definitionOfDone || "Not defined"}</dd></div>
                   <div><dt>Constraints</dt><dd>{inspectedCard.constraints || "No explicit constraints"}</dd></div>
                   <div><dt>Verification</dt><dd><code>{inspectedCard.verificationCommand || "Not defined"}</code></dd></div>
-                  <div><dt>Review policy</dt><dd>{(inspectedCard.reviewPolicy ?? "agent").replace(/^./, (character) => character.toUpperCase())}</dd></div>
+                  <div><dt>Review policy</dt><dd>{reviewPolicyLabels[inspectedCard.reviewPolicy ?? "agent"]}</dd></div>
                 </dl>
               </section>
               <section>
@@ -4031,7 +4051,7 @@ export function ReviewDrawerSurface({
                   <div><Label htmlFor="review-definition">Definition of done</Label><Textarea id="review-definition" value={definitionDraft} onChange={(event) => setDefinitionDraft(event.target.value)} placeholder="Observable acceptance criteria" /></div>
                   <div><Label htmlFor="review-constraints">Constraints</Label><Textarea id="review-constraints" value={constraintsDraft} onChange={(event) => setConstraintsDraft(event.target.value)} placeholder="Boundaries and compatibility requirements" /></div>
                   <div><Label htmlFor="review-verification">Verification command</Label><Input className="font-mono" id="review-verification" value={verificationDraft} onChange={(event) => setVerificationDraft(event.target.value)} placeholder="bun run test" /></div>
-                  <div><Label>Review policy</Label><Select value={reviewPolicyDraft} onValueChange={(value) => setReviewPolicyDraft(value as OpsTaskContractDraft["reviewPolicy"])}><SelectTrigger aria-label="Review policy"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="agent">Agent reviewer</SelectItem><SelectItem value="human">Human approval</SelectItem><SelectItem value="either">Either</SelectItem></SelectContent></Select></div>
+                  <div><Label>Review policy</Label><Select value={reviewPolicyDraft} onValueChange={(value) => setReviewPolicyDraft(value as OpsTaskContractDraft["reviewPolicy"])}><SelectTrigger aria-label="Review policy"><SelectValue /></SelectTrigger><SelectContent><ReviewPolicyOptions /></SelectContent></Select></div>
                   {contractIssues.length > 0 && <p className="text-sm text-destructive" role="alert">{contractIssues.join(" · ")}</p>}
                   <Button variant="outline" disabled={!contractDirty || !definitionDraft.trim() || !verificationDraft.trim()} onClick={() => onUpdateContract(reviewCard, {
                     definitionOfDone: definitionDraft.trim(),

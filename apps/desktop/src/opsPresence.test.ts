@@ -22,6 +22,7 @@ import {
   opsFileConflictNeedsAttention,
   opsChildProgress,
   opsStatusAttentionReason,
+  opsReviewLabel,
   opsReviewVerdict,
   opsResolveFileConflict,
   opsVerificationContractIssues,
@@ -48,6 +49,19 @@ const card = (id: string, columnId: string, expectedFiles: string[]): OpsCard =>
 });
 
 describe("ops presence", () => {
+  it("presents review policy as automatic until the assigned reviewer takes over", () => {
+    const review = { ...card("review", "review", []), reviewPolicy: "agent" as const };
+    expect(opsReviewLabel(review)).toBe("Agent · Automatic");
+    expect(opsReviewLabel({ ...review, reviewPolicy: "human" })).toBe("Human approval · Required");
+    expect(opsReviewLabel({ ...review, reviewerId: "reviewer", agentStatuses: { reviewer: "running" } }, "Codex")).toBe("Codex · Running");
+    expect(opsReviewLabel({
+      ...review,
+      reviewerId: "reviewer",
+      agentStatuses: { reviewer: "completed" },
+      events: [{ id: "reviewer.ndjson:1", kind: "handoff", timestamp: "2026-08-22T10:00:00Z", message: "REVIEW VERDICT: APPROVE — verified." }],
+    }, "Codex")).toBe("Codex · Approved");
+  });
+
   it("lets an owning agent release overlapping claims without changing its peer", () => {
     const state: OpsState = {
       version: 2,

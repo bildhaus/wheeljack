@@ -146,6 +146,28 @@ export function opsReviewVerdict(card: OpsCard): OpsReviewVerdict | undefined {
   })[0];
 }
 
+export function opsReviewLabel(
+  card: OpsCard,
+  reviewerName?: string,
+): string {
+  if (!card.reviewerId) {
+    if (card.reviewPolicy === "human") return "Human approval · Required";
+    if (card.reviewPolicy === "either") return "Agent or human · Either";
+    return "Agent · Automatic";
+  }
+
+  const verdict = opsReviewVerdict(card);
+  const status = card.agentStatuses[card.reviewerId];
+  const state = verdict?.status === "approved"
+    ? "Approved"
+    : verdict?.status === "changes_requested"
+      ? "Changes requested"
+      : status === "running" || status === "in_progress"
+        ? "Running"
+        : status ? resolveRunState(status).label : "Assigned";
+  return `${reviewerName || card.reviewerId} · ${state}`;
+}
+
 function opsHasReviewEvidence(card: OpsCard): boolean {
   return Boolean(opsReviewVerdict(card)) || currentWorkCycleEvents(card).some((event) =>
     (event.kind === "handoff" || event.kind === "review")
