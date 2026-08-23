@@ -68,6 +68,14 @@ handoff notes, acceptance criteria, and verification results. A reviewer returns
 an explicit approve or request-changes verdict. Only completed proof and an
 acceptable review should move a task to delivery.
 
-When the lane is no longer needed, close it through the task controls after its
-changes are integrated or intentionally discarded. Do not remove a worktree
-that contains uncommitted work you still need.
+When the lane is no longer needed, use **Remove worktree** from the task menu or
+task inspector. Clean lanes close immediately. If the lane has local changes,
+wheeljack assigns the existing or a fresh task agent to preserve valuable work
+on the task branch and make the lane clean before removal. Delete and archive
+requests use the same cleanup queue, so they do not require a separate manual
+worktree step.
+
+The **Git** utility panel lists registered worktrees, their branch, path, clean
+or dirty state, and any linked Plan task. It also surfaces task lanes whose Git
+registration is already missing; reconciling one only detaches stale Plan
+metadata and leaves the unregistered filesystem path untouched.

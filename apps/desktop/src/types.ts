@@ -441,6 +441,12 @@ export interface OpsTaskLane {
   branch: string;
   baseCommit: string;
   closedAt?: string;
+  cleanup?: {
+    action: "remove" | "delete" | "archive";
+    status: "queued" | "resolving" | "blocked";
+    requestedAt: string;
+    message?: string;
+  };
 }
 
 export interface OpsDecompositionTaskDraft {

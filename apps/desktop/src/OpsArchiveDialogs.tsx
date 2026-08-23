@@ -43,9 +43,10 @@ export default function OpsArchiveDialogs({
   const [error, setError] = useState("");
   const doneIds = new Set(state.columns.filter((column) => column.role === "done").map((column) => column.id));
   const doneCards = state.cards.filter((card) => doneIds.has(card.columnId));
+  const laneCards = doneCards.filter((card) => Boolean(card.taskLane && !card.taskLane.closedAt));
   const blockedCards = doneCards.filter((card) => Boolean(
-    (card.taskLane && !card.taskLane.closedAt)
-    || opsCardParticipantIds(card, runtimes).some((id) => runtimes.some((runtime) =>
+    (!card.taskLane || card.taskLane.closedAt)
+    && opsCardParticipantIds(card, runtimes).some((id) => runtimes.some((runtime) =>
       runtime.nodeId === id && !isTerminalSessionStatus(runtime.status))),
   ));
   const blockedIds = new Set(blockedCards.map((card) => card.id));
@@ -64,9 +65,10 @@ export default function OpsArchiveDialogs({
       <AlertDialogContent className="wj-dialog wj-dialog-medium">
         <AlertDialogHeader>
           <AlertDialogTitle>Archive completed tasks?</AlertDialogTitle>
-          <AlertDialogDescription>{archiveableCards.length} completed {archiveableCards.length === 1 ? "task" : "tasks"} will leave the board and KANBAN.md. Their task history remains available here and can be restored.</AlertDialogDescription>
+          <AlertDialogDescription>{archiveableCards.length} completed {archiveableCards.length === 1 ? "task" : "tasks"} will leave the board and KANBAN.md. Task worktrees will be resolved first when needed, and history remains restorable.</AlertDialogDescription>
         </AlertDialogHeader>
-        {blockedCards.length > 0 && <div className="wj-inspector-warning"><CircleDot />{blockedCards.length === 1 ? "1 task is excluded until its active agent or worktree is closed." : `${blockedCards.length} tasks are excluded until their active agents or worktrees are closed.`}</div>}
+        {laneCards.length > 0 && <div className="wj-inspector-warning"><CircleDot />{laneCards.length === 1 ? "1 task has a worktree. Wheeljack will remove it when clean or assign its agent to preserve and resolve local changes first." : `${laneCards.length} tasks have worktrees. Wheeljack will resolve cleanups automatically with bounded agent concurrency.`}</div>}
+        {blockedCards.length > 0 && <div className="wj-inspector-warning"><CircleDot />{blockedCards.length === 1 ? "1 task without a worktree is excluded until its active agent finishes." : `${blockedCards.length} tasks without worktrees are excluded until their active agents finish.`}</div>}
         {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>

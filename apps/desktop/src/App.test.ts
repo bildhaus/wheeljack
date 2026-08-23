@@ -457,6 +457,7 @@ test("keeps task lanes local, durable, and structurally validated", () => {
         cwd: "C:\\repo-task-123\\apps\\desktop",
         branch: "wheeljack/task-1234567890abcdef1234",
         baseCommit: "a".repeat(40),
+        cleanup: { action: "delete", status: "queued", requestedAt: "2026-08-23T20:00:00Z" },
       },
     }, {
       id: "broken-lane",
@@ -471,6 +472,7 @@ test("keeps task lanes local, durable, and structurally validated", () => {
   expect(state.cards[0].taskLane).toMatchObject({
     cwd: "C:\\repo-task-123\\apps\\desktop",
     branch: "wheeljack/task-1234567890abcdef1234",
+    cleanup: { action: "delete", status: "queued", requestedAt: "2026-08-23T20:00:00Z" },
   });
   expect(state.cards[1].taskLane).toBeUndefined();
   const markdown = renderKanban(state);
