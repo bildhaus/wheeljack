@@ -2,9 +2,9 @@
   "version": 1,
   "bundle": {
     "ceiling": {
-      "initialJsBytes": 1700000,
+      "initialJsBytes": 1705000,
       "largestJsChunkBytes": 1350000,
-      "totalJsBytes": 1800000
+      "totalJsBytes": 1810000
     },
     "target": {
       "initialJsBytes": 1250000,

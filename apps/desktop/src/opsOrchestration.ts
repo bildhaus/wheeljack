@@ -225,11 +225,9 @@ export function parseOpsSteeringDirective(value: unknown): OpsSteeringDirective 
   };
 }
 
-export function parseOpsState(value?: JsonObject): OpsState {
-  if (!value || value.version !== 2 || !Array.isArray(value.cards)) {
-    return defaultOpsState();
-  }
-  const cards = value.cards.flatMap((candidate) => {
+function parseOpsCards(value: unknown): OpsCard[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
     if (!candidate || typeof candidate !== "object") return [];
     const item = candidate as Record<string, unknown>;
     if (typeof item.id !== "string" || typeof item.title !== "string") return [];
@@ -291,6 +289,15 @@ export function parseOpsState(value?: JsonObject): OpsState {
       taskLane: parseOpsTaskLane(item.taskLane),
     }];
   });
+}
+
+export function parseOpsState(value?: JsonObject): OpsState {
+  if (!value || value.version !== 2 || !Array.isArray(value.cards)) {
+    return defaultOpsState();
+  }
+  const cards = parseOpsCards(value.cards);
+  const liveCardIds = new Set(cards.map((card) => card.id));
+  const archivedCards = parseOpsCards(value.archivedCards).filter((card) => !liveCardIds.has(card.id));
   const columns = Array.isArray(value.columns)
     ? value.columns.flatMap((candidate) => {
         if (!candidate || typeof candidate !== "object") return [];
@@ -307,6 +314,7 @@ export function parseOpsState(value?: JsonObject): OpsState {
     version: 2,
     columns: columns.length ? columns : defaultKanbanColumns(),
     cards,
+    archivedCards,
     prd: typeof value.prd === "string" ? value.prd : "",
     tdd: typeof value.tdd === "string" ? value.tdd : "",
     eventCursors: value.eventCursors && typeof value.eventCursors === "object"

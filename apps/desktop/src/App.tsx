@@ -3849,7 +3849,7 @@ export function App() {
     });
   };
 
-  async function persistOpsImmediately(change: (current: OpsState) => OpsState): Promise<OpsState> {
+  async function persistOpsImmediately(change: (current: OpsState) => OpsState, waitForProjection = false): Promise<OpsState> {
     const activeCanvas = canvasRef.current;
     const activeProject = projectRef.current;
     if (!activeCanvas || !activeProject) throw new Error("Open a project before starting a task agent.");
@@ -3864,7 +3864,7 @@ export function App() {
       currentRuntimes(),
       nodesRef.current,
       opsNodeRef.current,
-      false,
+      waitForProjection,
     );
     return next;
   }
@@ -4332,6 +4332,17 @@ export function App() {
       return;
     }
     changeOps((current) => ({ ...current, cards: current.cards.filter((item) => item.id !== card.id) }));
+  };
+
+  const archiveDoneOpsTasks = async (cardIds: string[]) => {
+    const activeRuntimes = Object.values(currentRuntimes());
+    const { archiveDoneOpsCardsSafely } = await import("./opsArchive");
+    await persistOpsImmediately((state) => archiveDoneOpsCardsSafely(state, cardIds, activeRuntimes), true);
+  };
+
+  const restoreArchivedOpsTasks = async (cardIds: string[]) => {
+    const { restoreArchivedOpsCards } = await import("./opsArchive");
+    await persistOpsImmediately((state) => restoreArchivedOpsCards(state, cardIds), true);
   };
 
   const removeOpsTaskLane = async (card: OpsCard) => {
@@ -6966,6 +6977,8 @@ export function App() {
               taskAgentName={selectedAdapter?.displayName ?? "default agent"}
               onUpdate={updateOpsTask}
               onDelete={deleteOpsTask}
+              onArchiveDone={archiveDoneOpsTasks}
+              onRestoreArchived={restoreArchivedOpsTasks}
               onStartAgent={startAgentForOpsTask}
               onSaveBot={openSaveOneOff}
               savedBotAvatarSeeds={bots.map((bot) => bot.avatarSeed)}

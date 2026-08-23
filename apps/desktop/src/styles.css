@@ -1042,7 +1042,13 @@ html[data-project-empty-exiting] .wj-project-empty .wj-empty-type-caret { displa
 .wj-board-column.attention { border-color: color-mix(in srgb, var(--warning) 24%, var(--border)); }
 .wj-board-column > header { display: flex; min-height: 40px; align-items: center; justify-content: space-between; padding: 0 5px 9px; }
 .wj-board-column h2 { font-size: 14px; font-weight: 640; letter-spacing: -.005em; }
+.wj-column-actions { display: flex; align-items: center; gap: 2px; }
 .wj-column-count { min-width: 22px; border-radius: 4px; padding: 3px 5px; color: var(--muted-foreground); background: color-mix(in srgb, var(--muted) 68%, transparent); font: 10px/1 var(--wj-code-font); text-align: center; }
+.wj-archive-list { display: grid; gap: 8px; padding: 16px 1px; }
+.wj-archive-item { display: flex; align-items: center; justify-content: space-between; gap: 16px; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.wj-archive-item > div { display: grid; min-width: 0; gap: 3px; }
+.wj-archive-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wj-archive-item small { color: var(--muted-foreground); }
 .wj-board-stack { min-height: 0; padding: 2px 3px 3px 0; overflow-y: auto; scrollbar-gutter: stable; }
 .wj-board-stack > * + * { margin-top: 10px; }
 .wj-board-list:not(.wj-board-empty) { width: 100%; height: auto; min-height: 100%; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 18px; padding: 18px; }
