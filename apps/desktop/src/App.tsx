@@ -4452,7 +4452,7 @@ export function App() {
     const cleanup = card.taskLane.cleanup;
     if (!cleanup && !await requestConfirmation(
       `Resolve and remove ${card.taskLane.branch}?`,
-      "Wheeljack will remove the worktree as soon as it is clean. If it has local changes, the owning agent will preserve and commit valuable work first. The Git branch and task history remain available.",
+      "wheeljack will remove the worktree as soon as it is clean. If it has local changes, the owning agent will preserve and commit valuable work first. The Git branch and task history remain available.",
     )) return;
     try {
       await queueOpsTaskLaneCleanup(card, cleanup?.action ?? "remove");

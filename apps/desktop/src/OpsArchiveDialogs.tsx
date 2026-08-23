@@ -67,7 +67,7 @@ export default function OpsArchiveDialogs({
           <AlertDialogTitle>Archive completed tasks?</AlertDialogTitle>
           <AlertDialogDescription>{archiveableCards.length} completed {archiveableCards.length === 1 ? "task" : "tasks"} will leave the board and KANBAN.md. Task worktrees will be resolved first when needed, and history remains restorable.</AlertDialogDescription>
         </AlertDialogHeader>
-        {laneCards.length > 0 && <div className="wj-inspector-warning"><CircleDot />{laneCards.length === 1 ? "1 task has a worktree. Wheeljack will remove it when clean or assign its agent to preserve and resolve local changes first." : `${laneCards.length} tasks have worktrees. Wheeljack will resolve cleanups automatically with bounded agent concurrency.`}</div>}
+        {laneCards.length > 0 && <div className="wj-inspector-warning"><CircleDot />{laneCards.length === 1 ? "1 task has a worktree. wheeljack will remove it when clean or assign its agent to preserve and resolve local changes first." : `${laneCards.length} tasks have worktrees. wheeljack will resolve cleanups automatically with bounded agent concurrency.`}</div>}
         {blockedCards.length > 0 && <div className="wj-inspector-warning"><CircleDot />{blockedCards.length === 1 ? "1 task without a worktree is excluded until its active agent finishes." : `${blockedCards.length} tasks without worktrees are excluded until their active agents finish.`}</div>}
         {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
         <AlertDialogFooter>
