@@ -23,6 +23,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       desktop: ${{ steps.paths.outputs.desktop }}
+      docs: ${{ steps.paths.outputs.docs }}
       site: ${{ steps.paths.outputs.site }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,6 +58,13 @@ jobs:
               - 'apps/site/**'
               - '.github/workflows/ci.yml'
               - '.github/workflows/site.yml'
+            docs:
+              - '.bun-version'
+              - 'docs/**'
+              - 'apps/docs/**'
+              - 'scripts/check-docs-site.mjs'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/docs.yml'
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: .bun-version
@@ -87,6 +95,25 @@ jobs:
           bun run build
           bun run check:bundle
 
+  docs:
+    needs: repo
+    if: (github.event_name == 'pull_request' && needs.repo.outputs.docs == 'true') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - name: Build documentation
+        run: |
+          set -euo pipefail
+          cd apps/docs
+          bun install --frozen-lockfile
+          bun run build
+
   desktop:
     needs: repo
     if: (github.event_name == 'pull_request' && needs.repo.outputs.desktop == 'true') || github.event_name == 'workflow_dispatch'
@@ -102,20 +129,21 @@ jobs:
 
   required:
     if: always()
-    needs: [repo, site, desktop]
+    needs: [repo, site, docs, desktop]
     name: required
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       REPO_RESULT: ${{ needs.repo.result }}
       SITE_RESULT: ${{ needs.site.result }}
+      DOCS_RESULT: ${{ needs.docs.result }}
       DESKTOP_RESULT: ${{ needs.desktop.result }}
     steps:
       - name: Require every applicable lane
         run: |
           set -euo pipefail
           [[ "$REPO_RESULT" == "success" ]] || { echo "Repository checks: $REPO_RESULT" >&2; exit 1; }
-          for result in "$SITE_RESULT" "$DESKTOP_RESULT"; do
+          for result in "$SITE_RESULT" "$DOCS_RESULT" "$DESKTOP_RESULT"; do
             [[ "$result" == "success" || "$result" == "skipped" ]] || { echo "Conditional lane: $result" >&2; exit 1; }
           done
-          printf 'repo=%s site=%s desktop=%s\n' "$REPO_RESULT" "$SITE_RESULT" "$DESKTOP_RESULT"
+          printf 'repo=%s site=%s docs=%s desktop=%s\n' "$REPO_RESULT" "$SITE_RESULT" "$DOCS_RESULT" "$DESKTOP_RESULT"

@@ -1,0 +1,5 @@
+# Public documentation: search and AI crawling are intentionally allowed.
+User-agent: *
+Allow: /
+
+Sitemap: https://docs.wheeljack.dev/sitemap-index.xml

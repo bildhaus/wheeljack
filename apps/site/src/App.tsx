@@ -532,7 +532,7 @@ function SiteNav() {
           <a href="#features">Features</a>
           <a href="#workflow">Workflow</a>
           <a href="#download">Downloads</a>
-          <a href="https://github.com/bildhaus/wheeljack">Source</a>
+          <a href="https://docs.wheeljack.dev">Docs</a>
         </div>
         <a className="nav-cta" href="#download">
           <span>Get wheeljack</span>

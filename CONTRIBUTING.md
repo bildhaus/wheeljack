@@ -16,8 +16,8 @@ sessions, Git operations, and updates remain authoritative in `wheeljack-core`.
 - Follow the repository [Code of Conduct](CODE_OF_CONDUCT.md).
 
 The architecture and adapter contracts are described in
-[`docs/architecture.md`](docs/architecture.md) and
-[`docs/agent-adapters.md`](docs/agent-adapters.md).
+[`docs/reference/architecture.md`](docs/reference/architecture.md) and
+[`docs/reference/agent-adapters.md`](docs/reference/agent-adapters.md).
 
 ## Development setup
 
@@ -69,6 +69,19 @@ bun install --frozen-lockfile
 bun run build
 Pop-Location
 ```
+
+If public documentation changed:
+
+```powershell
+Push-Location apps\docs
+bun install --frozen-lockfile
+bun run build
+Pop-Location
+```
+
+Canonical documentation content lives under `docs/`; `apps/docs` owns its
+Starlight rendering, generated search index, validation, and deployment config.
+Every public page requires unique title and description frontmatter.
 
 UI changes should include focused render tests and before/after screenshots.
 Native behavior should be exercised in the Tauri runtime; a browser-only run

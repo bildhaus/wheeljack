@@ -1,0 +1,28 @@
+# wheeljack docs
+
+> Public documentation for wheeljack, a local-first desktop workspace for coding agents.
+
+## Start here
+
+- [Overview](https://docs.wheeljack.dev/)
+- [Installation](https://docs.wheeljack.dev/getting-started/installation/)
+- [Your first project](https://docs.wheeljack.dev/getting-started/first-project/)
+- [Connect coding agents](https://docs.wheeljack.dev/getting-started/connect-agents/)
+
+## Product guides
+
+- [Workspaces and panes](https://docs.wheeljack.dev/guides/workspaces-and-panes/)
+- [Structured agents](https://docs.wheeljack.dev/guides/structured-agents/)
+- [Plan and review](https://docs.wheeljack.dev/guides/plan-and-review/)
+- [Bots](https://docs.wheeljack.dev/guides/bots/)
+- [Settings and shortcuts](https://docs.wheeljack.dev/guides/settings-and-shortcuts/)
+- [Updates and recovery](https://docs.wheeljack.dev/guides/updates-and-recovery/)
+
+## Reference and help
+
+- [Local data and permissions](https://docs.wheeljack.dev/reference/local-data-and-permissions/)
+- [Architecture](https://docs.wheeljack.dev/reference/architecture/)
+- [Agent adapters](https://docs.wheeljack.dev/reference/agent-adapters/)
+- [Troubleshooting](https://docs.wheeljack.dev/help/troubleshooting/)
+- [Support and security](https://docs.wheeljack.dev/help/support-and-security/)
+- [Source repository](https://github.com/bildhaus/wheeljack)

@@ -104,9 +104,9 @@ private-build `com.oshtz.wheeljack` profile, then falls back to the older
 only while the new production database is empty. Every source database remains
 untouched and the migrated database gets a pre-migration backup.
 
-Architecture and adapter extension details are documented in
-[`docs/architecture.md`](docs/architecture.md) and
-[`docs/agent-adapters.md`](docs/agent-adapters.md).
+User guides, troubleshooting, architecture, and adapter extension details are
+published at [docs.wheeljack.dev](https://docs.wheeljack.dev). The canonical
+Markdown remains in [`docs/`](docs/).
 
 ## Release
 
