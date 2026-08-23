@@ -107,6 +107,7 @@ import { ColorPickerPopover } from "./ColorPickerPopover";
 import { ActionCard, type ActionCardAction } from "./ActionCard";
 import { AgentAvatar } from "./AgentAvatar";
 import { RunStateBadge } from "./RunStateBadge";
+import { resolveAgentLabel } from "./agentIdentity";
 import { resolveRunState, visibleRunStateDetail } from "./runState";
 import { OpsRunGraph } from "./RunGraphSurface";
 import { ProviderMark } from "./ProviderMark";
@@ -136,7 +137,7 @@ import { deriveOpsFloorModel, floorRuntimeCanRecover, type OpsFloorAttention, ty
 import { deriveOpsRunGraphModel, type OpsRunGraphRange, type OpsRunGraphSelection } from "./opsRunGraph";
 import { opsTaskTimeline } from "./opsTimeline";
 import { adapterReadinessLabel, canVerifyAdapter } from "./adapterReadiness";
-import { isTerminalSessionStatus } from "./agentRuntime";
+import { isLiveSessionStatus, isTerminalSessionStatus } from "./agentRuntime";
 import { needsAttention, pendingAgentInteraction, type AttentionItem } from "./attention";
 import { builtInThemes, compileTheme, contrastRatio, replaceThemeAssignments, serializeTheme, themeAssignment, type ThemeDefinition } from "./theme";
 
@@ -717,7 +718,7 @@ export function ProjectSidebar({
               </div>
             )}
           {projects.map((item) => {
-            const live = sessions.filter((session) => session.cwd === item.path && session.status === "running").length;
+            const live = sessions.filter((session) => session.cwd === item.path && isLiveSessionStatus(session.status)).length;
             const selected = item.id === project?.id;
             const active = selected && (surface === "terminal" || surface === "ops");
             const itemLoading = item.id === loadingProjectId;
@@ -855,7 +856,7 @@ export function HomeSurface({
   botActiveCount: number;
   onBots: () => void;
 }) {
-  const live = sessions.filter((session) => session.status === "running");
+  const live = sessions.filter((session) => isLiveSessionStatus(session.status));
   if (!loading && projects.length === 0) {
     return (
       <main className="wj-page wj-home-page" aria-labelledby="home-first-run-heading">
@@ -940,7 +941,7 @@ export function HomeSurface({
             </div>
             {showAgentRail && <><SectionHeading title="Live sessions" className="mt-6" />
               <div className="wj-session-list">
-                {live.map((session) => <ContextMenu key={session.id}><ContextMenuTrigger asChild><button onClick={() => onSession(session)}><CircleDot /><span>{session.nodeId}</span><small>{session.adapterId}</small><RunStateBadge status={session.status} variant="compact" /></button></ContextMenuTrigger><ContextMenuContent><ContextMenuItem onSelect={() => onSession(session)}><Terminal />Open session</ContextMenuItem><DevToolsContextItem /></ContextMenuContent></ContextMenu>)}
+                {live.map((session) => <ContextMenu key={session.id}><ContextMenuTrigger asChild><button onClick={() => onSession(session)}><CircleDot /><span>{resolveAgentLabel(session.nodeTitle)}</span><small>{session.adapterId}</small><RunStateBadge status={session.status} variant="compact" /></button></ContextMenuTrigger><ContextMenuContent><ContextMenuItem onSelect={() => onSession(session)}><Terminal />Open session</ContextMenuItem><DevToolsContextItem /></ContextMenuContent></ContextMenu>)}
                 {!loading && live.length === 0 && <Empty compact icon={<Terminal />} title="No live sessions" detail={projects.length ? "Open Work to start a shell or launch an agent in this workspace." : "Open a project first, then start a shell or agent session."} action={<Button variant="outline" size="sm" onClick={projects.length ? onTerminal : onOpen}>{projects.length ? "Open Work" : "Open folder"}</Button>} />}
               </div></>}
           </ScrollArea>
@@ -1388,6 +1389,8 @@ export function OpsSurface({
   const waitingByCard = new Map(waitingRelationships.map((relationship) => [relationship.cardId, relationship]));
   const dependencyPath = dependencyFocusCardId ? opsDependencyPath(state.cards, dependencyFocusCardId) : new Set<string>();
   const roleByColumnId = new Map(state.columns.map((column) => [column.id, column.role]));
+  const agentName = (id: string) => resolveAgentLabel(nodes[id]?.title, state.agentLabels?.[id]);
+  const reviewerName = (id?: string) => id ? agentName(id) : undefined;
   const cardRuntimeStatuses = (card: OpsCard) => opsCardParticipantIds(card, structuredRuntimes).flatMap((id) => {
     const runtime = structuredRuntimes.find((candidate) => candidate.nodeId === id);
     return runtime ? [runtime.status] : [];
@@ -1421,7 +1424,7 @@ export function OpsSurface({
   const inspectedVerification = inspectedCard ? opsVerificationProgress(inspectedCard, inspectedConflictFiles.length > 0) : undefined;
   const inspectedReview = inspectedCard ? opsReviewLabel(
     inspectedCard,
-    inspectedCard.reviewerId ? nodes[inspectedCard.reviewerId]?.title : undefined,
+    reviewerName(inspectedCard.reviewerId),
   ) : undefined;
   const inspectedChildProgress = inspectedCard ? opsChildProgress(state.cards, inspectedCard.id, doneColumnIds) : { done: 0, total: 0 };
   const inspectedTaskLaneLive = inspectedCard?.assigneeIds.some((id) => runtimes.some((runtime) =>
@@ -1652,7 +1655,7 @@ export function OpsSurface({
               <DropdownMenuTrigger asChild>
                 <Button className="wj-agent-control" aria-label={`${structuredRuntimes.length} connected agents; open agent controls`} variant={attentionRuntimes.length ? "secondary" : "ghost"} size="sm">
                   {structuredRuntimes.length
-                    ? <span className="wj-avatar-stack">{structuredRuntimes.slice(0, 5).map((runtime) => <AgentAvatar id={runtime.nodeId} label={nodes[runtime.nodeId]?.title ?? runtime.nodeId} status={runtime.status} key={runtime.nodeId} />)}</span>
+                    ? <span className="wj-avatar-stack">{structuredRuntimes.slice(0, 5).map((runtime) => <AgentAvatar id={runtime.nodeId} label={agentName(runtime.nodeId)} status={runtime.status} key={runtime.nodeId} />)}</span>
                     : <CircleDot />}
                   <span className="wj-agent-status-label">{structuredRuntimes.length ? `${activeRuntimes.length} active${attentionRuntimes.length ? ` · ${attentionRuntimes.length} need attention` : ""}` : "0 agents"}</span>
                   <ChevronDownIcon />
@@ -1810,12 +1813,12 @@ export function OpsSurface({
                           const verification = opsVerificationProgress(card, cardConflictFiles.length > 0);
                           const review = opsReviewLabel(
                             card,
-                            card.reviewerId ? nodes[card.reviewerId]?.title : undefined,
+                            reviewerName(card.reviewerId),
                           );
                           const liveSummary = opsCardActivitySummary(card, cardRuntimes, cardConflictFiles.length);
-                          const runtimeOwners = cardRuntimes.map((runtime) => nodes[runtime.nodeId]?.title ?? runtime.nodeId).join(", ");
+                          const runtimeOwners = cardRuntimes.map((runtime) => agentName(runtime.nodeId)).join(", ");
                           const recordedOwner = card.assignee?.trim() && card.assignee !== "Unassigned" ? card.assignee.trim() : "";
-                          const ownerLabel = runtimeOwners || recordedOwner || agentIds.map((id) => nodes[id]?.title ?? id).join(", ") || "Unassigned";
+                          const ownerLabel = runtimeOwners || recordedOwner || agentIds.map(agentName).join(", ") || "Unassigned";
                           const waiting = waitingByCard.get(card.id);
                           const events = card.events ?? [];
                           const latestEvent = events.at(-1);
@@ -1935,7 +1938,7 @@ export function OpsSurface({
                                 {showExecution && <div className="wj-task-execution">
                                 {cardRuntimes.length > 0
                                   ? <button type="button" className="wj-task-team" aria-label={`Open ${ownerLabel}: ${liveSummary}`} onClick={() => onOpenRuntime(cardRuntimes[0])}>
-                                      <div className="wj-avatar-stack">{cardRuntimes.slice(0, 4).map((runtime) => <AgentAvatar id={runtime.nodeId} label={nodes[runtime.nodeId]?.title ?? runtime.nodeId} status={runtime.status} key={runtime.nodeId} />)}</div>
+                                      <div className="wj-avatar-stack">{cardRuntimes.slice(0, 4).map((runtime) => <AgentAvatar id={runtime.nodeId} label={agentName(runtime.nodeId)} status={runtime.status} key={runtime.nodeId} />)}</div>
                                       <div aria-atomic="true" aria-live="polite"><strong>{ownerLabel}</strong><span className="wj-task-activity" title={liveSummary} key={latestEvent?.id ?? liveSummary}>{liveSummary}</span></div>
                                     </button>
                                   : <div className="wj-task-team wj-task-team-static"><div className="wj-task-unassigned"><span /><div><strong>{ownerLabel}</strong><small>{liveSummary}{lastActivity ? ` · last active ${lastActivity}` : ""}</small></div></div></div>}
@@ -2002,7 +2005,7 @@ export function OpsSurface({
               <div className="wj-agent-rail-header"><div><div className="wj-section-label">Team</div>{!agentRailCollapsed && <span>{structuredRuntimes.length} connected</span>}</div><Button aria-label={agentRailCollapsed ? "Expand agent rail" : "Collapse agent rail"} variant="ghost" size="icon-xs" onClick={() => onAgentRailCollapsed(!agentRailCollapsed)}>{agentRailCollapsed ? <ChevronsLeft /> : <ChevronsRight />}</Button></div>
               {agentRailCollapsed && <div className="wj-agent-rail-stack">{structuredRuntimes.slice(0, 6).map((runtime) => <ContextMenu key={runtime.nodeId}><ContextMenuTrigger asChild><div
                 className="wj-agent-drop-target"
-              ><AgentAvatar id={runtime.nodeId} label={nodes[runtime.nodeId]?.title ?? runtime.nodeId} status={runtime.status} /></div></ContextMenuTrigger><ContextMenuContent className="min-w-48">{renderAgentRailMenuItems(runtime)}</ContextMenuContent></ContextMenu>)}</div>}
+              ><AgentAvatar id={runtime.nodeId} label={agentName(runtime.nodeId)} status={runtime.status} /></div></ContextMenuTrigger><ContextMenuContent className="min-w-48">{renderAgentRailMenuItems(runtime)}</ContextMenuContent></ContextMenu>)}</div>}
               {!agentRailCollapsed && <>
                 <div className="wj-team-signals">
                   <div><strong>{activeRuntimes.length}</strong><span>working</span></div>
@@ -2034,14 +2037,14 @@ export function OpsSurface({
                   });
                   const waitingOnAgents = currentWait?.waitingOnAgentIds
                     .filter((id) => id !== runtime.nodeId)
-                    .map((id) => nodes[id]?.title ?? id);
+                    .map(agentName);
                   const runtimeDetail = visibleRunStateDetail(runtime.status, runtime.statusSummary);
                   return <ContextMenu key={runtime.nodeId}><ContextMenuTrigger asChild><article
                     className="wj-agent-status"
                     data-status={runtime.status}
                   >
-                    <AgentAvatar id={runtime.nodeId} label={nodes[runtime.nodeId]?.title ?? runtime.nodeId} status={runtime.status} />
-                    <div className="min-w-0"><div><strong>{nodes[runtime.nodeId]?.title ?? runtime.nodeId}</strong><RunStateBadge status={runtime.status} variant="compact" /></div><small>{currentCard?.title ?? "Available"}</small>{waitingOn?.length ? <p className="waiting">Waiting on {waitingOnAgents?.length ? waitingOnAgents.join(", ") : waitingOn.join(", ")}</p> : runtimeDetail && <p>{runtimeDetail}</p>}<footer><span>{assignedCards.length} {assignedCards.length === 1 ? "task" : "tasks"}</span>{["failed", "disconnected"].includes(runtime.status) && <Button size="xs" onClick={() => onResumeRuntime(runtime)}>Recover</Button>}<Button variant="ghost" size="xs" onClick={() => onQueryRuntime(runtime)}>Query</Button></footer></div>
+                    <AgentAvatar id={runtime.nodeId} label={agentName(runtime.nodeId)} status={runtime.status} />
+                    <div className="min-w-0"><div><strong>{agentName(runtime.nodeId)}</strong><RunStateBadge status={runtime.status} variant="compact" /></div><small>{currentCard?.title ?? "Available"}</small>{waitingOn?.length ? <p className="waiting">Waiting on {waitingOnAgents?.length ? waitingOnAgents.join(", ") : waitingOn.join(", ")}</p> : runtimeDetail && <p>{runtimeDetail}</p>}<footer><span>{assignedCards.length} {assignedCards.length === 1 ? "task" : "tasks"}</span>{["failed", "disconnected"].includes(runtime.status) && <Button size="xs" onClick={() => onResumeRuntime(runtime)}>Recover</Button>}<Button variant="ghost" size="xs" onClick={() => onQueryRuntime(runtime)}>Query</Button></footer></div>
                   </article></ContextMenuTrigger><ContextMenuContent className="min-w-48">{renderAgentRailMenuItems(runtime)}</ContextMenuContent></ContextMenu>;
                 })}</div>
               </>}
@@ -2174,7 +2177,7 @@ export function OpsSurface({
             <Label htmlFor="ops-planning-agent">Planning agent</Label>
             <Select value={decompositionPlannerId} onValueChange={setDecompositionPlannerId}>
               <SelectTrigger id="ops-planning-agent"><SelectValue placeholder="Choose an idle agent" /></SelectTrigger>
-              <SelectContent>{idleStructuredRuntimes.map((runtime) => <SelectItem value={runtime.nodeId} key={runtime.nodeId}>{nodes[runtime.nodeId]?.title ?? runtime.nodeId}</SelectItem>)}</SelectContent>
+              <SelectContent>{idleStructuredRuntimes.map((runtime) => <SelectItem value={runtime.nodeId} key={runtime.nodeId}>{agentName(runtime.nodeId)}</SelectItem>)}</SelectContent>
             </Select>
             {!idleStructuredRuntimes.length && <p className="text-sm text-muted-foreground">No idle structured agent is connected.</p>}
             {decompositionError && <p className="text-sm text-destructive" role="alert">{decompositionError}</p>}
@@ -2214,7 +2217,7 @@ export function OpsSurface({
                   <CardContent className="space-y-3">
                     <div><Label htmlFor={`decompose-title-${task.key}`}>Title</Label><Input id={`decompose-title-${task.key}`} value={task.title} onChange={(event) => updateDecompositionTask(task.key, { title: event.target.value })} /></div>
                     <div><Label htmlFor={`decompose-detail-${task.key}`}>Objective</Label><Textarea id={`decompose-detail-${task.key}`} value={task.detail} onChange={(event) => updateDecompositionTask(task.key, { detail: event.target.value })} /></div>
-                    <div><Label htmlFor={`decompose-owner-${task.key}`}>Owner (shared checkout)</Label><Select value={task.agentId ?? "unassigned"} onValueChange={(agentId) => updateDecompositionTask(task.key, { agentId: agentId === "unassigned" ? undefined : agentId })}><SelectTrigger id={`decompose-owner-${task.key}`}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="unassigned">Leave in Ready for isolation</SelectItem>{structuredRuntimes.map((runtime) => <SelectItem value={runtime.nodeId} key={runtime.nodeId}>{nodes[runtime.nodeId]?.title ?? runtime.nodeId}</SelectItem>)}</SelectContent></Select></div>
+                    <div><Label htmlFor={`decompose-owner-${task.key}`}>Owner (shared checkout)</Label><Select value={task.agentId ?? "unassigned"} onValueChange={(agentId) => updateDecompositionTask(task.key, { agentId: agentId === "unassigned" ? undefined : agentId })}><SelectTrigger id={`decompose-owner-${task.key}`}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="unassigned">Leave in Ready for isolation</SelectItem>{structuredRuntimes.map((runtime) => <SelectItem value={runtime.nodeId} key={runtime.nodeId}>{agentName(runtime.nodeId)}</SelectItem>)}</SelectContent></Select></div>
                     <details className="wj-contract-composer">
                       <summary>Delegation contract</summary>
                       <div className="space-y-3 pt-3">
@@ -2374,7 +2377,7 @@ export function OpsSurface({
               <section>
                 <div className="wj-inspector-section-title"><span>Execution</span>{formatOpsElapsed(inspectedCard.startedAt, inspectedCard.completedAt ?? inspectedCard.pausedAt, now) && <time>{formatOpsElapsed(inspectedCard.startedAt, inspectedCard.completedAt ?? inspectedCard.pausedAt, now)}</time>}</div>
                 <div className="wj-inspector-team">
-                  <div><span>Owner</span><strong>{inspectedCard.assigneeIds.length ? inspectedCard.assigneeIds.map((id) => nodes[id]?.title ?? id).join(", ") : "Unassigned"}</strong></div>
+                  <div><span>Owner</span><strong>{inspectedCard.assigneeIds.length ? inspectedCard.assigneeIds.map(agentName).join(", ") : "Unassigned"}</strong></div>
                   <div><span>Review</span><strong>{inspectedReview}</strong></div>
                 </div>
                 <div className="wj-inspector-current"><span>Workspace</span><p>{taskWorkspaceLabel(inspectedCard, projectIsRepo)}{inspectedCard.taskLane && <><br /><code>{inspectedCard.taskLane.branch}</code><br /><code>{inspectedCard.taskLane.cwd}</code></>}</p></div>
@@ -2402,7 +2405,7 @@ export function OpsSurface({
               </section> : null}
               <section>
                 <div className="wj-inspector-section-title"><span>Task timeline</span><strong>{inspectedTimeline.length}</strong></div>
-                <ol className="wj-inspector-events">{inspectedTimeline.map((item) => <li data-kind={item.kind} key={item.id}><span /><div><strong>{item.message}</strong><small>{item.actor ? `${nodes[item.actor]?.title ?? item.actor} · ` : ""}{item.source} · {formatTime(item.timestamp)}</small></div></li>)}</ol>
+                <ol className="wj-inspector-events">{inspectedTimeline.map((item) => <li data-kind={item.kind} key={item.id}><span /><div><strong>{item.message}</strong><small>{item.actor ? `${agentName(item.actor)} · ` : ""}{item.source} · {formatTime(item.timestamp)}</small></div></li>)}</ol>
                 {!inspectedTimeline.length && <p className="wj-inspector-empty">No task activity yet.</p>}
               </section>
             </ScrollArea>
@@ -2529,6 +2532,7 @@ export function FloorSurface({
   const [stopRuntime, setStopRuntime] = useState<PaneRuntime>();
   const runtimeById = new Map(runtimes.map((runtime) => [runtime.nodeId, runtime]));
   const cardById = new Map(state.cards.map((card) => [card.id, card]));
+  const agentName = (id: string) => resolveAgentLabel(nodes[id]?.title, state.agentLabels?.[id]);
   const selectedTaskIds = new Set(runGraphSelection?.taskIds ?? []);
   const recentEvents = model.recentActivity.slice(0, 5);
   const schedulerActiveAgents = runtimes.filter((runtime) => {
@@ -2613,7 +2617,7 @@ export function FloorSurface({
     const activeDirective = directive && ["queued", "delivering", "failed"].includes(directive.status) ? directive : undefined;
     const currentStep = task?.card.runProgress?.steps.find((step) => step.id === task.card.runProgress?.currentStepId);
     const lastActive = formatOpsRelative(agent.lastActivityAt, now);
-    const agentLabel = nodes[agent.id]?.title ?? agent.id;
+    const agentLabel = agentName(agent.id);
     const meaningfulAction = visibleRunStateDetail(agent.status, agent.currentAction);
     const actionLabel = currentStep?.label
       ?? meaningfulAction
@@ -2701,7 +2705,7 @@ export function FloorSurface({
       const item = action.item;
       const runtime = item.runtimeId ? runtimeById.get(item.runtimeId) : undefined;
       const interaction = runtime ? pendingAgentInteraction(runtime.messages) : undefined;
-      const agentLabel = item.runtimeId ? nodes[item.runtimeId]?.title ?? item.runtimeId : undefined;
+      const agentLabel = item.runtimeId ? agentName(item.runtimeId) : undefined;
       const age = formatOpsRelative(item.waitingSince, now);
       const actions = floorAttentionActions(item);
       return <article className="wj-floor-intervention" data-kind={item.kind} data-card-id={item.cardId} data-run-graph-selected={Boolean(item.cardId && selectedTaskIds.has(item.cardId)) || undefined} key={action.id}>
@@ -2723,7 +2727,7 @@ export function FloorSurface({
     const conflict = action.contention;
     return <article className="wj-floor-action-row wj-floor-action-contention" tabIndex={-1} key={action.id} data-conflict-file={conflict.file} data-kind="contention" data-run-graph-selected={runGraphSelection?.kind === "conflict" && runGraphSelection.conflictFile === conflict.file || undefined}>
       <div className="wj-floor-action-copy"><small>Automatic ownership resolution stalled</small><strong>{conflict.cardIds.length} tasks still claim this file</strong><code>{conflict.file}</code></div>
-      <div className="wj-floor-action-tasks">{conflict.cardIds.map((cardId) => { const card = cardById.get(cardId); const participants = card ? [...card.assigneeIds, ...(card.reviewerId ? [card.reviewerId] : [])].map((id) => nodes[id]?.title ?? id).join(" / ") : ""; return card ? <button type="button" key={cardId} onClick={() => dockInspect(cardId)}><span>{card.title}</span>{participants && <small>{participants}</small>}</button> : null; })}</div>
+      <div className="wj-floor-action-tasks">{conflict.cardIds.map((cardId) => { const card = cardById.get(cardId); const participants = card ? [...card.assigneeIds, ...(card.reviewerId ? [card.reviewerId] : [])].map(agentName).join(" / ") : ""; return card ? <button type="button" key={cardId} onClick={() => dockInspect(cardId)}><span>{card.title}</span>{participants && <small>{participants}</small>}</button> : null; })}</div>
       <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" size="xs">Choose owner<ChevronDownIcon /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{conflict.cardIds.map((cardId) => <DropdownMenuItem key={cardId} onSelect={() => arbitrate(conflict, cardId)}>Keep {cardById.get(cardId)?.title ?? cardId}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>
     </article>;
   };
@@ -2733,14 +2737,14 @@ export function FloorSurface({
       <section className="wj-floor-inspector-summary"><div><RunStateBadge status={opsCardDisplayStatus(dockedLane ?? "ready", dockedRuntime ? [dockedRuntime.status] : [], dockedCard.verificationRun?.status, dockedCard.paused)} variant="compact" /><small>{dockedCard.priority} priority</small></div><h3>{dockedCard.title}</h3><p>{dockedCard.detail || "No objective was recorded."}</p></section>
       <section>
         <div className="wj-floor-inspector-label"><span>Execution</span>{formatOpsElapsed(dockedCard.startedAt, dockedCard.completedAt ?? dockedCard.pausedAt, now) && <time>{formatOpsElapsed(dockedCard.startedAt, dockedCard.completedAt ?? dockedCard.pausedAt, now)}</time>}</div>
-        <dl className="wj-floor-inspector-facts"><div><dt>Owner</dt><dd>{dockedParticipants.map((id) => nodes[id]?.title ?? id).join(", ") || "Unassigned"}</dd></div><div><dt>Current action</dt><dd>{visibleRunStateDetail(dockedRuntime?.status, dockedRuntime?.statusSummary) || dockedCard.lastNote || "No recorded action"}</dd></div><div><dt>Progress</dt><dd>{dockedCurrentStep?.label ?? (dockedCard.runProgress ? "No active step" : "Not reported")}</dd></div></dl>
+        <dl className="wj-floor-inspector-facts"><div><dt>Owner</dt><dd>{dockedParticipants.map(agentName).join(", ") || "Unassigned"}</dd></div><div><dt>Current action</dt><dd>{visibleRunStateDetail(dockedRuntime?.status, dockedRuntime?.statusSummary) || dockedCard.lastNote || "No recorded action"}</dd></div><div><dt>Progress</dt><dd>{dockedCurrentStep?.label ?? (dockedCard.runProgress ? "No active step" : "Not reported")}</dd></div></dl>
       </section>
       <section><div className="wj-floor-inspector-label"><span>Workspace</span></div><p className="wj-floor-inspector-code">{taskWorkspaceLabel(dockedCard, projectIsRepo)}</p>{dockedCard.taskLane && <><code>{dockedCard.taskLane.branch}</code><code>{dockedCard.taskLane.cwd}</code></>}</section>
       {dockedAttention && <section><div className="wj-floor-inspector-label"><span>Intervention evidence</span><RunStateBadge status={dockedAttention.kind} variant="compact" /></div><p>{dockedAttention.reason}</p></section>}
       <section><div className="wj-floor-inspector-label"><span>Verification</span><strong>{dockedVerification?.passed}/{dockedVerification?.total}</strong></div><div className="wj-floor-inspector-checks">{dockedVerification?.checks.map((check) => <span data-passed={check.passed || undefined} key={check.label}><CheckIcon />{check.label}</span>)}</div>{dockedConflictFiles.length > 0 && <p className="wj-floor-inspector-warning"><CircleDot />{dockedConflictFiles.length} file {dockedConflictFiles.length === 1 ? "contention" : "contentions"}</p>}</section>
       {(dockedCard.dependencyIds?.length || dockedCard.expectedFiles.length) ? <section><div className="wj-floor-inspector-label"><span>Working set</span></div>{Boolean(dockedCard.dependencyIds?.length) && <div className="wj-floor-inspector-list"><strong>Dependencies</strong>{dockedCard.dependencyIds?.map((id) => <span key={id}>{cardById.get(id)?.title ?? id}</span>)}</div>}{dockedCard.expectedFiles.length > 0 && <div className="wj-floor-inspector-list"><strong>Claimed files</strong>{dockedCard.expectedFiles.map((file) => <code key={file}>{file}</code>)}</div>}</section> : null}
       {dockedCard.steeringDirective && <section><div className="wj-floor-inspector-label"><span>Latest directive</span><RunStateBadge status={dockedCard.steeringDirective.status} variant="compact" /></div><p>{dockedCard.steeringDirective.text}</p>{dockedCard.steeringDirective.error && <small>{dockedCard.steeringDirective.error}</small>}</section>}
-      <section><div className="wj-floor-inspector-label"><span>Task timeline</span><strong>{dockedTimeline.length}</strong></div><ol className="wj-floor-inspector-events">{dockedTimeline.map((item) => <li data-kind={item.kind} key={item.id}><span /><div><strong>{item.message}</strong><small>{item.actor ? `${nodes[item.actor]?.title ?? item.actor} · ` : ""}{formatTime(item.timestamp)}</small></div></li>)}</ol>{!dockedTimeline.length && <p className="wj-floor-empty">No task activity yet.</p>}</section>
+      <section><div className="wj-floor-inspector-label"><span>Task timeline</span><strong>{dockedTimeline.length}</strong></div><ol className="wj-floor-inspector-events">{dockedTimeline.map((item) => <li data-kind={item.kind} key={item.id}><span /><div><strong>{item.message}</strong><small>{item.actor ? `${agentName(item.actor)} · ` : ""}{formatTime(item.timestamp)}</small></div></li>)}</ol>{!dockedTimeline.length && <p className="wj-floor-empty">No task activity yet.</p>}</section>
     </div>
     <footer className="wj-floor-inspector-actions">{dockedRuntime && <Button size="xs" onClick={() => onOpenRuntime(dockedRuntime)}><Terminal />Open agent</Button>}{dockedRole === "review" && <Button size="xs" onClick={() => onReview(dockedCard)}><Search />Review</Button>}{dockedRole === "queued" && !dockedCard.assigneeIds.length && <Button size="xs" onClick={() => void onStartAgent(dockedCard)}><Play />Start now</Button>}<Button variant="outline" size="xs" onClick={() => onInspect(dockedCard.id)}>Full details</Button></footer>
   </section> : undefined;
@@ -2774,7 +2778,7 @@ export function FloorSurface({
           <header><div><span className="wj-section-label">Project record</span><h2 id="floor-activity-heading">Recent activity</h2></div><div className="wj-floor-activity-header">{unreadCount > 0 && <Badge variant="outline">{unreadCount} unread</Badge>}<Button variant="ghost" size="sm" onClick={onOpenHistory}>View history</Button></div></header>
           <div className="wj-floor-activity-scroll" role="region" aria-label="Recent project activity" tabIndex={0}>
             {recentEvents.length ? recentEvents.map((event) => <article data-unread={!event.isRead || undefined} key={event.id}>
-              <button type="button" onClick={() => onOpenActivity(event)}><RunStateBadge status={event.status} variant="indicator" /><span><strong>{event.nodeTitle ?? event.kind}</strong><small>{event.message}</small></span><time>{formatOpsRelative(event.createdAt, now) ?? formatTime(event.createdAt)}</time></button>
+              <button type="button" onClick={() => onOpenActivity(event)}><RunStateBadge status={event.status} variant="indicator" /><span><strong>{event.nodeTitle || event.kind}</strong><small>{event.message}</small></span><time>{formatOpsRelative(event.createdAt, now) ?? formatTime(event.createdAt)}</time></button>
               {!event.isRead && <Button aria-label="Mark event read" variant="ghost" size="icon-sm" onClick={() => onAcknowledgeActivity(event)}><CheckIcon /></Button>}
             </article>) : <p className="wj-floor-empty">No project activity yet.</p>}
           </div>
@@ -2815,7 +2819,7 @@ export function FloorSurface({
     </div>
     <AlertDialog open={Boolean(stopRuntime)} onOpenChange={(open) => { if (!open) setStopRuntime(undefined); }}>
       <AlertDialogContent size="sm">
-        <AlertDialogHeader><AlertDialogTitle>Stop {stopRuntime ? nodes[stopRuntime.nodeId]?.title ?? stopRuntime.nodeId : "agent"}?</AlertDialogTitle><AlertDialogDescription>The current turn will be canceled. Task history and recorded progress remain available.</AlertDialogDescription></AlertDialogHeader>
+        <AlertDialogHeader><AlertDialogTitle>Stop {stopRuntime ? agentName(stopRuntime.nodeId) : "agent"}?</AlertDialogTitle><AlertDialogDescription>The current turn will be canceled. Task history and recorded progress remain available.</AlertDialogDescription></AlertDialogHeader>
         <AlertDialogFooter><AlertDialogCancel>Keep running</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { if (stopRuntime) void onCancelRuntime(stopRuntime); setStopRuntime(undefined); }}>Stop agent</AlertDialogAction></AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
@@ -3796,7 +3800,7 @@ export function UtilityPanelSurface({
                   const sessionId = "sessionId" in item ? item.sessionId : item.id;
                   const preview = "snippet" in item ? item.snippet : item.transcriptPreview;
                   return <ContextMenu key={sessionId}><ContextMenuTrigger asChild><button className="wj-session-history-row" type="button" data-session-id={sessionId} onClick={() => onOpenSession(item)}>
-                    <span><strong>{item.nodeTitle || item.nodeId}</strong><time>{formatTime(item.startedAt)}</time></span>
+                    <span><strong>{resolveAgentLabel(item.nodeTitle)}</strong><time>{formatTime(item.startedAt)}</time></span>
                     <small>{item.adapterId} · {resolveRunState(item.status).label}</small>
                     {preview && <p>{preview}</p>}
                   </button></ContextMenuTrigger><ContextMenuContent><ContextMenuItem onSelect={() => onOpenSession(item)}><Terminal />Open session</ContextMenuItem><DevToolsContextItem /></ContextMenuContent></ContextMenu>;

@@ -71,6 +71,7 @@ const states: Record<string, Omit<RunStatePresentation, "ariaLabel">> = {
   succeeded: { phase: "success", label: "Succeeded", tone: "success", motion: "none", icon: "success" },
   canceled: { phase: "stopped", label: "Canceled", tone: "neutral", motion: "none", icon: "stopped" },
   cancelled: { phase: "stopped", label: "Canceled", tone: "neutral", motion: "none", icon: "stopped" },
+  exited: { phase: "stopped", label: "Exited", tone: "neutral", motion: "none", icon: "stopped" },
   paused: { phase: "stopped", label: "Paused", tone: "neutral", motion: "none", icon: "stopped" },
   denied: { phase: "stopped", label: "Denied", tone: "neutral", motion: "none", icon: "stopped" },
   failed: { phase: "error", label: "Failed", tone: "destructive", motion: "none", icon: "error" },

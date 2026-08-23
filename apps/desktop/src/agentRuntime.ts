@@ -42,7 +42,7 @@ export function isActiveSessionStatus(status: string): boolean {
 }
 
 export function isTerminalSessionStatus(status: string): boolean {
-  return ["completed", "failed", "disconnected", "canceled"].includes(status);
+  return ["completed", "failed", "disconnected", "canceled", "exited"].includes(status);
 }
 
 export function shouldAutoCloseTaskAgent(

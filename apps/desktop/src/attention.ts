@@ -1,4 +1,5 @@
 import { opsActiveFileConflicts, opsAttentionReason } from "./opsPresence";
+import { resolveAgentLabel } from "./agentIdentity";
 import { resolveRunState } from "./runState";
 import type { ActivityEvent, AgentMessage, OpsCard, OpsState, PaneRuntime } from "./types";
 
@@ -45,10 +46,12 @@ export function deriveAttention({
   runtimes,
   activity,
   opsState,
+  nodes = {},
 }: {
   runtimes: PaneRuntime[];
   activity: ActivityEvent[];
   opsState: OpsState;
+  nodes?: Record<string, { title?: string }>;
 }): AttentionItem[] {
   const items = new Map<string, AttentionItem>();
   const runtimeById = new Map(runtimes.map((runtime) => [runtime.nodeId, runtime]));
@@ -113,7 +116,7 @@ export function deriveAttention({
     upsert({
       id: attentionTargetId(target),
       sources: ["runtime"],
-      title: card?.title ?? runtime.nodeId,
+      title: card?.title ?? resolveAgentLabel(nodes[runtime.nodeId]?.title, opsState.agentLabels?.[runtime.nodeId]),
       detail: runtime.statusSummary || `${runtime.adapterId} is ${resolveRunState(runtime.status).label.toLowerCase()}.`,
       status: runtime.status,
       target,
@@ -137,7 +140,10 @@ export function deriveAttention({
     upsert({
       id: attentionTargetId(target),
       sources: ["activity"],
-      title: card?.title ?? event.nodeTitle ?? (event.kind || "Activity"),
+      title: card?.title
+        ?? (payloadNodeId
+          ? resolveAgentLabel(event.nodeTitle, nodes[payloadNodeId]?.title ?? opsState.agentLabels?.[payloadNodeId])
+          : event.nodeTitle?.trim() || event.kind || "Activity"),
       detail: event.message,
       status: event.status,
       target,

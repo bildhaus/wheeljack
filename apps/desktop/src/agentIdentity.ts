@@ -17,6 +17,13 @@ export const AGENT_CALLSIGNS = [
   "Rook",
 ] as const;
 
+export function resolveAgentLabel(
+  liveTitle?: string,
+  recordedTitle?: string,
+): string {
+  return liveTitle?.trim() || recordedTitle?.trim() || "Former agent";
+}
+
 interface AgentIdentityNode {
   kind: string;
   title: string;

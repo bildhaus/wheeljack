@@ -1082,7 +1082,7 @@ html[data-project-empty-exiting] .wj-project-empty .wj-empty-type-caret { displa
 @keyframes wj-event-review { from { opacity: .9; clip-path: inset(0 100% 0 0); } to { opacity: 0; clip-path: inset(0); } }
 @keyframes wj-event-completion { from { opacity: 1; } to { opacity: 0; } }
 .wj-task-card [data-slot="card-header"], .wj-task-card [data-slot="card-content"] { padding: 0; }
-.wj-task-card-bar { display: flex; width: 100%; min-width: 0; min-height: 22px; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; border-bottom: 1px solid color-mix(in srgb, var(--border) 64%, transparent); padding-bottom: 7px; color: var(--muted-foreground); }
+.wj-task-card-bar { display: flex; width: 100%; min-width: 0; min-height: 22px; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; padding-bottom: 7px; color: var(--muted-foreground); }
 .wj-task-card-bar[data-draggable="true"] { cursor: grab; user-select: none; touch-action: none; }
 .wj-task-card-bar[data-draggable="true"]:active { cursor: grabbing; }
 .wj-task-card-meta { display: flex; min-width: 0; align-items: center; gap: 8px; }
@@ -1139,7 +1139,7 @@ button.wj-task-team:focus-visible { outline: 2px solid var(--ring); outline-offs
 .wj-verification-progress > span::after { display: block; width: var(--wj-progress); height: 100%; background: var(--success); content: ""; transition: width 220ms var(--wj-ease, ease); }
 .wj-task-review-state { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent); padding-top: 7px; color: var(--muted-foreground); font-size: 10px; }
 .wj-task-review-state strong { overflow: hidden; color: var(--foreground); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.wj-task-actions { display: flex; min-height: 28px; align-items: end; margin: 8px -2px -2px; border-top: 1px solid color-mix(in srgb, var(--border) 68%, transparent); padding-top: 5px; }
+.wj-task-actions { display: flex; min-height: 28px; align-items: center; margin: 8px -2px -2px; border-top: 1px solid color-mix(in srgb, var(--border) 68%, transparent); padding-top: 5px; }
 .wj-task-actions[data-quiet="true"] { min-height: 18px; margin-top: 2px; border-top: 0; padding-top: 0; }
 .wj-task-card:is([data-lane="running"], [data-lane="attention"]) .wj-task-actions[data-quiet="true"] button { opacity: 0; transition: opacity 140ms var(--wj-ease-out, ease); }
 .wj-task-card:is([data-lane="running"], [data-lane="attention"]):is(:hover, :focus-within) .wj-task-actions[data-quiet="true"] button { opacity: 1; }

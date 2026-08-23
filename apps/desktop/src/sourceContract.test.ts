@@ -621,6 +621,9 @@ test("orders isolated task setup before spawn and keeps review evidence separate
   expect(reviewSource).not.toContain("setGitDiff(");
   expect(paritySource).toContain("Start fresh task agent");
   expect(paritySource).toContain("Send fresh reviewer");
+  expect(paritySource).toContain("resolveAgentLabel(nodes[id]?.title, state.agentLabels?.[id])");
+  expect(paritySource).toContain("reviewerName(card.reviewerId)");
+  expect(paritySource).toContain("reviewerName(inspectedCard.reviewerId)");
   expect(paritySource).not.toContain("Assign shared agent");
   expect(paritySource).toContain("Shared checkout");
   expect(paritySource).toContain("Remove worktree");
@@ -724,8 +727,9 @@ test("uses the card workspace bar as the full-width drag target", () => {
   expect(stylesSource).toContain(".wj-task-card-bar[data-draggable=\"true\"]");
   expect(stylesSource).toContain(".wj-task-drag-rail::before, .wj-task-drag-rail::after");
   expect(stylesSource).toContain("grid-template-columns: minmax(12px, 1fr) auto minmax(12px, 1fr)");
-  expect(stylesSource).toMatch(/\.wj-task-card-bar \{[^}]*border-bottom: 1px solid/);
+  expect(stylesSource).not.toMatch(/\.wj-task-card-bar \{[^}]*border-bottom:/);
   expect(stylesSource).toContain(".wj-board-list .wj-task-card-bar { grid-column: 1 / -1;");
+  expect(stylesSource).toMatch(/\.wj-task-actions \{[^}]*align-items: center/);
 });
 
 test("renders focused task descriptions as safe Markdown", () => {
@@ -990,7 +994,10 @@ test("classifies live sessions and exposes project document save state", () => {
   expect(isLiveSessionStatus("completed")).toBe(false);
   expect(isTerminalSessionStatus("failed")).toBe(true);
   expect(isTerminalSessionStatus("canceled")).toBe(true);
+  expect(isTerminalSessionStatus("exited")).toBe(true);
   expect(isTerminalSessionStatus("running")).toBe(false);
+  expect(paritySource).toContain("sessions.filter((session) => isLiveSessionStatus(session.status))");
+  expect(paritySource).toContain("resolveAgentLabel(session.nodeTitle)");
   expect(paritySource).toContain("data-save-state={saveStatus}");
   expect(paritySource).toContain('role="status" aria-live="polite"');
   expect(appSource).toContain('setDocumentSaveStatus("saving")');

@@ -86,8 +86,8 @@ fn session_events_are_durable_queryable_and_readable() {
     {
         let db = core.lock_db().unwrap();
         db.execute(
-            "INSERT INTO sessions (id, node_id, adapter_id, command_json, cwd, status, created_at, updated_at)
-             VALUES ('session_activity', 'node_activity', 'codex-cli', '{}', '.', 'running', 'now', 'now')",
+            "INSERT INTO sessions (id, node_id, node_title, adapter_id, command_json, cwd, status, created_at, updated_at)
+             VALUES ('session_activity', 'node_activity', 'Atlas', 'codex-cli', '{}', '.', 'running', 'now', 'now')",
             [],
         )
         .unwrap();
@@ -97,12 +97,16 @@ fn session_events_are_durable_queryable_and_readable() {
     ))
     .unwrap();
     assert_eq!(appended["payload"]["status"], "canceled");
+    assert_eq!(appended["payload"]["nodeId"], "node_activity");
+    assert_eq!(appended["payload"]["nodeTitle"], "Atlas");
+    assert_eq!(appended["payload"]["adapterId"], "codex-cli");
     let event_id = appended["payload"]["id"].as_i64().unwrap();
     let listed: Value = serde_json::from_str(&core.call_json(
         r#"{"id":"list","command":"activity_list","protocolVersion":2,"payload":{"unreadOnly":true}}"#,
     ))
     .unwrap();
     assert_eq!(listed["payload"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["payload"][0]["nodeTitle"], "Atlas");
     let marked: Value = serde_json::from_str(
         &core.call_json(
             &json!({

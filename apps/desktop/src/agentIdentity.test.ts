@@ -1,4 +1,4 @@
-import { AGENT_CALLSIGNS, nextAgentCallsign, reserveAgentCallsign } from "./agentIdentity";
+import { AGENT_CALLSIGNS, nextAgentCallsign, reserveAgentCallsign, resolveAgentLabel } from "./agentIdentity";
 
 const agent = (title: string, adapterId: string, status = "running") => ({
   kind: "agent_terminal",
@@ -41,4 +41,10 @@ test("preserves legacy titles and ignores generic shell panes", () => {
 test("uses routable hyphenated suffixes after exhausting the pool", () => {
   expect(nextAgentCallsign(AGENT_CALLSIGNS)).toBe("Atlas-2");
   expect(nextAgentCallsign([...AGENT_CALLSIGNS, "Atlas-2"])).toBe("Beacon-2");
+});
+
+test("resolves live and recorded labels without exposing internal ids", () => {
+  expect(resolveAgentLabel(" Atlas ", "Old Atlas")).toBe("Atlas");
+  expect(resolveAgentLabel(undefined, " Beacon ")).toBe("Beacon");
+  expect(resolveAgentLabel()).toBe("Former agent");
 });

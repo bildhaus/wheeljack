@@ -404,10 +404,44 @@ fn v16_renames_interim_bot_profiles_without_losing_data() {
         )
         .unwrap();
 
-    assert_eq!(schema_version, 16);
+    assert_eq!(schema_version, db::LATEST_SCHEMA_VERSION);
     assert_eq!(bot_name, "Release bot");
     assert_eq!(legacy_table_count, 0);
     assert_eq!(bot_index_count, 2);
+}
+
+#[test]
+fn v17_snapshots_session_titles_before_nodes_are_removed() {
+    let db = Connection::open_in_memory().unwrap();
+    run_migrations(&db).unwrap();
+    db.execute_batch(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+           VALUES ('project-1', 'Project', '.', 'now', 'now');
+         INSERT INTO canvases (id, project_id, name, theme_id, camera_json, created_at, updated_at)
+           VALUES ('canvas-1', 'project-1', 'Main', 'default', '{}', 'now', 'now');
+         INSERT INTO nodes
+           (id, canvas_id, kind, title, x, y, width, height, z_index, data_json, created_at, updated_at)
+           VALUES ('node-1', 'canvas-1', 'agent_terminal', 'Atlas', 0, 0, 1, 1, 0, '{}', 'now', 'now');
+         ALTER TABLE sessions DROP COLUMN node_title;
+         INSERT INTO sessions
+           (id, node_id, adapter_id, command_json, cwd, status, created_at, updated_at)
+           VALUES ('session-1', 'node-1', 'codex-cli', '{}', '.', 'completed', 'now', 'now');
+         PRAGMA user_version = 16;",
+    )
+    .unwrap();
+
+    run_migrations(&db).unwrap();
+    db.execute("DELETE FROM nodes WHERE id = 'node-1'", [])
+        .unwrap();
+
+    let node_title: String = db
+        .query_row(
+            "SELECT node_title FROM sessions WHERE id = 'session-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(node_title, "Atlas");
 }
 
 #[test]

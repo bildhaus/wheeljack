@@ -634,6 +634,7 @@ impl StructuredSseDriver {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SpawnSessionRequest {
     pub(crate) node_id: Option<String>,
+    pub(crate) node_title: Option<String>,
     pub(crate) adapter_id: Option<String>,
     pub(crate) command: Option<String>,
     pub(crate) shell_command: Option<String>,
@@ -656,6 +657,8 @@ pub(crate) struct ResolvedPtyCommand {
 pub(crate) struct SessionDto {
     pub(crate) id: String,
     pub(crate) node_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) node_title: Option<String>,
     pub(crate) adapter_id: String,
     pub(crate) cwd: String,
     pub(crate) status: String,
@@ -674,6 +677,8 @@ pub(crate) struct SessionDto {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StructuredAgentSpawnRequest {
     pub(crate) node_id: String,
+    #[serde(default)]
+    pub(crate) node_title: Option<String>,
     pub(crate) adapter_id: String,
     #[serde(default)]
     pub(crate) canvas_id: Option<String>,

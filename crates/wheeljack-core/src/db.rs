@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 16;
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 17;
 type Migration = (i32, fn(&Connection) -> Result<()>);
 const SQLITE_WRITE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(25),
@@ -261,7 +261,8 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
         (13, add_canvas_layout_mode),
         (14, add_usage_ledger),
         (15, add_bot_profiles),
-        (LATEST_SCHEMA_VERSION, migrate_interim_bot_profiles),
+        (16, migrate_interim_bot_profiles),
+        (LATEST_SCHEMA_VERSION, add_session_node_title),
     ];
     for (version, migration) in migrations {
         if current_version >= *version {
@@ -347,6 +348,7 @@ fn create_base_schema(connection: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS sessions (
           id TEXT PRIMARY KEY,
           node_id TEXT NOT NULL,
+          node_title TEXT NOT NULL DEFAULT '',
           adapter_id TEXT NOT NULL,
           command_json TEXT NOT NULL,
           cwd TEXT NOT NULL,
@@ -823,6 +825,28 @@ fn migrate_interim_bot_profiles(connection: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_bot_profiles_project_updated
         ON bot_profiles(project_id, updated_at DESC);
         "#,
+    )?;
+    Ok(())
+}
+
+fn add_session_node_title(connection: &Connection) -> Result<()> {
+    if !table_exists(connection, "sessions")? {
+        return Ok(());
+    }
+    ensure_table_column(
+        connection,
+        "sessions",
+        "node_title",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    connection.execute(
+        "UPDATE sessions
+         SET node_title = COALESCE(
+           (SELECT title FROM nodes WHERE nodes.id = sessions.node_id),
+           node_title
+         )
+         WHERE node_title = ''",
+        [],
     )?;
     Ok(())
 }

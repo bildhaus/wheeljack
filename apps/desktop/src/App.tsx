@@ -26,7 +26,7 @@ import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { Textarea } from "./components/ui/textarea";
 import { applyDownloadedUpdate, callCore, closeAfterFlush, completeUiSmoke, completeUpdateHealth, connectCore, legacyWindowsUiPreferences, uiSmokeAutoClose, uiSmokeEnabled, uiSmokeUpdateMode } from "./core";
 import { adapterReadinessLabel, isAdapterReady, shouldAutoVerifyAdapter } from "./adapterReadiness";
-import { reserveAgentCallsign } from "./agentIdentity";
+import { reserveAgentCallsign, resolveAgentLabel } from "./agentIdentity";
 import { safeAgentToken } from "./agentModels";
 import {
   nodeDataWithAgentComposition,
@@ -2104,6 +2104,7 @@ export function App() {
       session = await callCore<Session>("agent_structured_spawn", {
         req: {
           nodeId,
+          nodeTitle,
           adapterId: launchAdapterId,
           canvasId: canvas.id,
           taskId: opsTask?.id,
@@ -2937,6 +2938,7 @@ export function App() {
         ? await callCore<Session>("agent_structured_spawn", {
             req: {
               nodeId: runtime.nodeId,
+              nodeTitle: node.title,
               adapterId: runtime.adapterId,
               canvasId: canvas.id,
               taskId: task?.id,
@@ -2950,7 +2952,7 @@ export function App() {
             },
           })
         : await callCore<Session>("pty_spawn", {
-            req: { nodeId: runtime.nodeId, adapterId: runtime.adapterId, args: [], cwd, rows: 24, cols: 100 },
+            req: { nodeId: runtime.nodeId, nodeTitle: node.title, adapterId: runtime.adapterId, args: [], cwd, rows: 24, cols: 100 },
           });
       const updated = await callCore<CanvasNode>("canvas_upsert_node", {
         canvasId: canvas.id,
@@ -3364,7 +3366,7 @@ export function App() {
       });
       setUtilityPanelOpen(false);
       setHistoryTranscript({
-        title: item.nodeTitle || item.nodeId,
+        title: resolveAgentLabel(item.nodeTitle),
         sessionId,
         adapterId: item.adapterId,
         cwd: item.cwd,
@@ -4797,7 +4799,7 @@ export function App() {
     }
     changeOps((current) => action === "pause"
       ? applyOpsPauseRequest(current, card.id, target)
-      : applyOpsOrchestration(current, card.id, action, target, nodeById[target]?.title ?? target));
+      : applyOpsOrchestration(current, card.id, action, target, agentName(target)));
     await refreshCoordination();
   };
 
@@ -4822,7 +4824,7 @@ export function App() {
     agentDecompositionRequestRef.current = { requestId, parentId: card.id, timeout, resolve, reject };
     const agents = Object.values(currentRuntimes())
       .filter((candidate) => candidate.structured && candidate.sessionId)
-      .map((candidate) => ({ id: candidate.nodeId, name: nodeById[candidate.nodeId]?.title ?? candidate.nodeId, status: candidate.status }));
+      .map((candidate) => ({ id: candidate.nodeId, name: agentName(candidate.nodeId), status: candidate.status }));
     const example = {
       requestId,
       parentId: card.id,
@@ -4961,7 +4963,7 @@ export function App() {
         return appendOpsTaskEvent(delivered ? {
           ...card,
           columnId: columnIdForRole(current, "active"),
-          assignee: task.agentId ? nodeById[task.agentId]?.title ?? task.agentId : "Unassigned",
+          assignee: task.agentId ? agentName(task.agentId) : "Unassigned",
           assigneeIds: task.agentId ? [task.agentId] : [],
           agentStatuses: task.agentId ? { [task.agentId]: "running" } : {},
           lastNote: "Dispatched from decomposition",
@@ -5266,6 +5268,7 @@ export function App() {
       spawned = await callCore<Session>("pty_spawn", {
         req: {
           nodeId: `ops-verification-${card.id}`,
+          nodeTitle: "Verification",
           adapterId: "generic-shell",
           shellCommand: command,
           cwd: workspace.cwd,
@@ -5669,6 +5672,7 @@ export function App() {
     () => Object.fromEntries(nodes.map((node) => [node.id, node])),
     [nodes],
   );
+  const agentName = (id: string) => resolveAgentLabel(nodeById[id]?.title, opsState.agentLabels?.[id]);
   const botRuntimes = useMemo(() => Object.values(runtimes).map((runtime) => ({
     ...runtime,
     botProfileId: botSnapshotFromNode(nodeById[runtime.nodeId]?.data ?? {})?.profileId,
@@ -5687,7 +5691,8 @@ export function App() {
     runtimes: Object.values(runtimes),
     activity,
     opsState,
-  }), [activity, opsState, runtimes]);
+    nodes: nodeById,
+  }), [activity, nodeById, opsState, runtimes]);
   const adapterArgsById = useMemo(() => Object.fromEntries(
     agentProfiles.map((profile) => [profile.adapterId, agentLaunchArgs(profile)]),
   ), [agentProfiles]);
@@ -5934,7 +5939,7 @@ export function App() {
     (() => {
       const snapshot = botSnapshotFromNode(nodeById[runtime.nodeId]?.data ?? {});
       return {
-        label: snapshot?.name ?? nodeById[runtime.nodeId]?.title ?? runtime.nodeId,
+        label: snapshot?.name ?? agentName(runtime.nodeId),
         avatarSeed: snapshot?.avatarSeed,
         botSnapshot: snapshot?.source === "one-off" && !bots.some((bot) => bot.avatarSeed === snapshot.avatarSeed) ? snapshot : undefined,
         card: opsCurrentCardForAgent(opsState, runtime.nodeId),
@@ -6105,7 +6110,7 @@ export function App() {
           `Message from ${sourceNode.title}:\n\n${control.message?.trim() ?? ""}`,
         );
         if (!delivered) throw new Error("The target agent rejected the message.");
-        resultMessage = `Message delivered to ${nodesRef.current.find((node) => node.id === targetNodeId)?.title ?? targetNodeId}.`;
+        resultMessage = "Message delivered.";
       } else if (control.action === "spawn_agent") {
         const started = await spawnAgent(
           control.message?.trim() ?? "",
@@ -6122,7 +6127,7 @@ export function App() {
           },
         );
         if (!started || !childNodeId) throw new Error("The child agent could not be started.");
-        resultMessage = `Started child agent ${nodesRef.current.find((node) => node.id === childNodeId)?.title ?? childNodeId}.`;
+        resultMessage = "Started child agent.";
       } else if (control.action === "resolve_file_conflict") {
         if (!project?.path || activeCanvas.projectId !== project.id) {
           throw new Error("The active project is no longer available.");
@@ -6200,9 +6205,9 @@ export function App() {
             card.id,
             action,
             targetNodeId,
-            nodesRef.current.find((node) => node.id === targetNodeId)?.title ?? targetNodeId,
+            agentName(targetNodeId),
           ));
-          resultMessage = `${control.action === "handoff_task" ? "Task handed off" : "Review requested"} to ${nodesRef.current.find((node) => node.id === targetNodeId)?.title ?? targetNodeId}.`;
+          resultMessage = control.action === "handoff_task" ? "Task handed off." : "Review requested.";
         } else {
           const role: OpsAgentRole = control.action === "request_review" ? "reviewer" : "worker";
           const prompt = `${opsActionPrompt(card, control.action === "request_review" ? "review" : "resume")}${note ? `\n\nAgent note:\n${note}` : ""}`;
@@ -6227,12 +6232,12 @@ export function App() {
               card.id,
               "transfer",
               childNodeId,
-              nodesRef.current.find((node) => node.id === childNodeId)?.title ?? childNodeId,
+              agentName(childNodeId!),
             ));
           }
           resultMessage = control.action === "handoff_task"
-            ? `Task handed off to fresh agent ${childNodeId}.`
-            : `Fresh reviewer ${childNodeId} started.`;
+            ? "Task handed off."
+            : "Fresh reviewer started.";
         }
         await refreshCoordination();
       }
@@ -7413,6 +7418,7 @@ async function createShell(
     session = await callCore<Session>("pty_spawn", {
       req: {
         nodeId,
+        nodeTitle: `Shell ${index}`,
         adapterId: "generic-shell",
         args: [],
         cwd: project.path,
