@@ -179,3 +179,42 @@ fn ops_scheduler_leases_tasks_once_with_pause_and_concurrency() {
         .unwrap();
     assert_eq!(pending, 0);
 }
+
+#[test]
+fn ops_scheduler_releases_pending_leases_for_deleted_tasks() {
+    let db = ops_db();
+    save_ops_state(&db, "canvas-1", "project-1", &state(), None).unwrap();
+    configure_ops_scheduler(
+        &db,
+        "project-1",
+        "canvas-1",
+        true,
+        false,
+        2,
+        Some("codex-cli"),
+    )
+    .unwrap();
+
+    let created = tick_ops_scheduler(&db).unwrap();
+    let deleted_task_id = created[0].task_id.clone();
+    let deleted_lease_id = created[0].id.clone();
+    let mut updated_state = state();
+    updated_state["cards"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|card| card["id"] != deleted_task_id);
+    save_ops_state(&db, "canvas-1", "project-1", &updated_state, Some(1)).unwrap();
+
+    let claimed = claim_ops_lease(&db, "project-1", "owner-1")
+        .unwrap()
+        .unwrap();
+    assert_ne!(claimed.task_id, deleted_task_id);
+    let deleted_lease_state: String = db
+        .query_row(
+            "SELECT state FROM ops_task_leases WHERE id = ?1",
+            params![deleted_lease_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(deleted_lease_state, "released");
+}

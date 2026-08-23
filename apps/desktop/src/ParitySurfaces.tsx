@@ -2802,7 +2802,7 @@ export function FloorSurface({
           <header><div><span className="wj-section-label">Project record</span><h2 id="floor-activity-heading">Recent activity</h2></div><div className="wj-floor-activity-header">{unreadCount > 0 && <Badge variant="outline">{unreadCount} unread</Badge>}<Button variant="ghost" size="sm" onClick={onOpenHistory}>View history</Button></div></header>
           <div className="wj-floor-activity-scroll" role="region" aria-label="Recent project activity" tabIndex={0}>
             {recentEvents.length ? recentEvents.map((event) => <article data-unread={!event.isRead || undefined} key={event.id}>
-              <button type="button" onClick={() => onOpenActivity(event)}><RunStateBadge status={event.status} variant="indicator" /><span><strong>{event.nodeTitle || event.kind}</strong><small>{event.message}</small></span><time>{formatOpsRelative(event.createdAt, now) ?? formatTime(event.createdAt)}</time></button>
+              <button type="button" onClick={() => onOpenActivity(event)}><span className="wj-floor-activity-status"><RunStateBadge status={event.status} variant="indicator" /></span><span><strong>{event.nodeTitle || event.kind}</strong><small>{event.message}</small></span><time>{formatOpsRelative(event.createdAt, now) ?? formatTime(event.createdAt)}</time></button>
               {!event.isRead && <Button aria-label="Mark event read" variant="ghost" size="icon-sm" onClick={() => onAcknowledgeActivity(event)}><CheckIcon /></Button>}
             </article>) : <p className="wj-floor-empty">No project activity yet.</p>}
           </div>

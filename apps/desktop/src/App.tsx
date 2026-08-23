@@ -5833,7 +5833,16 @@ export function App() {
         throw new Error("The scheduler lease belongs to a different canvas.");
       }
       const card = opsStateRef.current.cards.find((candidate) => candidate.id === lease?.taskId);
-      if (!card) throw new Error(`Scheduled task ${lease.taskId} no longer exists.`);
+      if (!card) {
+        await callCore("ops_scheduler_finish", {
+          leaseId: lease.id,
+          ownerId: schedulerOwnerIdRef.current,
+          state: "released",
+        });
+        schedulerFinalizedLeaseIdsRef.current.add(lease.id);
+        lease = null;
+        return;
+      }
       started = await startAgentForOpsTask(card, opsActionPrompt(card, "assign"), "worker", lease.id, lease.adapterId);
       if (!started) throw new Error("The scheduled task could not start with the configured adapter.");
       await callCore("ops_scheduler_heartbeat", {

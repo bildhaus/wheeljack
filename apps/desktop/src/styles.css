@@ -974,7 +974,8 @@ html[data-project-empty-exiting] .wj-project-empty .wj-empty-type-caret { displa
 .wj-floor-activity-scroll { display: grid; align-content: start; }
 .wj-floor-activity-scroll article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent); padding: 2px 4px 2px 9px; }
 .wj-floor-activity-scroll article[data-unread="true"] { background: color-mix(in srgb, var(--warning) 7%, transparent); }
-.wj-floor-activity-scroll article > button:first-child { display: grid; min-width: 0; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 7px 3px; text-align: left; }
+.wj-floor-activity-scroll article > button:first-child { display: grid; min-width: 0; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 7px 3px; text-align: left; }
+.wj-floor-activity-status { display: grid; width: 16px; place-items: center; }
 .wj-floor-activity-scroll article > button:first-child > span { display: grid; min-width: 0; gap: 2px; }
 .wj-floor-activity-scroll article :is(strong, small, time) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wj-floor-activity-scroll article strong { font-size: 11px; }

@@ -316,6 +316,10 @@ fn fill_project_leases(db: &Connection, project_id: &str) -> Result<Vec<OpsTaskL
     if !config.enabled || config.paused {
         return Ok(Vec::new());
     }
+    let Some(record) = load_ops_state(db, &config.canvas_id)? else {
+        return Ok(Vec::new());
+    };
+    release_missing_pending_leases(db, project_id, &record.state)?;
     let active_count = db.query_row(
         "SELECT COUNT(*) FROM ops_task_leases
          WHERE project_id = ?1 AND state IN ('pending', 'claimed') AND expires_at > ?2",
@@ -324,9 +328,6 @@ fn fill_project_leases(db: &Connection, project_id: &str) -> Result<Vec<OpsTaskL
     )?;
     let mut created = Vec::new();
     for _ in active_count..config.concurrency_limit {
-        let Some(record) = load_ops_state(db, &config.canvas_id)? else {
-            break;
-        };
         let Some(task_id) = next_task_id(db, project_id, &record.state)? else {
             break;
         };
@@ -362,6 +363,43 @@ fn fill_project_leases(db: &Connection, project_id: &str) -> Result<Vec<OpsTaskL
         }
     }
     Ok(created)
+}
+
+fn release_missing_pending_leases(db: &Connection, project_id: &str, state: &Value) -> Result<()> {
+    let task_ids = state
+        .get("cards")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|card| card.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect::<HashSet<_>>();
+    let missing_lease_ids = {
+        let mut statement = db.prepare(
+            "SELECT id, task_id FROM ops_task_leases
+             WHERE project_id = ?1 AND state = 'pending'",
+        )?;
+        let leases = statement
+            .query_map(params![project_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        leases
+            .into_iter()
+            .filter_map(|(lease_id, task_id)| (!task_ids.contains(&task_id)).then_some(lease_id))
+            .collect::<Vec<_>>()
+    };
+    if missing_lease_ids.is_empty() {
+        return Ok(());
+    }
+    let finished_at = now();
+    for lease_id in missing_lease_ids {
+        db.execute(
+            "UPDATE ops_task_leases SET state = 'released', finished_at = ?1
+             WHERE id = ?2 AND state = 'pending'",
+            params![finished_at, lease_id],
+        )?;
+    }
+    Ok(())
 }
 
 fn next_task_id(db: &Connection, project_id: &str, state: &Value) -> Result<Option<String>> {
