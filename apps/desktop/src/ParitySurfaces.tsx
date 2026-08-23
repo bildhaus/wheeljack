@@ -142,6 +142,7 @@ import { needsAttention, pendingAgentInteraction, type AttentionItem } from "./a
 import { builtInThemes, compileTheme, contrastRatio, replaceThemeAssignments, serializeTheme, themeAssignment, type ThemeDefinition } from "./theme";
 
 type OpsTaskEditablePatch = Partial<Pick<OpsCard, "title" | "detail" | "definitionOfDone" | "constraints" | "verificationCommand" | "reviewPolicy">>;
+const OpsArchiveDialogs = lazy(() => import("./OpsArchiveDialogs"));
 import { activeVsCodeThemeName, parseImportedThemeDocument, type ThemeImportResult } from "./themeImport";
 import { discoverVsCodeThemes, readThemeDocument, writeThemeDocument, type VsCodeThemeSource } from "./core";
 import type { UpdateController } from "./updater";
@@ -1213,6 +1214,8 @@ export function OpsSurface({
   taskAgentName,
   onUpdate,
   onDelete,
+  onArchiveDone,
+  onRestoreArchived,
   onStartAgent,
   onSaveBot,
   savedBotAvatarSeeds,
@@ -1279,6 +1282,8 @@ export function OpsSurface({
   taskAgentName: string;
   onUpdate: (card: OpsCard, change: OpsTaskEditablePatch) => void;
   onDelete: (card: OpsCard) => void;
+  onArchiveDone: (cardIds: string[]) => Promise<void>;
+  onRestoreArchived: (cardIds: string[]) => Promise<void>;
   onStartAgent: (card: OpsCard) => Promise<boolean>;
   onSaveBot: (snapshot: BotSnapshot) => void;
   savedBotAvatarSeeds: string[];
@@ -1331,6 +1336,8 @@ export function OpsSurface({
   onStickerLensHost: (host: HTMLElement | null) => void;
 }) {
   const [deleteArmed, setDeleteArmed] = useState<string>();
+  const [archiveDoneOpen, setArchiveDoneOpen] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
   const [editingCardId, setEditingCardId] = useState<string>();
   const [draggedCardId, setDraggedCardId] = useState<string>();
   const [dropColumnId, setDropColumnId] = useState<string>();
@@ -1798,7 +1805,13 @@ export function OpsSurface({
                       data-kanban-column-id={lane.targetColumnId}
                       key={lane.id}
                     >
-                      <header><h2>{lane.title}</h2><span className="wj-column-count">{cards.length}</span></header>
+                      <header><h2>{lane.title}</h2><div className="wj-column-actions"><span className="wj-column-count">{cards.length}</span>{lane.id === "done" && <DropdownMenu>
+                        <DropdownMenuTrigger asChild><Button aria-label="Completed task actions" variant="ghost" size="icon-sm"><MoreHorizontal /></Button></DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem disabled={!boardWritable || cards.length === 0} onSelect={() => setArchiveDoneOpen(true)}><Files />Archive completed…</DropdownMenuItem>
+                          <DropdownMenuItem disabled={!state.archivedCards?.length} onSelect={() => setArchiveOpen(true)}><History />View archived ({state.archivedCards?.length ?? 0})</DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>}</div></header>
                       <div className="wj-board-stack">
                         {cards.length === 0 && <div className="wj-column-empty">No tasks</div>}
                         {cards.map((card) => {
@@ -2297,6 +2310,17 @@ export function OpsSurface({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      {(archiveDoneOpen || archiveOpen) && <Suspense fallback={null}><OpsArchiveDialogs
+        archiveDoneOpen={archiveDoneOpen}
+        archiveOpen={archiveOpen}
+        writable={boardWritable}
+        state={state}
+        runtimes={structuredRuntimes}
+        onArchiveDoneOpen={setArchiveDoneOpen}
+        onArchiveOpen={setArchiveOpen}
+        onArchiveDone={onArchiveDone}
+        onRestoreArchived={onRestoreArchived}
+      /></Suspense>}
       <AlertDialog open={Boolean(contractCard)} onOpenChange={(open) => !open && setContractCard(undefined)}>
         <AlertDialogContent className="wj-dialog wj-dialog-medium">
           <AlertDialogHeader>
@@ -4223,4 +4247,4 @@ const defaultInterfacePreferences: Partial<UiPreferences> = {
   showAgentRail: true,
 };
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";

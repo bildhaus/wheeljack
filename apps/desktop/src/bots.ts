@@ -31,6 +31,13 @@ export function botSnapshot(profile: BotProfile): BotSnapshot {
   };
 }
 
+export function matchingSavedBot(
+  profiles: BotProfile[],
+  snapshot: BotSnapshot,
+): BotProfile | undefined {
+  return profiles.find((profile) => profile.avatarSeed === snapshot.avatarSeed);
+}
+
 export function botSnapshotFromDraft(
   draft: BotProfileInput,
   source: BotSnapshot["source"],

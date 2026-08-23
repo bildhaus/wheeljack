@@ -226,8 +226,10 @@ export function SpecialistProposalDialog({
 
           <details key={request.key} className="wj-specialist-editor">
             <summary>Edit details</summary>
-            {request.rationale && <p className="wj-specialist-rationale"><strong>Why suggested</strong>{request.rationale}</p>}
-            <BotProfileFields idPrefix="specialist" draft={draft} adapters={adapters} onChange={setDraft} onLaunchChange={updateLaunch} />
+            <div className="wj-specialist-editor-content">
+              {request.rationale && <p className="wj-specialist-rationale"><strong>Why suggested</strong>{request.rationale}</p>}
+              <BotProfileFields idPrefix="specialist" draft={draft} adapters={adapters} onChange={setDraft} onLaunchChange={updateLaunch} />
+            </div>
           </details>
 
           <BotScopeControl scope={draft.scope} project={project} disabled={busy} onChange={(scope) => setDraft({ ...draft, scope, projectId: scope === "project" ? project?.id : undefined })} />

@@ -505,6 +505,7 @@ export interface OpsState {
   version: 2;
   columns: KanbanColumn[];
   cards: OpsCard[];
+  archivedCards?: OpsCard[];
   prd: string;
   tdd: string;
   eventCursors: Record<string, number>;

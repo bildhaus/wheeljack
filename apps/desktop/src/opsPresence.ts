@@ -7,10 +7,11 @@ const coordinatingStatuses = new Set(["starting", "running", "in_progress"]);
 
 export type OpsExecutionLane = "ready" | "running" | "attention" | "verifying" | "done";
 
-export function opsNextAutonomousTask(state: Pick<OpsState, "cards" | "columns">): OpsCard | undefined {
+export function opsNextAutonomousTask(state: Pick<OpsState, "cards" | "columns" | "archivedCards">): OpsCard | undefined {
   const queuedColumnIds = new Set(state.columns.filter((column) => column.role === "queued").map((column) => column.id));
   const doneColumnIds = new Set(state.columns.filter((column) => column.role === "done").map((column) => column.id));
   const byId = new Map(state.cards.map((card) => [card.id, card]));
+  const archivedIds = new Set((state.archivedCards ?? []).map((card) => card.id));
   return state.cards.find((card) =>
     queuedColumnIds.has(card.columnId)
     && !card.paused
@@ -18,7 +19,7 @@ export function opsNextAutonomousTask(state: Pick<OpsState, "cards" | "columns">
     && !card.taskLane?.closedAt
     && (card.dependencyIds ?? []).every((id) => {
       const dependency = byId.get(id);
-      return dependency ? doneColumnIds.has(dependency.columnId) : false;
+      return dependency ? doneColumnIds.has(dependency.columnId) : archivedIds.has(id);
     }));
 }
 
