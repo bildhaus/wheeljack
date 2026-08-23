@@ -23,7 +23,7 @@ while (Date.now() < deadline) {
   }
   await Bun.sleep(25);
 }
-if (!target) throw new Error(`No Wheeljack WebView appeared on DevTools port ${port}.`);
+if (!target) throw new Error(`No wheeljack WebView appeared on DevTools port ${port}.`);
 
 const socket = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise((resolve, reject) => {
