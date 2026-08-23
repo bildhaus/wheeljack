@@ -39,6 +39,7 @@ export function shouldAutoVerifyAdapter(adapter?: Adapter, args?: string[]): boo
 
 export function adapterReadinessLabel(adapter: Adapter, args?: string[]): string {
   if (!adapter.enabled) return "Disabled";
+  if (!adapter.status) return "Checking";
   if (adapter.status.toLowerCase() !== "installed") return "Missing";
   if (!adapter.supportsStructured) return "Unsupported";
   if (!adapterRequiresVerification(adapter)) return "Ready";

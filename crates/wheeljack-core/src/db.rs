@@ -13,7 +13,6 @@ pub(crate) fn migrate_app_data(paths: &CorePaths) -> Result<bool> {
     let marker_path = paths.app_data_dir.join(MIGRATION_MARKER_FILE);
     let dest_db = paths.db_path();
     if dest_db.exists() {
-        validate_database(&dest_db)?;
         write_migration_marker(&marker_path, None, false)?;
         return Ok(false);
     }

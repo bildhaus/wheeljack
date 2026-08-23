@@ -696,17 +696,30 @@ pub(crate) fn detect_adapter_status(mut adapter: AdapterDto) -> AdapterDto {
     adapter
 }
 
-pub(crate) fn probe_adapter(
+pub(crate) struct PreparedAdapterProbe {
+    adapter: AdapterDto,
+    launch_fingerprint: String,
+}
+
+pub(crate) fn prepare_adapter_probe(
     db: &Connection,
     adapter_id: &str,
     launch_args: &[String],
     launch_config: &AdapterLaunchConfig,
-) -> Result<AdapterProbeDto> {
+) -> Result<PreparedAdapterProbe> {
     let adapter = adapter_registry(db)?
         .into_iter()
         .find(|candidate| candidate.id == adapter_id)
         .ok_or_else(|| anyhow!("unsupported adapter: {adapter_id}"))?;
     let launch_fingerprint = adapter_launch_fingerprint(&adapter, launch_args, launch_config)?;
+    Ok(PreparedAdapterProbe {
+        adapter,
+        launch_fingerprint,
+    })
+}
+
+pub(crate) fn run_prepared_adapter_probe(prepared: &PreparedAdapterProbe) -> AdapterProbeDto {
+    let adapter = &prepared.adapter;
     let executable = adapter
         .executables
         .iter()
@@ -726,21 +739,20 @@ pub(crate) fn probe_adapter(
         .and_then(Value::as_str)
         .map(str::to_string);
     let Some(executable_path) = executable else {
-        clear_persisted_adapter_verifications(db, &adapter.id)?;
-        return Ok(AdapterProbeDto {
-            adapter_id: adapter.id,
+        return AdapterProbeDto {
+            adapter_id: adapter.id.clone(),
             executable_path: None,
             version: None,
             auth_status: "missing".to_string(),
             protocol,
             verification_status: "unavailable".to_string(),
             docs_url,
-            repair_command: adapter_repair_command(adapter_id),
-            message: adapter.setup_hint,
+            repair_command: adapter_repair_command(&adapter.id),
+            message: adapter.setup_hint.clone(),
             checked_at: now(),
             verified_args: Vec::new(),
             verification_fingerprint: None,
-        });
+        };
     };
 
     let executable_text = executable_path.to_string_lossy().to_string();
@@ -760,7 +772,7 @@ pub(crate) fn probe_adapter(
             .map(str::trim)
             .map(str::to_string)
     });
-    let auth_args: &[&str] = match adapter_id {
+    let auth_args: &[&str] = match adapter.id.as_str() {
         "codex-cli" => &["login", "status"],
         "claude-code" => &["auth", "status", "--json"],
         "opencode" => &["auth", "list"],
@@ -779,7 +791,7 @@ pub(crate) fn probe_adapter(
             Duration::from_secs(15),
             None,
         ) {
-            Ok((success, output)) if adapter_auth_succeeded(adapter_id, success, &output) => (
+            Ok((success, output)) if adapter_auth_succeeded(&adapter.id, success, &output) => (
                 "authenticated".to_string(),
                 "Installed and authenticated. Run Verify to prove a real turn.".to_string(),
             ),
@@ -790,22 +802,44 @@ pub(crate) fn probe_adapter(
             ),
         }
     };
-    let mut probe = AdapterProbeDto {
-        adapter_id: adapter.id,
+    AdapterProbeDto {
+        adapter_id: adapter.id.clone(),
         executable_path: Some(executable_text),
         version,
         auth_status,
         protocol,
         verification_status: "untested".to_string(),
         docs_url,
-        repair_command: adapter_repair_command(adapter_id),
+        repair_command: adapter_repair_command(&adapter.id),
         message: auth_message,
         checked_at: now(),
         verified_args: Vec::new(),
         verification_fingerprint: None,
-    };
-    restore_persisted_adapter_verification(db, &mut probe, &launch_fingerprint)?;
+    }
+}
+
+pub(crate) fn finish_adapter_probe(
+    db: &Connection,
+    mut probe: AdapterProbeDto,
+    prepared: &PreparedAdapterProbe,
+) -> Result<AdapterProbeDto> {
+    if probe.executable_path.is_none() {
+        clear_persisted_adapter_verifications(db, &probe.adapter_id)?;
+    } else {
+        restore_persisted_adapter_verification(db, &mut probe, &prepared.launch_fingerprint)?;
+    }
     Ok(probe)
+}
+
+pub(crate) fn probe_adapter(
+    db: &Connection,
+    adapter_id: &str,
+    launch_args: &[String],
+    launch_config: &AdapterLaunchConfig,
+) -> Result<AdapterProbeDto> {
+    let prepared = prepare_adapter_probe(db, adapter_id, launch_args, launch_config)?;
+    let probe = run_prepared_adapter_probe(&prepared);
+    finish_adapter_probe(db, probe, &prepared)
 }
 
 pub(crate) fn verify_adapter(

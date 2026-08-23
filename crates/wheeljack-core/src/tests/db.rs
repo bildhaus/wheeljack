@@ -517,6 +517,20 @@ fn migration_does_not_import_over_an_existing_destination_database() {
 }
 
 #[test]
+fn migration_fast_path_does_not_validate_an_existing_live_database() {
+    let app_data_dir = temp_dir("migration-existing-fast-path");
+    fs::create_dir_all(&app_data_dir).unwrap();
+    let database_path = app_data_dir.join(DB_FILE_NAME);
+    let sentinel = b"existing live database is opened and migrated by Core::new";
+    fs::write(&database_path, sentinel).unwrap();
+
+    let mut init = test_init("migration-existing-fast-path");
+    init.app_data_dir = app_data_dir;
+    assert!(!migrate_app_data(&CorePaths::from_init(&init)).unwrap());
+    assert_eq!(fs::read(database_path).unwrap(), sentinel);
+}
+
+#[test]
 fn migrates_legacy_database_name_in_current_app_data_dir() {
     let app_data_dir = temp_dir("legacy-database-name");
     fs::create_dir_all(&app_data_dir).unwrap();

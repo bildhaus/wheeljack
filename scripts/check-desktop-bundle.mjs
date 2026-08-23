@@ -14,6 +14,9 @@ const targets = JSON.parse(await readFile(targetsPath, "utf8"));
 if (targets.version !== 1 || !targets.bundle?.ceiling || !targets.bundle?.target) {
   throw new Error("Desktop performance targets must use version 1 with bundle ceiling and target metrics.");
 }
+if (!Number.isFinite(targets.startup?.target?.firstUsableMilliseconds) || targets.startup.target.firstUsableMilliseconds <= 0) {
+  throw new Error("Desktop performance targets must define a positive startup firstUsableMilliseconds target.");
+}
 const bundleMetricKeys = ["initialJsBytes", "largestJsChunkBytes", "totalJsBytes"];
 for (const key of bundleMetricKeys) {
   const ceiling = targets.bundle.ceiling[key];
