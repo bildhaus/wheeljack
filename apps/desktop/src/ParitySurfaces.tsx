@@ -143,6 +143,7 @@ import { builtInThemes, compileTheme, contrastRatio, replaceThemeAssignments, se
 
 type OpsTaskEditablePatch = Partial<Pick<OpsCard, "title" | "detail" | "definitionOfDone" | "constraints" | "verificationCommand" | "reviewPolicy">>;
 const OpsArchiveDialogs = lazy(() => import("./OpsArchiveDialogs"));
+const TaskWorktreeList = lazy(() => import("./TaskWorktreeList"));
 import { activeVsCodeThemeName, parseImportedThemeDocument, type ThemeImportResult } from "./themeImport";
 import { discoverVsCodeThemes, readThemeDocument, writeThemeDocument, type VsCodeThemeSource } from "./core";
 import type { UpdateController } from "./updater";
@@ -1281,7 +1282,7 @@ export function OpsSurface({
   taskAgentAvailable: boolean;
   taskAgentName: string;
   onUpdate: (card: OpsCard, change: OpsTaskEditablePatch) => void;
-  onDelete: (card: OpsCard) => void;
+  onDelete: (card: OpsCard) => Promise<void>;
   onArchiveDone: (cardIds: string[]) => Promise<void>;
   onRestoreArchived: (cardIds: string[]) => Promise<void>;
   onStartAgent: (card: OpsCard) => Promise<boolean>;
@@ -1598,6 +1599,8 @@ export function OpsSurface({
     const taskRuntime = opsCardParticipantIds(card, structuredRuntimes)
       .flatMap((id) => structuredRuntimes.filter((runtime) => runtime.nodeId === id))[0];
     const taskLaneLive = Boolean(taskRuntime && !isTerminalSessionStatus(taskRuntime.status));
+    const cleanup = card.taskLane?.cleanup;
+    const cleanupPending = cleanup && ["queued", "resolving"].includes(cleanup.status);
     return (
       <>
         <Item onSelect={() => setEditingCardId(card.id)}>Edit task</Item>
@@ -1617,19 +1620,21 @@ export function OpsSurface({
           {cardRole === "active" && <Item onSelect={() => requestCardMove(card, state.columns.find((item) => item.role === "queued")?.id ?? card.columnId)}>{cardHasLiveParticipant(card) ? "Request pause…" : "Move to Ready"}</Item>}
           {opsCanCompleteWithOverride(card) && <Item onSelect={() => requestCardMove(card, state.columns.find((item) => item.role === "done")?.id ?? card.columnId)}><CheckIcon />Complete with override…</Item>}
         </>}
-        {cardRole === "done" && card.taskLane && !card.taskLane.closedAt && !taskLaneLive && <><Separator />
-          <Item onSelect={() => onRemoveTaskLane(card)}><Trash2 />Remove worktree…</Item>
+        {card.taskLane && !card.taskLane.closedAt && <><Separator />
+          <Item disabled={Boolean(cleanupPending)} onSelect={() => onRemoveTaskLane(card)}><Trash2 />{cleanupPending
+            ? cleanup?.action === "delete" ? "Resolving worktree before deletion…" : cleanup?.action === "archive" ? "Resolving worktree before archive…" : "Resolving worktree…"
+            : cleanup?.status === "blocked" ? "Retry worktree cleanup" : taskLaneLive ? "Resolve worktree with agent…" : "Remove worktree…"}</Item>
         </>}
         <Separator />
-        <Item disabled={Boolean(card.taskLane && !card.taskLane.closedAt)} variant="destructive" onSelect={(event: Event) => {
+        <Item disabled={Boolean(cleanupPending && cleanup?.action === "delete")} variant="destructive" onSelect={(event: Event) => {
           if (deleteArmed === card.id) {
-            onDelete(card);
+            void onDelete(card);
             setDeleteArmed(undefined);
           } else {
             event.preventDefault();
             setDeleteArmed(card.id);
           }
-        }}><Trash2 />{card.taskLane && !card.taskLane.closedAt ? "Remove worktree before deleting" : deleteArmed === card.id ? "Confirm delete" : "Delete task"}</Item>
+        }}><Trash2 />{cleanupPending && cleanup?.action === "delete" ? "Deletion queued" : deleteArmed === card.id ? "Confirm delete" : "Delete task"}</Item>
         {context && <DevToolsContextItem />}
       </>
     );
@@ -2435,10 +2440,9 @@ export function OpsSurface({
             </ScrollArea>
             <footer className="wj-execution-inspector-actions">
               {inspectedOneOff && <Button variant="outline" onClick={() => { setInspectedCardId(undefined); onSaveBot(inspectedOneOff); }}><Briefcase />Save bot</Button>}
+              {inspectedCard.taskLane && !inspectedCard.taskLane.closedAt && <Button variant="outline" disabled={Boolean(inspectedCard.taskLane.cleanup && ["queued", "resolving"].includes(inspectedCard.taskLane.cleanup.status))} onClick={() => onRemoveTaskLane(inspectedCard)}><Trash2 />{inspectedCard.taskLane.cleanup?.status === "blocked" ? "Retry cleanup" : inspectedCard.taskLane.cleanup ? "Resolving worktree…" : inspectedTaskLaneLive ? "Resolve worktree" : "Remove worktree"}</Button>}
               {inspectedRole === "done"
-                ? inspectedCard.taskLane && !inspectedCard.taskLane.closedAt && !inspectedTaskLaneLive
-                  ? <Button variant="outline" onClick={() => onRemoveTaskLane(inspectedCard)}><Trash2 />Remove worktree</Button>
-                  : <span className="wj-task-complete"><CheckIcon />Complete</span>
+                ? <span className="wj-task-complete"><CheckIcon />Complete</span>
                 : inspectedRole === "review"
                 ? <Button onClick={() => { setInspectedCardId(undefined); onReview(inspectedCard); }}><Search />Review evidence</Button>
                 : inspectedChildProgress.total > 0
@@ -2802,7 +2806,7 @@ export function FloorSurface({
           <header><div><span className="wj-section-label">Project record</span><h2 id="floor-activity-heading">Recent activity</h2></div><div className="wj-floor-activity-header">{unreadCount > 0 && <Badge variant="outline">{unreadCount} unread</Badge>}<Button variant="ghost" size="sm" onClick={onOpenHistory}>View history</Button></div></header>
           <div className="wj-floor-activity-scroll" role="region" aria-label="Recent project activity" tabIndex={0}>
             {recentEvents.length ? recentEvents.map((event) => <article data-unread={!event.isRead || undefined} key={event.id}>
-              <button type="button" onClick={() => onOpenActivity(event)}><RunStateBadge status={event.status} variant="indicator" /><span><strong>{event.nodeTitle || event.kind}</strong><small>{event.message}</small></span><time>{formatOpsRelative(event.createdAt, now) ?? formatTime(event.createdAt)}</time></button>
+              <button type="button" onClick={() => onOpenActivity(event)}><span className="wj-floor-activity-status"><RunStateBadge status={event.status} variant="indicator" /></span><span><strong>{event.nodeTitle || event.kind}</strong><small>{event.message}</small></span><time>{formatOpsRelative(event.createdAt, now) ?? formatTime(event.createdAt)}</time></button>
               {!event.isRead && <Button aria-label="Mark event read" variant="ghost" size="icon-sm" onClick={() => onAcknowledgeActivity(event)}><CheckIcon /></Button>}
             </article>) : <p className="wj-floor-empty">No project activity yet.</p>}
           </div>
@@ -3656,6 +3660,7 @@ export function UtilityPanelSurface({
   sessionSearchBusy,
   git,
   diff,
+  opsState,
   onOpenChange,
   onTab,
   onHistoryPage,
@@ -3671,6 +3676,8 @@ export function UtilityPanelSurface({
   onAcknowledgeAttention,
   onAcknowledgeAll,
   onRefreshGit,
+  onOpenTaskLane,
+  onResolveTaskLane,
   onClearActivity,
   onClearTranscripts,
 }: {
@@ -3687,6 +3694,7 @@ export function UtilityPanelSurface({
   sessionSearchBusy: boolean;
   git?: GitStatus;
   diff?: GitDiff;
+  opsState: OpsState;
   onOpenChange: (open: boolean) => void;
   onTab: (tab: UtilityPanelTab) => void;
   onHistoryPage: (page: "activity" | "sessions") => void;
@@ -3702,6 +3710,8 @@ export function UtilityPanelSurface({
   onAcknowledgeAttention: (item: AttentionItem) => void;
   onAcknowledgeAll: () => void;
   onRefreshGit: () => void;
+  onOpenTaskLane: (card: OpsCard) => void;
+  onResolveTaskLane: (card: OpsCard) => void;
   onClearActivity: () => void;
   onClearTranscripts: () => void;
 }) {
@@ -3712,7 +3722,8 @@ export function UtilityPanelSurface({
   const runtimeById = new Map(runtimes.map((runtime) => [runtime.nodeId, runtime]));
   const inboxCount = attention.length;
   const unreadInboxCount = new Set(attention.flatMap((item) => item.activityIds)).size;
-  const gitEmpty = !git || !git.isRepo || (git.changedFiles.length === 0 && !diff?.text);
+  const hasAdditionalWorktrees = Boolean(git && (git.worktrees.length > 1 || opsState.cards.some((card) => card.taskLane && !card.taskLane.closedAt)));
+  const gitEmpty = !git || !git.isRepo || (git.changedFiles.length === 0 && !diff?.text && !hasAdditionalWorktrees);
   const searchingSessions = Boolean(submittedSessionQuery);
   const sessionRows = searchingSessions ? sessionSearchResults : sessions;
   const content = (
@@ -3771,9 +3782,12 @@ export function UtilityPanelSurface({
               ? <Empty icon={<DotMatrixLoader variant="compile" size={18} />} title="Checking repository" detail="Loading the latest working-tree status." />
               : !git.isRepo
                 ? <Empty icon={<GitBranch />} title="Not a Git repository" detail="Git changes will appear here after this project is initialized as a repository." />
-                : git.changedFiles.length
-                  ? <section className="wj-drawer-group"><div className="wj-drawer-group-heading"><h3>Working tree</h3><span>{git.changedFiles.length}</span></div><div>{git.changedFiles.map((file) => <ContextMenu key={file}><ContextMenuTrigger asChild><div className="wj-file-row"><FileCode2 /><span>{file}</span></div></ContextMenuTrigger><ContextMenuContent><ContextMenuItem onSelect={() => void navigator.clipboard.writeText(file)}><Files />Copy relative path</ContextMenuItem><ContextMenuItem onSelect={onRefreshGit}><RefreshCw />Refresh Git</ContextMenuItem><DevToolsContextItem /></ContextMenuContent></ContextMenu>)}</div></section>
-                  : <Empty icon={<CheckIcon />} title="Working tree clean" detail={`No uncommitted changes on ${git.branch || "the current branch"}.`} />}
+                : <>
+                    {hasAdditionalWorktrees && <Suspense fallback={<div className="wj-drawer-group"><DotMatrixLoader size={16} />Loading worktrees…</div>}><TaskWorktreeList git={git} cards={opsState.cards} onOpenTask={onOpenTaskLane} onResolveTask={onResolveTaskLane} /></Suspense>}
+                    {git.changedFiles.length
+                      ? <section className="wj-drawer-group"><div className="wj-drawer-group-heading"><h3>Working tree</h3><span>{git.changedFiles.length}</span></div><div>{git.changedFiles.map((file) => <ContextMenu key={file}><ContextMenuTrigger asChild><div className="wj-file-row"><FileCode2 /><span>{file}</span></div></ContextMenuTrigger><ContextMenuContent><ContextMenuItem onSelect={() => void navigator.clipboard.writeText(file)}><Files />Copy relative path</ContextMenuItem><ContextMenuItem onSelect={onRefreshGit}><RefreshCw />Refresh Git</ContextMenuItem><DevToolsContextItem /></ContextMenuContent></ContextMenu>)}</div></section>
+                      : !hasAdditionalWorktrees && <Empty icon={<CheckIcon />} title="Working tree clean" detail={`No uncommitted changes on ${git.branch || "the current branch"}.`} />}
+                  </>}
             {diff?.text && <section className="wj-drawer-group"><div className="wj-drawer-group-heading"><h3>Diff</h3></div><pre className="wj-diff">{diff.text}</pre></section>}
           </div>
         </ScrollArea>
@@ -4113,15 +4127,15 @@ export function ReviewDrawerSurface({
             </div>
           )}
         </ScrollArea>
-        {reviewCard && <div className="wj-drawer-footer wj-review-recommendation"><ActionCard
+        {reviewCard && <div className="wj-drawer-footer wj-review-recommendation max-h-[min(440px,58vh)] overflow-y-auto"><ActionCard
           variant="recommendation"
           title="Recommended next step"
           status={reviewRecommendation === "Approve verification" ? "verified" : "review"}
           recommendation={reviewRecommendation}
-          rationale={recommendationReason}
+          rationale={feedbackOpen ? undefined : recommendationReason}
           actions={recommendationActions}
         >
-          {feedbackOpen && <div className="space-y-2"><Textarea autoFocus aria-label="Review feedback" value={feedback} onChange={(event) => { setFeedback(event.target.value); setChangesError(""); }} placeholder="What must change before approval?" />{changesError && <p className="text-sm text-destructive" role="alert">{changesError}</p>}</div>}
+          {feedbackOpen && <div className="space-y-2"><Textarea className="max-h-40 overflow-y-auto" autoFocus aria-label="Review feedback" value={feedback} onChange={(event) => { setFeedback(event.target.value); setChangesError(""); }} placeholder="What must change before approval?" />{changesError && <p className="text-sm text-destructive" role="alert">{changesError}</p>}</div>}
         </ActionCard></div>}
       </SheetContent>
     </Sheet>

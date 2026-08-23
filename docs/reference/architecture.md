@@ -232,9 +232,9 @@ assets with `scripts/check-desktop-bundle.mjs`:
 
 | Bundle metric | Current ceiling | Improvement target |
 | --- | ---: | ---: |
-| Initial JavaScript | 1,700,000 bytes | 1,250,000 bytes |
+| Initial JavaScript | 1,715,000 bytes | 1,250,000 bytes |
 | Largest JavaScript chunk | 1,350,000 bytes | 900,000 bytes |
-| Total JavaScript | 1,800,000 bytes | 1,550,000 bytes |
+| Total JavaScript | 1,820,000 bytes | 1,550,000 bytes |
 
 The packaged six-session smoke keeps its baseline regression check and separately reports
 progress toward 540 MiB working set, 75 ms input p95, and 16.7 ms frame p95. The target

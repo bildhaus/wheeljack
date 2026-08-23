@@ -98,6 +98,9 @@ function parseOpsTaskLane(value: unknown): OpsCard["taskLane"] {
     !lane.branch ||
     !lane.baseCommit
   ) return undefined;
+  const cleanup = lane.cleanup && typeof lane.cleanup === "object"
+    ? lane.cleanup as Record<string, unknown>
+    : undefined;
   return {
     kind: "git-worktree",
     worktreePath: lane.worktreePath,
@@ -105,6 +108,17 @@ function parseOpsTaskLane(value: unknown): OpsCard["taskLane"] {
     branch: lane.branch,
     baseCommit: lane.baseCommit,
     closedAt: typeof lane.closedAt === "string" ? lane.closedAt : undefined,
+    cleanup: cleanup
+      && ["remove", "delete", "archive"].includes(String(cleanup.action))
+      && ["queued", "resolving", "blocked"].includes(String(cleanup.status))
+      && typeof cleanup.requestedAt === "string"
+      ? {
+          action: cleanup.action as "remove" | "delete" | "archive",
+          status: cleanup.status as "queued" | "resolving" | "blocked",
+          requestedAt: cleanup.requestedAt,
+          message: typeof cleanup.message === "string" ? cleanup.message : undefined,
+        }
+      : undefined,
   };
 }
 

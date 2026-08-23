@@ -42,10 +42,12 @@ test("confirms archiving eligible completed cards", async () => {
   await waitFor(() => expect(onArchiveDone).toHaveBeenCalledWith(["completed"]));
 });
 
-test("excludes completed cards with open worktrees", () => {
+test("queues completed cards with open worktrees for automatic cleanup", async () => {
+  const onArchiveDone = vi.fn().mockResolvedValue(undefined);
   const card = completedCard({ taskLane: { kind: "git-worktree", worktreePath: "C:\\worktree", cwd: "C:\\worktree", branch: "task/lane", baseCommit: "abc123" } });
-  render(<OpsArchiveDialogs archiveDoneOpen archiveOpen={false} writable state={state(card)} runtimes={[]} onArchiveDoneOpen={() => {}} onArchiveOpen={() => {}} onArchiveDone={vi.fn()} onRestoreArchived={vi.fn()} />);
+  render(<OpsArchiveDialogs archiveDoneOpen archiveOpen={false} writable state={state(card)} runtimes={[]} onArchiveDoneOpen={() => {}} onArchiveOpen={() => {}} onArchiveDone={onArchiveDone} onRestoreArchived={vi.fn()} />);
 
-  expect(screen.getByText(/excluded until its active agent or worktree is closed/)).toBeTruthy();
-  expect((screen.getByRole("button", { name: "Archive 0" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByText(/preserve and resolve local changes first/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Archive 1" }));
+  await waitFor(() => expect(onArchiveDone).toHaveBeenCalledWith(["completed"]));
 });

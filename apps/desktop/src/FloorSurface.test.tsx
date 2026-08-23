@@ -328,4 +328,32 @@ describe("FloorSurface", () => {
     await user.click(screen.getByRole("button", { name: "View history" }));
     expect(props.onOpenHistory).toHaveBeenCalledOnce();
   });
+
+  test("keeps a status column when routine activity omits its indicator", () => {
+    const event: ActivityEvent = {
+      id: 1,
+      sessionId: "session-agent",
+      seq: 1,
+      kind: "status",
+      status: "running",
+      message: "Applying the requested changes",
+      payload: { taskId: "task" },
+      isRead: false,
+      createdAt: "2026-08-19T09:59:00Z",
+      nodeId: "agent",
+      nodeTitle: "Agent",
+    };
+    const props = floorProps({
+      state: state([card("task", "active", { assigneeIds: ["agent"] })]),
+      runtimes: [runtime("agent", "running")],
+      activity: [event],
+    });
+    const { container } = render(<FloorSurface {...props} />);
+
+    const row = container.querySelector<HTMLButtonElement>(".wj-floor-activity-scroll article > button:first-child");
+    expect(row?.children).toHaveLength(3);
+    expect(row?.firstElementChild?.classList.contains("wj-floor-activity-status")).toBe(true);
+    expect(row?.firstElementChild?.children).toHaveLength(0);
+    expect(row?.children[1]?.textContent).toBe("AgentApplying the requested changes");
+  });
 });

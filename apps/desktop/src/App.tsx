@@ -143,7 +143,8 @@ import { ProviderMark } from "./ProviderMark";
 import { DotMatrixLoader } from "./DotMatrixLoader";
 import { createDiagnosticsReport } from "./diagnostics";
 import type { UsageSessionRow } from "./usage";
-import { opsActiveFileConflicts, opsAutomaticApprovalCandidates, opsAutomaticApprovalRetryDelay, opsAutomaticFileConflictInstructions, opsCanCompleteWithOverride, opsCurrentCardForAgent, opsDecompositionHasCycle, opsDispatchableDecompositionKeys, opsFileConflictDirectiveIsCurrent, opsNextAutomaticApprovalCandidate, opsResolveFileConflict, opsStatusAttentionReason, opsVerificationApproval, opsVerificationCompletion, opsVerificationContractIssues } from "./opsPresence";
+import { opsActiveFileConflicts, opsAutomaticApprovalCandidates, opsAutomaticApprovalRetryDelay, opsAutomaticFileConflictInstructions, opsCanCompleteWithOverride, opsCardParticipantIds, opsCurrentCardForAgent, opsDecompositionHasCycle, opsDispatchableDecompositionKeys, opsFileConflictDirectiveIsCurrent, opsNextAutomaticApprovalCandidate, opsResolveFileConflict, opsStatusAttentionReason, opsVerificationApproval, opsVerificationCompletion, opsVerificationContractIssues } from "./opsPresence";
+import { taskWorktreeCleanupPrompt } from "./taskWorktrees";
 import { createStickerLensScene, StickerLensBackground, type StickerLensScene } from "./StickerLensBackground";
 import {
   defaultUiPreferences,
@@ -552,6 +553,7 @@ export function App() {
   const agentDecompositionRequestRef = useRef<AgentDecompositionRequest | undefined>(undefined);
   const agentControlHandlerRef = useRef<((runtime: PaneRuntime, request: AgentControlRequest) => Promise<void>) | undefined>(undefined);
   const handledAgentControlIdsRef = useRef(new Set<string>());
+  const taskLaneCleanupIdsRef = useRef(new Set<string>());
   const layoutViewportRef = useRef<LayoutViewport>({ width: 0, height: 0 });
   const stageRef = useRef<HTMLDivElement>(null);
   const preferencesRef = useRef<UiPreferences>(defaultUiPreferences);
@@ -1491,6 +1493,17 @@ export function App() {
     setGitDiff(nextDiff);
   };
 
+  const refreshProjectWorktrees = async (nextProject = projectRef.current) => {
+    if (!nextProject) return;
+    const [nextGit, nextDiff] = await Promise.all([
+      callCore<GitStatus>("git_status", { path: nextProject.path, includeWorktrees: true }),
+      callCore<GitDiff>("git_diff", { path: nextProject.path }),
+    ]);
+    if (projectRef.current?.id !== nextProject.id) return;
+    setGit(nextGit);
+    setGitDiff(nextDiff);
+  };
+
   const refreshProjectDocuments = async (nextProject = project, force = false) => {
     if (!nextProject?.path || (documentWritePendingRef.current && !force)) return;
     const next = await callCore<ProjectDocuments>("project_documents_read", {
@@ -1969,7 +1982,7 @@ export function App() {
     }
   };
 
-  const spawnAgent = async (initialPrompt = agentPrompt, opsTask?: OpsCard, displayPrompt = initialPrompt, opsRole: OpsAgentRole = "worker", schedulerLeaseId?: string, adapterIdOverride?: string, origin?: AgentSpawnOrigin, placement: PanePlacement = "auto", bot?: BotSpawnContext): Promise<boolean> => {
+  const spawnAgent = async (initialPrompt = agentPrompt, opsTask?: OpsCard, displayPrompt = initialPrompt, opsRole: OpsAgentRole = "worker", schedulerLeaseId?: string, adapterIdOverride?: string, origin?: AgentSpawnOrigin, placement: PanePlacement = "auto", bot?: BotSpawnContext, preserveTaskState = false): Promise<boolean> => {
     const launchAdapterId = bot?.snapshot.launch.adapterId ?? adapterIdOverride ?? selectedAdapterId;
     if (!canvas || !project || !launchAdapterId) return false;
     let adapter = adapters.find((candidate) => candidate.id === launchAdapterId);
@@ -2008,7 +2021,7 @@ export function App() {
     const optimisticOpsCard = opsTask
       ? opsStateRef.current.cards.find((card) => card.id === opsTask.id)
       : undefined;
-    const optimisticOpsAction = opsRole === "reviewer" ? "review" : "assign";
+    const optimisticOpsAction = preserveTaskState ? "maintenance" : opsRole === "reviewer" ? "review" : "assign";
     const optimisticOpsEventId = opsTask
       ? `manual:${optimisticOpsAction}:${timestamp}:${nodeId}`
       : undefined;
@@ -2034,6 +2047,7 @@ export function App() {
         taskId: opsTask?.id,
         taskRole: opsTask ? opsRole : undefined,
         autoCloseTaskAgent: Boolean(opsTask),
+        preserveTaskState,
         schedulerLeaseId,
         parentAgentId: origin?.parentNodeId,
         parentSessionId: origin?.parentSessionId,
@@ -2075,10 +2089,26 @@ export function App() {
     applyLayout(optimisticLayout.root, nodeId, optimisticLayout.mode);
     if (zoomedPaneId) setZoomedPaneId(nodeId);
     if (optimisticOpsCard) {
-      changeOps((current) => applyOpsOrchestration(
+      changeOps((current) => preserveTaskState ? {
+        ...current,
+        cards: current.cards.map((card) => card.id === optimisticOpsCard.id
+          ? appendOpsTaskEvent({
+              ...card,
+              assignee: nodeTitle,
+              assigneeIds: [...new Set([...card.assigneeIds, nodeId])],
+              agentStatuses: { ...card.agentStatuses, [nodeId]: "assigned" },
+            }, {
+              id: optimisticOpsEventId!,
+              kind: "assignment",
+              timestamp,
+              message: `Assigned ${nodeTitle} to resolve task worktree cleanup`,
+              targetId: nodeId,
+            })
+          : card),
+      } : applyOpsOrchestration(
         current,
         optimisticOpsCard.id,
-        optimisticOpsAction,
+        optimisticOpsAction as OpsOrchestrationAction,
         nodeId,
         nodeTitle,
         timestamp,
@@ -2132,6 +2162,7 @@ export function App() {
         taskId: opsTask?.id,
         taskRole: opsTask ? opsRole : undefined,
         autoCloseTaskAgent: Boolean(opsTask),
+        preserveTaskState,
         schedulerLeaseId,
         parentAgentId: origin?.parentNodeId,
         parentSessionId: origin?.parentSessionId,
@@ -2237,6 +2268,7 @@ export function App() {
           nodeId,
           optimisticOpsEventId,
           opsRole,
+          preserveTaskState,
         ));
       }
       setError(message(cause));
@@ -3464,7 +3496,8 @@ export function App() {
     if (next.tab !== preferences.utilityPanelTab) updatePreferences({ utilityPanelTab: next.tab });
     setUtilityPanelOpen(next.open);
     if (next.open && (!utilityPanelOpen || preferences.utilityPanelTab !== nextTab) && (nextTab === "git" || nextTab === "history")) {
-      void refreshProjectData().catch((cause) => setError(message(cause)));
+      const refresh = nextTab === "git" ? refreshProjectWorktrees() : refreshProjectData();
+      void refresh.catch((cause) => setError(message(cause)));
     }
   };
 
@@ -4073,7 +4106,7 @@ export function App() {
         const role = stringValue(node.data, "taskRole");
         const card = current.cards.find((candidate) => candidate.id === taskId);
         const columnRole = current.columns.find((column) => column.id === card?.columnId)?.role;
-        const moved = role === "worker" && columnRole !== "review" && columnRole !== "done"
+        const moved = node.data.preserveTaskState !== true && role === "worker" && columnRole !== "review" && columnRole !== "done"
           ? applyOpsOrchestration(current, taskId, "review")
           : current;
         return {
@@ -4327,18 +4360,86 @@ export function App() {
     });
   };
 
-  const deleteOpsTask = (card: OpsCard) => {
-    if (card.taskLane && !card.taskLane.closedAt) {
-      setError(`Remove task worktree ${card.taskLane.branch} before deleting this task.`);
-      return;
+  const queueOpsTaskLaneCleanup = async (
+    card: OpsCard,
+    requestedAction: NonNullable<NonNullable<OpsCard["taskLane"]>["cleanup"]>["action"],
+  ) => {
+    const currentCard = opsStateRef.current.cards.find((candidate) => candidate.id === card.id);
+    if (!currentCard?.taskLane || currentCard.taskLane.closedAt) return;
+    const timestamp = new Date().toISOString();
+    const action = requestedAction;
+    await persistOpsImmediately((current) => ({
+      ...current,
+      cards: current.cards.map((candidate) => candidate.id === card.id && candidate.taskLane
+        ? appendOpsTaskEvent({
+            ...candidate,
+            taskLane: {
+              ...candidate.taskLane,
+              cleanup: { action, status: "queued", requestedAt: timestamp },
+            },
+            lastNote: `Queued task worktree cleanup before ${action}.`,
+          }, {
+            id: `manual:task-lane-cleanup:${timestamp}`,
+            kind: "update",
+            timestamp,
+            message: `Queued task worktree cleanup before ${action}`,
+          })
+        : candidate),
+    }));
+  };
+
+  const deleteOpsTask = async (card: OpsCard) => {
+    try {
+      const currentCard = opsStateRef.current.cards.find((candidate) => candidate.id === card.id);
+      if (!currentCard) return;
+      if (currentCard.taskLane && !currentCard.taskLane.closedAt) {
+        await queueOpsTaskLaneCleanup(currentCard, "delete");
+        return;
+      }
+      await persistOpsImmediately((current) => ({
+        ...current,
+        cards: current.cards.filter((item) => item.id !== card.id),
+      }), true);
+    } catch (cause) {
+      setError(`Could not delete ${card.title}: ${message(cause)}`);
     }
-    changeOps((current) => ({ ...current, cards: current.cards.filter((item) => item.id !== card.id) }));
   };
 
   const archiveDoneOpsTasks = async (cardIds: string[]) => {
     const activeRuntimes = Object.values(currentRuntimes());
     const { archiveDoneOpsCardsSafely } = await import("./opsArchive");
-    await persistOpsImmediately((state) => archiveDoneOpsCardsSafely(state, cardIds, activeRuntimes), true);
+    const requestedIds = new Set(cardIds);
+    const selected = opsStateRef.current.cards.filter((card) => requestedIds.has(card.id));
+    const hasLiveAgent = (card: OpsCard) => opsCardParticipantIds(card, activeRuntimes).some((id) =>
+      activeRuntimes.some((runtime) => runtime.nodeId === id && !isTerminalSessionStatus(runtime.status)));
+    const laneCards = selected.filter((card) => card.taskLane && !card.taskLane.closedAt);
+    const blockedCards = selected.filter((card) => !card.taskLane && hasLiveAgent(card));
+    const immediateIds = selected.filter((card) => !card.taskLane && !hasLiveAgent(card)).map((card) => card.id);
+    const timestamp = new Date().toISOString();
+    await persistOpsImmediately((state) => {
+      const queued = {
+        ...state,
+        cards: state.cards.map((card) => laneCards.some((candidate) => candidate.id === card.id) && card.taskLane
+          ? appendOpsTaskEvent({
+              ...card,
+              taskLane: {
+                ...card.taskLane,
+                cleanup: { action: "archive", status: "queued", requestedAt: timestamp },
+              },
+              lastNote: "Queued task worktree cleanup before archive.",
+            }, {
+              id: `manual:task-lane-cleanup:${timestamp}:${card.id}`,
+              kind: "update",
+              timestamp,
+              message: "Queued task worktree cleanup before archive",
+            })
+          : card),
+      };
+      return immediateIds.length ? archiveDoneOpsCardsSafely(queued, immediateIds, activeRuntimes) : queued;
+    }, true);
+    if (blockedCards.length) {
+      setError(`${blockedCards.length} completed ${blockedCards.length === 1 ? "task still has" : "tasks still have"} an active agent without a task worktree.`);
+    }
   };
 
   const restoreArchivedOpsTasks = async (cardIds: string[]) => {
@@ -4347,54 +4448,16 @@ export function App() {
   };
 
   const removeOpsTaskLane = async (card: OpsCard) => {
-    if (!project || !card.taskLane || card.taskLane.closedAt) return;
-    const role = opsStateRef.current.columns.find((column) => column.id === card.columnId)?.role;
-    if (role !== "done") {
-      setError("Only completed tasks can remove their worktree.");
-      return;
-    }
-    if (card.assigneeIds.some((id) => {
-      const runtime = currentRuntimes()[id];
-      return Boolean(runtime && !isTerminalSessionStatus(runtime.status));
-    })) {
-      setError("Close the task agent pane before removing its worktree.");
-      return;
-    }
-    if (!await requestConfirmation(
-      `Remove ${card.taskLane.branch}?`,
-      `The clean worktree at ${card.taskLane.worktreePath} will be removed. The Git branch and task history will be preserved.`,
+    if (!card.taskLane || card.taskLane.closedAt) return;
+    const cleanup = card.taskLane.cleanup;
+    if (!cleanup && !await requestConfirmation(
+      `Resolve and remove ${card.taskLane.branch}?`,
+      "wheeljack will remove the worktree as soon as it is clean. If it has local changes, the owning agent will preserve and commit valuable work first. The Git branch and task history remain available.",
     )) return;
-    setBusy(true);
-    setError("");
     try {
-      const removed = await callCore<{ status: GitStatus }>("git_worktree_remove", {
-        req: {
-          projectPath: project.path,
-          worktreePath: card.taskLane.worktreePath,
-          expectedBranch: card.taskLane.branch,
-        },
-      });
-      const timestamp = new Date().toISOString();
-      await persistOpsImmediately((current) => ({
-        ...current,
-        cards: current.cards.map((candidate) => candidate.id === card.id && candidate.taskLane
-          ? appendOpsTaskEvent({
-              ...candidate,
-              taskLane: { ...candidate.taskLane, closedAt: timestamp },
-              lastNote: `Removed task worktree; branch ${candidate.taskLane.branch} was preserved.`,
-            }, {
-              id: `manual:task-lane-removed:${timestamp}`,
-              kind: "update",
-              timestamp,
-              message: `Removed task worktree; preserved ${candidate.taskLane.branch}`,
-            })
-          : candidate),
-      }));
-      setGit(removed.status);
+      await queueOpsTaskLaneCleanup(card, cleanup?.action ?? "remove");
     } catch (cause) {
-      setError(`Could not remove ${card.taskLane.branch}: ${message(cause)}`);
-    } finally {
-      setBusy(false);
+      setError(`Could not queue cleanup for ${card.taskLane.branch}: ${message(cause)}`);
     }
   };
 
@@ -5004,6 +5067,7 @@ export function App() {
     role: OpsAgentRole = "worker",
     schedulerLeaseId?: string,
     adapterIdOverride?: string,
+    preserveTaskState = false,
   ): Promise<boolean> => {
     const suggestion = role === "reviewer" ? card.reviewerSpecialist : card.workerSpecialist;
     const launchAdapterId = suggestion?.adapterId ?? adapterIdOverride ?? selectedAdapterId;
@@ -5014,14 +5078,14 @@ export function App() {
       : undefined;
     const savedSpecialist = suggestedSnapshot ? matchingSavedBot(bots, suggestedSnapshot) : undefined;
 
-    if (savedSpecialist && !schedulerLeaseId) {
+    if (!preserveTaskState && savedSpecialist && !schedulerLeaseId) {
       return spawnAgent(prompt, card, prompt, role, undefined, savedSpecialist.launch.adapterId, undefined, "auto", {
         snapshot: botSnapshot(savedSpecialist),
         profile: savedSpecialist,
       });
     }
 
-    if (suggestion && suggestedSnapshot && !schedulerLeaseId) {
+    if (!preserveTaskState && suggestion && suggestedSnapshot && !schedulerLeaseId) {
       return new Promise<boolean>((resolve) => {
         setSpecialistDialog({
           key: `${card.id}:${role}:${suggestedSnapshot.avatarSeed}`,
@@ -5086,11 +5150,135 @@ export function App() {
       launchAdapter,
       agentLaunchArgs(agentProfiles.find((profile) => profile.adapterId === launchAdapterId)),
     );
-    if (launchAdapterReady) return spawnAgent(prompt, card, prompt, role, schedulerLeaseId, launchAdapterId);
+    if (launchAdapterReady) {
+      if (preserveTaskState) return spawnAgent(prompt, card, prompt, role, schedulerLeaseId, launchAdapterId, undefined, "auto", undefined, true);
+      return spawnAgent(prompt, card, prompt, role, schedulerLeaseId, launchAdapterId);
+    }
     if (schedulerLeaseId) return false;
     setError(`${launchAdapter?.displayName ?? launchAdapterId} is not ready. Open Settings, rescan, and complete any sign-in or verification step.`);
     return false;
   };
+
+  const setTaskLaneCleanupStatus = async (
+    cardId: string,
+    status: "resolving" | "blocked",
+    detail?: string,
+  ) => {
+    await persistOpsImmediately((current) => ({
+      ...current,
+      cards: current.cards.map((card) => card.id === cardId && card.taskLane?.cleanup
+        ? {
+            ...card,
+            taskLane: {
+              ...card.taskLane,
+              cleanup: { ...card.taskLane.cleanup, status, message: detail },
+            },
+            lastNote: detail ?? card.lastNote,
+          }
+        : card),
+    }));
+  };
+
+  const finalizeTaskLaneCleanup = async (card: OpsCard, registered: boolean) => {
+    const currentCard = opsStateRef.current.cards.find((candidate) => candidate.id === card.id);
+    const lane = currentCard?.taskLane;
+    const cleanup = lane?.cleanup;
+    const activeProject = projectRef.current;
+    if (!currentCard || !lane || lane.closedAt || !cleanup || !activeProject) return;
+    let nextGit: GitStatus | undefined;
+    if (registered) {
+      const removed = await callCore<{ status: GitStatus }>("git_worktree_remove", {
+        req: {
+          projectPath: activeProject.path,
+          worktreePath: lane.worktreePath,
+          expectedBranch: lane.branch,
+        },
+      });
+      nextGit = removed.status;
+    }
+    const timestamp = new Date().toISOString();
+    const note = registered
+      ? `Removed task worktree; branch ${lane.branch} was preserved.`
+      : `Detached stale task lane ${lane.branch}; its unregistered path was left untouched.`;
+    const { archiveDoneOpsCards } = cleanup.action === "archive" ? await import("./opsArchive") : { archiveDoneOpsCards: undefined };
+    await persistOpsImmediately((current) => {
+      const closed = {
+        ...current,
+        cards: current.cards.map((candidate) => candidate.id === card.id && candidate.taskLane
+          ? appendOpsTaskEvent({
+              ...candidate,
+              taskLane: { ...candidate.taskLane, closedAt: timestamp, cleanup: undefined },
+              lastNote: note,
+            }, {
+              id: `automatic:task-lane-closed:${timestamp}`,
+              kind: "update",
+              timestamp,
+              message: note,
+            })
+          : candidate),
+      };
+      if (cleanup.action === "delete") {
+        return { ...closed, cards: closed.cards.filter((candidate) => candidate.id !== card.id) };
+      }
+      if (cleanup.action === "archive") return archiveDoneOpsCards!(closed, [card.id]);
+      return closed;
+    }, true);
+    if (nextGit) setGit(nextGit);
+  };
+
+  useEffect(() => {
+    const activeProject = projectRef.current;
+    const candidates = opsState.cards.filter((card) => card.taskLane?.cleanup && !card.taskLane.closedAt && card.taskLane.cleanup.status !== "blocked");
+    if (!activeProject || !candidates.length) return;
+    const runtimeValues = Object.values(runtimes);
+    const participantRuntimes = (card: OpsCard) => opsCardParticipantIds(card, runtimeValues)
+      .flatMap((id) => runtimeValues.filter((runtime) => runtime.nodeId === id && !isTerminalSessionStatus(runtime.status)));
+    const cleanupRuntimeCount = candidates.filter((card) => opsCardParticipantIds(card, runtimeValues).some((id) =>
+      runtimeValues.some((runtime) => runtime.nodeId === id && !isTerminalSessionStatus(runtime.status)))).length;
+    const candidate = candidates.find((card) =>
+      !taskLaneCleanupIdsRef.current.has(card.id)
+      && (card.taskLane?.cleanup?.status === "queued" || participantRuntimes(card).length === 0));
+    if (!candidate?.taskLane?.cleanup) return;
+    taskLaneCleanupIdsRef.current.add(candidate.id);
+    void (async () => {
+      const status = await callCore<GitStatus>("git_status", { path: activeProject.path, includeWorktrees: true });
+      if (projectRef.current?.id !== activeProject.id) return;
+      setGit(status);
+      const latest = opsStateRef.current.cards.find((card) => card.id === candidate.id);
+      if (!latest?.taskLane?.cleanup || latest.taskLane.closedAt) return;
+      const currentRuntimeValues = Object.values(currentRuntimes());
+      const participants = opsCardParticipantIds(latest, currentRuntimeValues)
+        .flatMap((id) => currentRuntimeValues.filter((runtime) => runtime.nodeId === id && !isTerminalSessionStatus(runtime.status)));
+      const registered = status.worktrees.find((worktree) => workspacePathsEqual(worktree.path, latest.taskLane!.worktreePath));
+      if (registered && registered.branch !== latest.taskLane.branch) {
+        await setTaskLaneCleanupStatus(latest.id, "blocked", `Task lane expected ${latest.taskLane.branch}, but ${registered.branch} is registered at its path.`);
+        return;
+      }
+      if ((!registered || !registered.dirty) && participants.length === 0) {
+        await finalizeTaskLaneCleanup(latest, Boolean(registered));
+        return;
+      }
+      if (latest.taskLane.cleanup.status === "queued" && participants.length > 0) {
+        queueOpsSteering(latest, taskWorktreeCleanupPrompt(latest));
+        await setTaskLaneCleanupStatus(latest.id, "resolving");
+        return;
+      }
+      if (latest.taskLane.cleanup.status === "queued" && registered?.dirty && cleanupRuntimeCount < Math.max(1, autonomousConcurrency)) {
+        await setTaskLaneCleanupStatus(latest.id, "resolving");
+        const resolvingCard = opsStateRef.current.cards.find((card) => card.id === latest.id) ?? latest;
+        const started = await startAgentForOpsTask(resolvingCard, taskWorktreeCleanupPrompt(resolvingCard), "worker", undefined, undefined, true);
+        if (!started) await setTaskLaneCleanupStatus(latest.id, "blocked", "No task agent was available to resolve this dirty worktree.");
+        return;
+      }
+      if (latest.taskLane.cleanup.status === "resolving" && participants.length === 0 && registered?.dirty) {
+        await setTaskLaneCleanupStatus(latest.id, "blocked", "The cleanup agent finished, but the task worktree still has local changes. Retry to let an agent inspect the remaining work.");
+      }
+    })().catch((cause) => {
+      void setTaskLaneCleanupStatus(candidate.id, "blocked", `Could not resolve task worktree: ${message(cause)}`).catch(() => undefined);
+    }).finally(() => taskLaneCleanupIdsRef.current.delete(candidate.id));
+    // Cleanup is driven entirely by durable lane intent plus runtime transitions.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autonomousConcurrency, opsState, runtimes]);
 
   const startReviewerForOpsTask = (card: OpsCard) => startAgentForOpsTask(card, opsActionPrompt(card, "review"), "reviewer");
 
@@ -5833,7 +6021,16 @@ export function App() {
         throw new Error("The scheduler lease belongs to a different canvas.");
       }
       const card = opsStateRef.current.cards.find((candidate) => candidate.id === lease?.taskId);
-      if (!card) throw new Error(`Scheduled task ${lease.taskId} no longer exists.`);
+      if (!card) {
+        await callCore("ops_scheduler_finish", {
+          leaseId: lease.id,
+          ownerId: schedulerOwnerIdRef.current,
+          state: "released",
+        });
+        schedulerFinalizedLeaseIdsRef.current.add(lease.id);
+        lease = null;
+        return;
+      }
       started = await startAgentForOpsTask(card, opsActionPrompt(card, "assign"), "worker", lease.id, lease.adapterId);
       if (!started) throw new Error("The scheduled task could not start with the configured adapter.");
       await callCore("ops_scheduler_heartbeat", {
@@ -7110,6 +7307,7 @@ export function App() {
           sessionSearchBusy={sessionSearchBusy}
           git={git}
           diff={gitDiff}
+          opsState={opsState}
           onOpenChange={setUtilityPanelOpen}
           onTab={(tab) => selectUtilityPanel(tab)}
           onHistoryPage={setHistoryPage}
@@ -7129,7 +7327,9 @@ export function App() {
             }));
           }}
           onAcknowledgeAll={() => void acknowledgeAllActivity().catch((cause) => setError(message(cause)))}
-          onRefreshGit={() => void refreshProjectData()}
+          onRefreshGit={() => void refreshProjectWorktrees().catch((cause) => setError(message(cause)))}
+          onOpenTaskLane={openOpsCard}
+          onResolveTaskLane={(card) => void queueOpsTaskLaneCleanup(card, card.taskLane?.cleanup?.action ?? "remove").catch((cause) => setError(`Could not queue cleanup: ${message(cause)}`))}
           onClearActivity={() => void clearActivityHistory().catch((cause) => setError(message(cause)))}
           onClearTranscripts={() => void clearSessionTranscripts().catch((cause) => setError(message(cause)))}
         />
@@ -7501,6 +7701,7 @@ async function persistNode(
     taskId?: string;
     taskRole?: OpsAgentRole;
     autoCloseTaskAgent?: boolean;
+    preserveTaskState?: boolean;
     schedulerLeaseId?: string;
     parentAgentId?: string;
     parentSessionId?: string;
@@ -7534,6 +7735,7 @@ async function persistNode(
       taskId: input.taskId,
       taskRole: input.taskRole,
       autoCloseTaskAgent: input.autoCloseTaskAgent,
+      preserveTaskState: input.preserveTaskState,
       schedulerLeaseId: input.schedulerLeaseId,
       parentAgentId: input.parentAgentId,
       parentSessionId: input.parentSessionId,
@@ -8151,6 +8353,7 @@ export function rollbackOptimisticOpsAgentStart(
   nodeId: string,
   eventId: string,
   role: OpsAgentRole,
+  preserveTaskState = false,
 ): OpsState {
   return {
     ...current,
@@ -8163,7 +8366,9 @@ export function rollbackOptimisticOpsAgentStart(
         .slice(optimisticEventIndex + 1)
         .some((event) => !event.id.startsWith("manual:task-lane:"));
       if (superseded) return card;
-      const stillOwnedByOptimisticAgent = role === "reviewer"
+      const stillOwnedByOptimisticAgent = preserveTaskState
+        ? card.assigneeIds.includes(nodeId)
+        : role === "reviewer"
         ? card.reviewerId === nodeId
         : card.assigneeIds.length === 1 && card.assigneeIds[0] === nodeId;
       if (!stillOwnedByOptimisticAgent) return card;
