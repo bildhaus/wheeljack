@@ -537,8 +537,9 @@ textarea.wj-bot-detail-control { resize: vertical; line-height: 1.5; }
 .wj-specialist-editor label { font-size: 10px; font-weight: 650; }
 .wj-specialist-editor { display: grid; gap: 9px; border-top: 1px solid var(--border); padding-top: 8px; }
 .wj-specialist-editor summary { color: var(--muted-foreground); font-size: 10px; font-weight: 620; cursor: pointer; }
-.wj-specialist-editor[open] summary { margin-bottom: 3px; color: var(--foreground); }
-.wj-specialist-editor > div { display: grid; gap: 5px; }
+.wj-specialist-editor[open] summary { color: var(--foreground); }
+.wj-specialist-editor-content { display: grid; gap: 12px; padding: 9px 0 5px; }
+.wj-specialist-editor-content > div { display: grid; gap: 6px; }
 .wj-specialist-rationale { display: grid; gap: 3px; margin: 0; border-left: 2px solid color-mix(in srgb, var(--primary) 55%, var(--border)); padding-left: 8px; color: var(--muted-foreground); font-size: 10px; line-height: 1.45; }
 .wj-specialist-rationale strong { color: var(--foreground); }
 .wj-specialist-editor-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px !important; }

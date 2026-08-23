@@ -131,6 +131,7 @@ import {
   botSnapshotFromDraft,
   botSnapshotFromNode,
   botStandingPrompt,
+  matchingSavedBot,
   specialistSnapshot,
   specialistSuggestion,
 } from "./bots";
@@ -5011,6 +5012,14 @@ export function App() {
     const suggestedSnapshot = suggestion && suggestedProfile
       ? specialistSnapshot(suggestion, suggestedProfile, `${project?.id ?? "project"}:${card.id}:${role}`)
       : undefined;
+    const savedSpecialist = suggestedSnapshot ? matchingSavedBot(bots, suggestedSnapshot) : undefined;
+
+    if (savedSpecialist && !schedulerLeaseId) {
+      return spawnAgent(prompt, card, prompt, role, undefined, savedSpecialist.launch.adapterId, undefined, "auto", {
+        snapshot: botSnapshot(savedSpecialist),
+        profile: savedSpecialist,
+      });
+    }
 
     if (suggestion && suggestedSnapshot && !schedulerLeaseId) {
       return new Promise<boolean>((resolve) => {

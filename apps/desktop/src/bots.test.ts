@@ -2,6 +2,7 @@ import {
   botSnapshot,
   botSnapshotFromNode,
   botStandingPrompt,
+  matchingSavedBot,
   specialistSnapshot,
   specialistSuggestion,
 } from "./bots";
@@ -37,6 +38,22 @@ test("saved bot snapshots remain complete and detached from profile edits", () =
   expect(snapshot.launch.model).toBe("sonnet");
   expect(snapshot.roleDescription).toContain("observable behavior");
   expect(botSnapshotFromNode({ botSnapshot: snapshot })).toEqual(snapshot);
+});
+
+test("a repeated specialist suggestion resolves to its saved bot identity", () => {
+  const suggestion = {
+    name: "Verifier",
+    roleDescription: "Verify observable behavior and report exact evidence.",
+    rationale: "Independent verification will improve confidence.",
+  };
+  const snapshot = specialistSnapshot(suggestion, agentProfile, "project_one:task_one:worker");
+  const saved = {
+    ...profile,
+    avatarSeed: snapshot.avatarSeed,
+  };
+
+  expect(matchingSavedBot([saved], snapshot)).toBe(saved);
+  expect(matchingSavedBot([profile], snapshot)).toBeUndefined();
 });
 
 test("one-off avatar seeds are stable for the same task and suggestion", () => {
