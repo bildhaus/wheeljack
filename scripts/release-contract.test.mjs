@@ -154,6 +154,8 @@ describe("workflow ownership contract", () => {
     expect(workflow).toContain("checkout_ref: ${{ github.sha }}");
     expect(workflow).toContain("cancel-in-progress: true");
     expect(workflow).toContain("github.event_name == 'pull_request' && needs.repo.outputs.desktop == 'true'");
+    expect(workflow).toContain("github.event_name == 'pull_request' && needs.repo.outputs.docs == 'true'");
+    expect(workflow).toContain("needs: [repo, site, docs, desktop]");
   });
 
   test("keeps signing, environments, and artifacts release owned", async () => {
@@ -186,6 +188,19 @@ describe("workflow ownership contract", () => {
     expect(site).toContain("- 'VERSION'");
   });
 
+  test("keeps documentation delivery main-only, independent, and explicitly gated", async () => {
+    const docs = await readFile(join(import.meta.dirname, "../.github/workflows/docs.yml"), "utf8");
+    expect(docs).toContain("github.ref == 'refs/heads/main'");
+    expect(docs).toContain("vars.PUBLIC_DOCS_ENABLED == 'true'");
+    expect(docs).toContain("name: docs-production");
+    expect(docs).toContain("url: https://docs.wheeljack.dev");
+    expect(docs).toContain("--project-name wheeljack-docs --branch main");
+    expect(docs).toContain("CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}");
+    expect(docs).toContain("CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}");
+    expect(docs).not.toContain("Resolve public release");
+    expect(docs).not.toContain("VERSION");
+  });
+
   test("keeps published download controls live and signing status explicit", async () => {
     const app = await readFile(join(import.meta.dirname, "../apps/site/src/App.tsx"), "utf8");
     const fallback = await readFile(join(import.meta.dirname, "../apps/site/index.html"), "utf8");
@@ -199,9 +214,11 @@ describe("workflow ownership contract", () => {
     expect(app).toContain("Upgrading from v0.1.0 requires this one-time manual download");
     expect(app).toContain("__WHEELJACK_VERSION__");
     expect(app).toContain("SHA256SUMS.txt");
-    expect(app).toContain('href="https://github.com/bildhaus/wheeljack">Source</a>');
+    expect(app).toContain('href="https://docs.wheeljack.dev">Docs</a>');
+    expect(app).toContain('href="https://github.com/bildhaus/wheeljack">GitHub</a>');
     expect(app).toContain("https://github.com/bildhaus/wheeljack/issues/new/choose");
-    expect(fallback).toContain('href="https://github.com/bildhaus/wheeljack">Source</a>');
+    expect(fallback).toContain('href="https://docs.wheeljack.dev">Docs</a>');
+    expect(fallback).toContain('href="https://github.com/bildhaus/wheeljack">GitHub</a>');
     expect(fallback).toContain("%WHEELJACK_VERSION%");
     expect(fallback).toContain("og-wheeljack.png");
     expect(fallback).toContain("Controlled autonomy");

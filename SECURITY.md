@@ -7,6 +7,9 @@ vulnerability reporting for this repository. If that option is unavailable,
 contact a Bildhaus maintainer privately through a published contact channel
 without including exploit details in a public message.
 
+Public reporting guidance is also available at
+[docs.wheeljack.dev](https://docs.wheeljack.dev/help/support-and-security/).
+
 Include:
 
 - the affected wheeljack version and operating system;

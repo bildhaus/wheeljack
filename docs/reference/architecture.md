@@ -1,4 +1,8 @@
-# wheeljack architecture
+---
+title: Architecture
+description: How wheeljack separates durable Rust core state, the Tauri host, and transient React presentation.
+editUrl: https://github.com/bildhaus/wheeljack/edit/main/docs/reference/architecture.md
+---
 
 wheeljack is a Tauri 2 desktop app split into two halves with a deliberately narrow
 boundary between them.

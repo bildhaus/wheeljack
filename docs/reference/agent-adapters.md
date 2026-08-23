@@ -1,4 +1,8 @@
-# Agent adapters
+---
+title: Agent adapters
+description: The manifest, structured protocol, lifecycle, and extension contract for wheeljack coding-agent adapters.
+editUrl: https://github.com/bildhaus/wheeljack/edit/main/docs/reference/agent-adapters.md
+---
 
 An adapter teaches wheeljack how to launch and talk to one coding agent CLI. The contract
 lives in `crates/wheeljack-core/src/adapters.rs`; the wire shape is `AdapterDto` in

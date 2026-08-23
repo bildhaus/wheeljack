@@ -1,0 +1,33 @@
+---
+import "../styles/custom.css";
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="robots" content="noindex" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Page not found | wheeljack docs</title>
+    <style>
+      body { min-height: 100vh; margin: 0; display: grid; place-items: center; color: var(--sl-color-white); background-color: var(--sl-color-bg); font-family: var(--wj-ui-font); }
+      main { width: min(100% - 2rem, 42rem); }
+      img { width: 9rem; filter: invert(1); }
+      p:first-of-type { margin: 2.5rem 0 .5rem; color: var(--sl-color-accent); font-family: var(--wj-code-font); font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; }
+      h1 { margin: 0; font-family: var(--wj-heading-font); font-size: clamp(3rem, 10vw, 6rem); line-height: .95; }
+      p { max-width: 34rem; color: var(--sl-color-gray-2); line-height: 1.65; }
+      a { display: inline-flex; margin-top: 1rem; border: 1px solid var(--sl-color-hairline-light); border-radius: .5rem; padding: .75rem 1rem; color: var(--sl-color-white); text-decoration: none; }
+      a:focus-visible { outline: 3px solid var(--sl-color-accent); outline-offset: 3px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="/favicon.svg" alt="" />
+      <p>404 / route not found</p>
+      <h1>This pane is empty.</h1>
+      <p>The documentation route may have moved, or the address may be incomplete. Return to the overview or use search to find the current page.</p>
+      <a href="/">Back to wheeljack docs</a>
+    </main>
+  </body>
+</html>

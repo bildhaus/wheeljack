@@ -2,6 +2,9 @@
 
 Use GitHub Issues for reproducible wheeljack bugs and focused feature requests.
 Use the repository's private vulnerability reporting for security issues.
+Start with the public
+[troubleshooting guide](https://docs.wheeljack.dev/help/troubleshooting/) for
+installation, adapter, project-path, Plan, and update failures.
 
 Before opening a bug, verify that:
 
