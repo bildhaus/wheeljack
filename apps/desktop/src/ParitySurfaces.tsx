@@ -4113,15 +4113,15 @@ export function ReviewDrawerSurface({
             </div>
           )}
         </ScrollArea>
-        {reviewCard && <div className="wj-drawer-footer wj-review-recommendation"><ActionCard
+        {reviewCard && <div className="wj-drawer-footer wj-review-recommendation max-h-[min(440px,58vh)] overflow-y-auto"><ActionCard
           variant="recommendation"
           title="Recommended next step"
           status={reviewRecommendation === "Approve verification" ? "verified" : "review"}
           recommendation={reviewRecommendation}
-          rationale={recommendationReason}
+          rationale={feedbackOpen ? undefined : recommendationReason}
           actions={recommendationActions}
         >
-          {feedbackOpen && <div className="space-y-2"><Textarea autoFocus aria-label="Review feedback" value={feedback} onChange={(event) => { setFeedback(event.target.value); setChangesError(""); }} placeholder="What must change before approval?" />{changesError && <p className="text-sm text-destructive" role="alert">{changesError}</p>}</div>}
+          {feedbackOpen && <div className="space-y-2"><Textarea className="max-h-40 overflow-y-auto" autoFocus aria-label="Review feedback" value={feedback} onChange={(event) => { setFeedback(event.target.value); setChangesError(""); }} placeholder="What must change before approval?" />{changesError && <p className="text-sm text-destructive" role="alert">{changesError}</p>}</div>}
         </ActionCard></div>}
       </SheetContent>
     </Sheet>
