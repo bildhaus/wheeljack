@@ -68,15 +68,21 @@ test("reloads the sticker lens only when entering a project surface after Home",
   expect(paritySource).not.toContain("<StickerLensBackground");
 });
 
-test("loads projects, probes and verifies exact profile args, and reuses adapter preference", () => {
-  const startupProbe = "const probedAdapters = safeStartup ? detectedAdapters : await probeAdapters(detectedAdapters, savedProfiles)";
+test("makes startup usable before probing adapters and verifies exact profile args", () => {
+  const startupReady = "setStartupReady(true)";
+  const startupProject = "activateProject(startupProject)";
+  const startupProbe = "probeAdapters(detectedAdapters, savedProfiles)";
   expect(appSource.indexOf("setProjects(existingProjects)"))
-    .toBeLessThan(appSource.indexOf(startupProbe));
+    .toBeLessThan(appSource.indexOf(startupReady));
+  expect(appSource.indexOf(startupReady)).toBeLessThan(appSource.indexOf(startupProject));
+  expect(appSource.indexOf(startupProject)).toBeLessThan(appSource.indexOf(startupProbe));
   expect(appSource).toContain(startupProbe);
-  expect(appSource).toContain("status.startupRecovery?.safeMode === true");
+  expect(appSource).toContain("data-core-connected={startupReady}");
+  expect(appSource).toContain('adapter.supportsStructured ? { ...adapter, status: "" } : adapter');
+  expect(appSource).toContain("Boolean(status.startupRecovery?.safeMode)");
   const startupSource = appSource.slice(
-    appSource.indexOf(startupProbe),
-    appSource.indexOf("const startupProject"),
+    appSource.indexOf("const savedAdapterId"),
+    appSource.indexOf(startupReady),
   );
   expect(startupSource).toContain("preferredCodingAdapterId(");
   const rescanSource = appSource.slice(

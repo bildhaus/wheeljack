@@ -2,6 +2,43 @@ use super::support::*;
 use crate::*;
 
 #[cfg(windows)]
+fn slow_probe_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+    fs::create_dir_all(dir).unwrap();
+    let script_path = dir.join("slow-probe.cmd");
+    let started_path = dir.join("started.txt");
+    fs::write(
+        &script_path,
+        format!(
+            "@echo off\r\n>\"{}\" echo started\r\npowershell -NoProfile -Command \"Start-Sleep -Milliseconds 1200\"\r\necho 1.0.0\r\n",
+            started_path.display()
+        ),
+    )
+    .unwrap();
+    (script_path, started_path)
+}
+
+#[cfg(not(windows))]
+fn slow_probe_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(dir).unwrap();
+    let script_path = dir.join("slow-probe.sh");
+    let started_path = dir.join("started.txt");
+    fs::write(
+        &script_path,
+        format!(
+            "#!/bin/sh\nprintf started > '{}'\nsleep 1.2\nprintf '1.0.0\\n'\n",
+            started_path.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions).unwrap();
+    (script_path, started_path)
+}
+
+#[cfg(windows)]
 fn custom_claude_verifier_fixture(dir: &Path) -> (String, String, PathBuf, PathBuf) {
     fs::create_dir_all(dir).unwrap();
     let script_path = dir.join("verify.ps1");
@@ -186,6 +223,60 @@ fn adapter_probe_reports_missing_without_launching() {
     assert!(probe["payload"]["executablePath"].is_null());
     assert_eq!(probe["payload"]["verifiedArgs"], json!([]));
     assert!(probe["payload"].get("verificationFingerprint").is_none());
+}
+
+#[test]
+fn adapter_probe_does_not_hold_sqlite_while_waiting_for_the_cli() {
+    let fixture_dir = temp_dir("adapter-probe-db-release");
+    let (script_path, started_path) = slow_probe_fixture(&fixture_dir);
+    let core = Arc::new(
+        Core::new(
+            test_init("adapter-probe-db-release"),
+            Arc::new(NullEventSink),
+        )
+        .unwrap(),
+    );
+    let manifest = adapter_json(
+        "slow-probe",
+        "Slow Probe",
+        script_path.to_string_lossy().as_ref(),
+        script_path.to_string_lossy().as_ref(),
+        "manual",
+    );
+    let saved: Value = serde_json::from_str(&core.call_json(
+        &json!({ "id": "save", "command": "adapter_save", "payload": manifest }).to_string(),
+    ))
+    .unwrap();
+    assert_eq!(saved["ok"], true);
+
+    let probing_core = core.clone();
+    let probe = thread::spawn(move || {
+        probing_core.call_json(
+            r#"{"id":"probe","command":"adapter_probe","payload":{"adapterId":"slow-probe"}}"#,
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !started_path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(started_path.exists(), "slow adapter probe did not start");
+
+    let started = Instant::now();
+    let settings: Value = serde_json::from_str(
+        &core.call_json(r#"{"id":"settings","command":"settings_export","payload":{}}"#),
+    )
+    .unwrap();
+    assert_eq!(settings["ok"], true);
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "adapter probe held SQLite for {:?}",
+        started.elapsed()
+    );
+
+    let probe: Value = serde_json::from_str(&probe.join().unwrap()).unwrap();
+    assert_eq!(probe["ok"], true);
+    assert_eq!(probe["payload"]["adapterId"], "slow-probe");
+    assert!(probe["payload"]["executablePath"].is_string());
 }
 
 #[test]

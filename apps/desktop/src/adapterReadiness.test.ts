@@ -67,6 +67,11 @@ describe("coding-agent readiness", () => {
     expect(shouldAutoVerifyAdapter(verifying)).toBe(false);
     expect(adapterReadinessLabel(verifying)).toBe("Verifying");
 
+    const checking = { ...failed, status: "" };
+    expect(canVerifyAdapter(checking)).toBe(false);
+    expect(shouldAutoVerifyAdapter(checking)).toBe(false);
+    expect(adapterReadinessLabel(checking)).toBe("Checking");
+
     const verified: Adapter = {
       ...unverified,
       probe: {

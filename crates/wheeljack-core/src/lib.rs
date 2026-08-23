@@ -64,10 +64,12 @@ mod usage;
 use adapters::{adapter_auth_succeeded, current_platform_id, PASTE_THEN_ENTER_SUBMIT_DELAY_MS};
 use adapters::{
     adapter_registry, default_shell_command, detect_adapter_status, discover_adapter_models,
-    effective_prompt_injection_for_adapter, normalize_adapter_manifest, normalize_command_cwd,
-    payload_bytes, persist_adapter_manifest, probe_adapter, prompt_input_writes_payload,
-    pty_input_blocked_reason, resolve_adapter_command, resolve_adapter_launch, resolve_command,
-    resolve_optional_cwd, resolve_structured_adapter_launch, split_launch_command, verify_adapter,
+    effective_prompt_injection_for_adapter, finish_adapter_probe, normalize_adapter_manifest,
+    normalize_command_cwd, payload_bytes, persist_adapter_manifest, prepare_adapter_probe,
+    prompt_input_writes_payload, pty_input_blocked_reason, resolve_adapter_command,
+    resolve_adapter_launch, resolve_command, resolve_optional_cwd,
+    resolve_structured_adapter_launch, run_prepared_adapter_probe, split_launch_command,
+    verify_adapter,
 };
 use agent_control::{
     append_agent_control_instructions, authorize_agent_control, list_agent_control_audit,
@@ -1404,12 +1406,14 @@ impl Core {
             .transpose()?
             .unwrap_or_default();
         let launch_config = serde_json::from_value::<AdapterLaunchConfig>(payload.clone())?;
+        let prepared = {
+            let db = self.lock_db()?;
+            prepare_adapter_probe(&db, adapter_id, &launch_args, &launch_config)?
+        };
+        let probe = run_prepared_adapter_probe(&prepared);
         let db = self.lock_db()?;
-        Ok(serde_json::to_value(probe_adapter(
-            &db,
-            adapter_id,
-            &launch_args,
-            &launch_config,
+        Ok(serde_json::to_value(finish_adapter_probe(
+            &db, probe, &prepared,
         )?)?)
     }
 

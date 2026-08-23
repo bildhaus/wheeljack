@@ -1224,27 +1224,30 @@ export function App() {
         agentProfilesRef.current = savedProfiles;
         setAgentAutonomyPolicy(savedAgentAutonomyPolicy);
         agentAutonomyPolicyRef.current = savedAgentAutonomyPolicy;
-        const safeStartup = status.startupRecovery?.safeMode === true;
+        const safeStartup = Boolean(status.startupRecovery?.safeMode);
         setSafeStartupActive(safeStartup);
         setRecoveryNoticeOpen(status.startupRecovery?.previousUncleanShutdown === true);
-        const probedAdapters = safeStartup ? detectedAdapters : await probeAdapters(detectedAdapters, savedProfiles);
-        if (cancelled) return;
-        setAdapters(probedAdapters);
+        setAdapters(detectedAdapters.map((adapter) =>
+          !safeStartup && adapter.supportsStructured ? { ...adapter, status: "" } : adapter));
         const savedAdapterId = selectedAgentAdapterIdFromSettings(effectiveSettings)
           || localStorage.getItem(AGENT_ADAPTER_STORAGE_KEY)
           || "";
-        const preferredAdapterId = preferredCodingAdapterId(probedAdapters, savedProfiles, savedAdapterId);
+        const preferredAdapterId = preferredCodingAdapterId(detectedAdapters, savedProfiles, savedAdapterId);
         selectedAdapterIdRef.current = preferredAdapterId;
         setSelectedAdapterId(preferredAdapterId);
         if (!selectedAgentAdapterIdFromSettings(effectiveSettings) && preferredAdapterId) {
           await callCore("settings_import", { settings: { selectedAgentAdapterId: preferredAdapterId } });
         }
         const startupProject = existingProjects.find((candidate) => candidate.pathExists !== false);
+        if (cancelled) return;
+        setStartupReady(true);
         if (startupProject && !safeStartup && navigationVersionRef.current === startupNavigation) {
-          await activateProject(startupProject);
-          if (onboardingVersion !== 0) setSurface("terminal");
+          if (onboardingVersion) setSurface("terminal");
+          activateProject(startupProject);
         }
-        if (!cancelled) setStartupReady(true);
+        if (!safeStartup) {
+          probeAdapters(detectedAdapters, savedProfiles).then(setAdapters);
+        }
       })
       .catch((cause) => {
         if (cancelled) return;
@@ -6476,7 +6479,7 @@ export function App() {
     <Toast.Provider duration={8000} swipeDirection="up">
     <div
       className="wj-app-shell"
-      data-core-connected={Boolean(connection)}
+      data-core-connected={startupReady}
       data-sidebar-collapsed={sidebarIsCollapsed}
       style={{ "--wj-sidebar-width": `${sidebarIsCollapsed ? 48 : preferences.sidebarWidth}px` } as CSSProperties}
     >

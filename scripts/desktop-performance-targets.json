@@ -12,6 +12,11 @@
       "totalJsBytes": 1550000
     }
   },
+  "startup": {
+    "target": {
+      "firstUsableMilliseconds": 3000
+    }
+  },
   "sixSession": {
     "target": {
       "workingSetMiB": 540,
