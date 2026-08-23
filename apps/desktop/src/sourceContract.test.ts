@@ -621,7 +621,7 @@ test("orders isolated task setup before spawn and keeps review evidence separate
   expect(reviewSource).not.toContain("setGitDiff(");
   expect(paritySource).toContain("Start fresh task agent");
   expect(paritySource).toContain("Send fresh reviewer");
-  expect(paritySource).toContain("nodes[id]?.title ?? state.agentLabels?.[id]");
+  expect(paritySource).toContain("resolveAgentLabel(nodes[id]?.title, state.agentLabels?.[id])");
   expect(paritySource).toContain("reviewerName(card.reviewerId)");
   expect(paritySource).toContain("reviewerName(inspectedCard.reviewerId)");
   expect(paritySource).not.toContain("Assign shared agent");
@@ -994,7 +994,10 @@ test("classifies live sessions and exposes project document save state", () => {
   expect(isLiveSessionStatus("completed")).toBe(false);
   expect(isTerminalSessionStatus("failed")).toBe(true);
   expect(isTerminalSessionStatus("canceled")).toBe(true);
+  expect(isTerminalSessionStatus("exited")).toBe(true);
   expect(isTerminalSessionStatus("running")).toBe(false);
+  expect(paritySource).toContain("sessions.filter((session) => isLiveSessionStatus(session.status))");
+  expect(paritySource).toContain("resolveAgentLabel(session.nodeTitle)");
   expect(paritySource).toContain("data-save-state={saveStatus}");
   expect(paritySource).toContain('role="status" aria-live="polite"');
   expect(appSource).toContain('setDocumentSaveStatus("saving")');

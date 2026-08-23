@@ -164,6 +164,8 @@ export function opsReviewLabel(
       ? "Changes requested"
       : status === "running" || status === "in_progress"
         ? "Running"
+        : ["completed", "complete", "done"].includes(status ?? "")
+          ? "Verdict missing"
         : status ? resolveRunState(status).label : "Assigned";
   return `${reviewerName || "Reviewer"} · ${state}`;
 }

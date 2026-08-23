@@ -11,7 +11,7 @@ pub(crate) fn load_session_history(
         "SELECT
            s.id,
            s.node_id,
-           COALESCE(n.title, s.node_id) AS node_title,
+           COALESCE(NULLIF(s.node_title, ''), n.title, '') AS node_title,
            s.adapter_id,
            s.cwd,
            s.status,
@@ -176,7 +176,7 @@ fn search_session_history_fts(db: &Connection, query: &str) -> Result<Vec<Sessio
         "SELECT
            s.id,
            s.node_id,
-           COALESCE(n.title, s.node_id) AS node_title,
+           COALESCE(NULLIF(s.node_title, ''), n.title, '') AS node_title,
            s.adapter_id,
            s.cwd,
            s.status,
@@ -243,7 +243,7 @@ fn search_session_history_like(
         "SELECT
            s.id,
            s.node_id,
-           COALESCE(n.title, s.node_id) AS node_title,
+           COALESCE(NULLIF(s.node_title, ''), n.title, '') AS node_title,
            s.adapter_id,
            s.cwd,
            s.status,

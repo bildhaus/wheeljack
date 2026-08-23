@@ -1341,8 +1341,8 @@ impl Core {
             ],
         )?;
         db.execute(
-            "INSERT INTO sessions (id, node_id, adapter_id, command_json, cwd, status, created_at, updated_at)
-             VALUES (?1, ?2, 'shell', '{}', ?3, 'running', ?4, ?4)",
+            "INSERT INTO sessions (id, node_id, node_title, adapter_id, command_json, cwd, status, created_at, updated_at)
+             VALUES (?1, ?2, COALESCE((SELECT title FROM nodes WHERE id = ?2), ''), 'shell', '{}', ?3, 'running', ?4, ?4)",
             params![session_id, node_id, project_path, timestamp],
         )?;
 
@@ -3500,8 +3500,8 @@ impl Core {
                 let db = self.lock_db()?;
                 let tx = db.unchecked_transaction()?;
                 tx.execute(
-                "INSERT INTO sessions (id, node_id, adapter_id, command_json, cwd, status, started_at, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?6, ?6)",
+                "INSERT INTO sessions (id, node_id, node_title, adapter_id, command_json, cwd, status, started_at, created_at, updated_at)
+                 VALUES (?1, ?2, COALESCE(NULLIF(?7, ''), (SELECT title FROM nodes WHERE id = ?2), ''), ?3, ?4, ?5, 'running', ?6, ?6, ?6)",
                 params![
                     session_id,
                     req.node_id,
@@ -3530,7 +3530,8 @@ impl Core {
                     })
                     .to_string(),
                     cwd_string,
-                    ts
+                    ts,
+                    req.node_title.as_deref().unwrap_or_default()
                 ],
             )?;
                 append_session_event(
@@ -3647,6 +3648,7 @@ impl Core {
             Ok(serde_json::to_value(SessionDto {
                 id: session_id.clone(),
                 node_id: req.node_id,
+                node_title: req.node_title,
                 adapter_id: req.adapter_id,
                 cwd: cwd.to_string_lossy().to_string(),
                 status: "running".to_string(),
@@ -4014,6 +4016,7 @@ impl Core {
         self.spawn_pty(
             SpawnSessionRequest {
                 node_id: Some(format!("{session_id}:terminal")),
+                node_title: None,
                 adapter_id: Some("opencode".to_string()),
                 command: Some("opencode".to_string()),
                 shell_command: None,
@@ -4096,8 +4099,8 @@ impl Core {
             let db = self.lock_db()?;
             let tx = db.unchecked_transaction()?;
             tx.execute(
-                "INSERT INTO sessions (id, node_id, adapter_id, command_json, cwd, status, started_at, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?6, ?6)",
+                "INSERT INTO sessions (id, node_id, node_title, adapter_id, command_json, cwd, status, started_at, created_at, updated_at)
+                 VALUES (?1, ?2, COALESCE(NULLIF(?7, ''), (SELECT title FROM nodes WHERE id = ?2), ''), ?3, ?4, ?5, 'running', ?6, ?6, ?6)",
                 params![
                     session_id,
                     node_id,
@@ -4110,7 +4113,8 @@ impl Core {
                     })
                     .to_string(),
                     cwd.to_string_lossy().to_string(),
-                    ts
+                    ts,
+                    request.node_title.as_deref().unwrap_or_default()
                 ],
             )?;
             append_session_event(
@@ -4165,6 +4169,7 @@ impl Core {
         Ok(serde_json::to_value(SessionDto {
             id: session_id,
             node_id,
+            node_title: request.node_title,
             adapter_id,
             cwd: cwd.to_string_lossy().to_string(),
             status: "running".to_string(),
@@ -5130,16 +5135,31 @@ impl Core {
         ) {
             bail!("unsupported session event status: {}", req.status);
         }
-        let (event_id, seq, created_at) = {
+        let (event_id, seq, created_at, node_id, node_title, adapter_id) = {
             let db = self.lock_db()?;
-            append_session_event(
+            let (event_id, seq, created_at) = append_session_event(
                 &db,
                 &req.session_id,
                 &req.kind,
                 &req.status,
                 &req.message,
                 &req.payload,
-            )?
+            )?;
+            let (node_id, node_title, adapter_id) = db.query_row(
+                "SELECT s.node_id, COALESCE(NULLIF(s.node_title, ''), n.title, ''), s.adapter_id
+                 FROM sessions s
+                 LEFT JOIN nodes n ON n.id = s.node_id
+                 WHERE s.id = ?1",
+                params![req.session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?;
+            (event_id, seq, created_at, node_id, node_title, adapter_id)
         };
         let event = json!({
             "id": event_id,
@@ -5150,7 +5170,10 @@ impl Core {
             "message": req.message,
             "payload": req.payload,
             "isRead": false,
-            "createdAt": created_at
+            "createdAt": created_at,
+            "nodeId": node_id,
+            "nodeTitle": node_title,
+            "adapterId": adapter_id
         });
         self.events.emit("activity:event", &event);
         Ok(event)
@@ -5170,7 +5193,7 @@ impl Core {
         let mut stmt = db.prepare(
             "SELECT e.id, e.session_id, e.seq, e.kind, e.status, e.message,
                     e.payload_json, e.is_read, e.created_at, s.node_id,
-                    COALESCE(n.title, ''), s.adapter_id
+                    COALESCE(NULLIF(s.node_title, ''), n.title, ''), s.adapter_id
              FROM session_events e
              JOIN sessions s ON s.id = e.session_id
              LEFT JOIN nodes n ON n.id = s.node_id

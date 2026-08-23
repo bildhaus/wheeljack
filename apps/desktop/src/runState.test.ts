@@ -25,6 +25,7 @@ describe("resolveRunState", () => {
     ["approved", "success", "success", "none", "Approved"],
     ["succeeded", "success", "success", "none", "Succeeded"],
     ["canceled", "stopped", "neutral", "none", "Canceled"],
+    ["exited", "stopped", "neutral", "none", "Exited"],
     ["paused", "stopped", "neutral", "none", "Paused"],
     ["cancelled", "stopped", "neutral", "none", "Canceled"],
     ["denied", "stopped", "neutral", "none", "Denied"],

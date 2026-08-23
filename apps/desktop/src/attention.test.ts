@@ -160,3 +160,15 @@ test("keeps the owning session on historical pane attention", () => {
     sessionId: "session-other-project",
   });
 });
+
+test("uses a durable label for unassigned runtime attention", () => {
+  const items = deriveAttention({
+    runtimes: [runtime("node-internal", "needs_input")],
+    activity: [],
+    opsState: { ...opsState, cards: [] },
+    nodes: { "node-internal": { title: "Atlas" } },
+  });
+
+  expect(items[0]?.title).toBe("Atlas");
+  expect(items[0]?.title).not.toContain("node-internal");
+});
