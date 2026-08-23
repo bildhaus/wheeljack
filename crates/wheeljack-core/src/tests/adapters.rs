@@ -275,7 +275,8 @@ fn adapter_probe_does_not_hold_sqlite_while_waiting_for_the_cli() {
 
     let probe: Value = serde_json::from_str(&probe.join().unwrap()).unwrap();
     assert_eq!(probe["ok"], true);
-    assert_eq!(probe["payload"]["version"], "1.0.0");
+    assert_eq!(probe["payload"]["adapterId"], "slow-probe");
+    assert!(probe["payload"]["executablePath"].is_string());
 }
 
 #[test]
