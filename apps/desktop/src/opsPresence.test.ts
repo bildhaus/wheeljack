@@ -8,6 +8,7 @@ import {
   opsAutomaticApprovalRetryDelay,
   opsAutomaticFileConflictInstructions,
   opsCardActivitySummary,
+  opsCardPresence,
   opsCardParticipantIds,
   opsCanCompleteWithOverride,
   opsCurrentCardForAgent,
@@ -322,6 +323,21 @@ describe("ops presence", () => {
     expect(opsCardActivitySummary(active, [{ status: "running", statusSummary: "Agent is working..." }], 0)).toBe("Working");
     expect(opsCardActivitySummary({ ...active, paused: true }, [], 0)).toBe("Paused");
     expect(opsCardActivitySummary(active, [], 0)).toBe("No active agent");
+  });
+
+  it("derives honest visual presence from recorded agent and reconciliation state", () => {
+    const active = card("active", "active", []);
+    expect(opsCardPresence(active, [{ status: "running" }])).toBe("working");
+    expect(opsCardPresence({ ...active, paused: true }, [])).toBe("waiting");
+    expect(opsCardPresence(active, [{ status: "needs_input" }])).toBe("attention");
+    expect(opsCardPresence({
+      ...active,
+      reconciliation: { status: "running", attempts: 1, message: "Integrating worker evidence", updatedAt: "2026-08-24T10:00:00Z" },
+    }, [])).toBe("reconciling");
+    expect(opsCardPresence({
+      ...active,
+      reconciliation: { status: "retrying", attempts: 2, message: "Retrying integration", updatedAt: "2026-08-24T10:01:00Z" },
+    }, [])).toBe("retrying");
   });
 
   it("rejects stale verification command, cwd, base, snapshot, and approval evidence", () => {

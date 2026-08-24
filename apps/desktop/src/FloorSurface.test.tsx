@@ -200,11 +200,13 @@ describe("FloorSurface", () => {
       runtimes: [runtime("agent", "running", { statusSummary: "Indexing workspace" })],
       graph: { ...runGraph(), emptyWindow: false },
     });
-    render(<FloorSurface {...props} />);
+    const { container } = render(<FloorSurface {...props} />);
 
+    expect(screen.getByRole("heading", { name: "Now" })).toBeTruthy();
+    expect(screen.getAllByText("Indexing workspace").length).toBeGreaterThanOrEqual(2);
+    expect(container.querySelector('.wj-floor-now-list > button[data-presence-phase="working"]')).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Open agent" }));
     expect(props.onOpenRuntime).toHaveBeenCalledOnce();
-    expect(screen.getByText("Indexing workspace")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Stop now" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "More actions for agent" }));
@@ -213,6 +215,28 @@ describe("FloorSurface", () => {
     expect(props.onCancelRuntime).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Stop agent" }));
     expect(props.onCancelRuntime).toHaveBeenCalledOnce();
+  });
+
+  test("shows autonomous reconciliation as live work without inventing an agent", async () => {
+    const user = userEvent.setup();
+    const reconciling = card("reconciling-task", "review", {
+      reconciliation: {
+        status: "running",
+        attempts: 1,
+        message: "Converging task changes",
+        updatedAt: "2026-08-19T09:59:00Z",
+      },
+    });
+    const props = floorProps({ state: state([reconciling]), runtimes: [] });
+    const { container } = render(<FloorSurface {...props} />);
+
+    expect(screen.getByRole("heading", { name: "Now" })).toBeTruthy();
+    expect(container.querySelector(".wj-floor-now-reconciler")).toBeTruthy();
+    expect(screen.getByText("Converging task changes")).toBeTruthy();
+    expect(container.querySelector('.wj-floor-now-list > button[data-presence-phase="reconciling"]')).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /reconciling-task.*Converging task changes/ }));
+    expect(container.querySelector('.wj-floor-docked-inspector[data-card-id="reconciling-task"]')).toBeTruthy();
   });
 
   test("times live work from the current agent run instead of the task's original start", () => {

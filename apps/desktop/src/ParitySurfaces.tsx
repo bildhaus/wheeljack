@@ -117,6 +117,7 @@ import {
   opsAgentsCoordinating,
   opsAttentionReason,
   opsCardActivitySummary,
+  opsCardPresence,
   opsCardParticipantIds,
   opsCanCompleteWithOverride,
   opsChildProgress,
@@ -1373,7 +1374,7 @@ export function OpsSurface({
   const [runGraphSelection, setRunGraphSelection] = useState<OpsRunGraphSelection>();
   const setInspectedCardId = onInspectedCardIdChange;
   const opsContentRef = useRef<HTMLDivElement>(null);
-  const cardRectsRef = useRef<Map<string, DOMRect>>(new Map());
+  const cardRectsRef = useRef<Map<string, DOMRect | undefined>>(new Map());
   const kanban = documents?.documents.kanban;
   const selectedDocument = specKind === "prd" ? documents?.documents.prd : documents?.documents.tdd;
   const documentWarnings = page === "board" ? kanban?.warnings ?? [] : page === "spec" ? selectedDocument?.warnings ?? [] : [];
@@ -1450,7 +1451,7 @@ export function OpsSurface({
   const recoveryReason = recoveryCard
     ? opsAttentionReason(recoveryCard, recoveryRole, cardRuntimeStatuses(recoveryCard), recoveryConflictFiles.length > 0)
     : undefined;
-  const boardLayoutKey = state.cards.map(({ id, columnId }) => `${id}:${columnId}`).join("|");
+  const boardLayoutKey = state.cards.map(({ id, columnId }) => `${id}:${columnId}:${waitingByCard.has(id)}`).join("|");
   const floorModel = useMemo(() => deriveOpsFloorModel({ state, runtimes, attentionItems, activity }), [activity, attentionItems, runtimes, state]);
   const runGraphModel = useMemo(() => deriveOpsRunGraphModel({
     state,
@@ -1570,11 +1571,15 @@ export function OpsSurface({
       return;
     }
     const cards = [...root.querySelectorAll<HTMLElement>("[data-task-id]")];
-    const nextRects = new Map(cards.map((element) => [element.dataset.taskId!, element.getBoundingClientRect()]));
+    const nextRects = new Map(cards.map((element) => [element.dataset.taskId!, element.dataset.waiting ? undefined : element.getBoundingClientRect()]));
     if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       for (const element of cards) {
-        const previous = cardRectsRef.current.get(element.dataset.taskId!);
-        const current = nextRects.get(element.dataset.taskId!);
+        const cardId = element.dataset.taskId!;
+        if (cardRectsRef.current.has(cardId) && !cardRectsRef.current.get(cardId) && !element.dataset.waiting) {
+          element.animate({ boxShadow: ["0 0 0 1px var(--success)", "none"] }, { duration: 1_150 });
+        }
+        const previous = cardRectsRef.current.get(cardId);
+        const current = nextRects.get(cardId);
         if (!previous || !current) continue;
         const x = previous.left - current.left;
         const y = previous.top - current.top;
@@ -1831,6 +1836,7 @@ export function OpsSurface({
                             reviewerName(card.reviewerId),
                           );
                           const liveSummary = opsCardActivitySummary(card, cardRuntimes, cardConflictFiles.length);
+                          const presence = opsCardPresence(card, cardRuntimes);
                           const runtimeOwners = cardRuntimes.map((runtime) => agentName(runtime.nodeId)).join(", ");
                           const recordedOwner = card.assignee?.trim() && card.assignee !== "Unassigned" ? card.assignee.trim() : "";
                           const ownerLabel = runtimeOwners || recordedOwner || agentIds.map(agentName).join(", ") || "Unassigned";
@@ -1862,7 +1868,9 @@ export function OpsSurface({
                                data-task-id={card.id}
                                data-paused={card.paused || undefined}
                                data-live={cardRuntimes.length > 0 || undefined}
-                              >
+                               data-waiting={waiting || undefined}
+                               data-presence-phase={presence}
+                               >
                               {latestEvent && eventFlashes[card.id] === latestEvent.id && <span className="wj-task-event-flash" data-kind={latestEvent.kind} key={latestEvent.id} />}
                               <div
                                 className="wj-task-card-bar"
@@ -2564,6 +2572,13 @@ export function FloorSurface({
   const agentName = (id: string) => resolveAgentLabel(nodes[id]?.title, state.agentLabels?.[id]);
   const selectedTaskIds = new Set(runGraphSelection?.taskIds ?? []);
   const recentEvents = model.recentActivity.slice(0, 5);
+  const agentNowItems = model.agents.flatMap((agent) => {
+    if (!agent.task || !["working", "attention"].includes(agent.state)) return [];
+    return [[agent.task.card, agent.id] as const];
+  });
+  const liveNowItems = [...agentNowItems, ...state.cards.flatMap((card) =>
+    !card.reconciliation || !["queued", "running", "awaiting_repair", "retrying"].includes(card.reconciliation.status)
+      ? [] : [[card] as const])];
   const schedulerActiveAgents = runtimes.filter((runtime) => {
     const leaseId = nodes[runtime.nodeId]?.data.schedulerLeaseId;
     return typeof leaseId === "string" && leaseId.length > 0 && !isTerminalSessionStatus(runtime.status);
@@ -2791,6 +2806,19 @@ export function FloorSurface({
       </dl>
       <div className="wj-floor-scheduler-controls"><label><span>Autonomy</span><Switch aria-label="Autonomous pickup" checked={autonomousPickup} onCheckedChange={onAutonomousPickupChange} /></label><label><span>New starts</span><Select value={String(autonomousConcurrency)} onValueChange={(value) => onAutonomousConcurrencyChange(Number(value))}><SelectTrigger aria-label="Automatic new-start limit"><SelectValue /></SelectTrigger><SelectContent>{concurrencyOptions.map((limit) => <SelectItem value={String(limit)} key={limit}>{limit} at a time</SelectItem>)}</SelectContent></Select></label><Button variant="ghost" size="sm" onClick={onOpenAgentSettings}><Settings />Policy</Button></div>
     </section>
+    {liveNowItems.length > 0 && <section className="wj-floor-now">
+      <header><h2>Now</h2></header>
+      <div className="wj-floor-now-list">{liveNowItems.map(([card, agentId]) => {
+        const runtime = agentId ? runtimeById.get(agentId) : undefined;
+        const presence = opsCardPresence(card, runtime ? [runtime] : []);
+        const detail = card.reconciliation?.message || opsCardActivitySummary(card, runtime ? [runtime] : [], 0);
+        return <button data-presence-phase={presence} key={agentId || card.id} onClick={() => dockInspect(card.id)}>
+          {agentId
+            ? <AgentAvatar id={agentId} label={agentName(agentId)} status={runtime?.status} />
+            : <GitBranch className="wj-floor-now-reconciler" aria-hidden="true" />}
+          <span><strong>{card.title}</strong><small>{detail}</small></span>
+        </button>})}</div>
+    </section>}
     <div className="wj-floor-run-graph" data-collapsed={!runGraphExpanded || undefined}>
       {runGraphExpanded
         ? <OpsRunGraph embedded summary={runGraphSummary} model={runGraphModel} cards={state.cards} agentNodes={nodes} agentLabels={state.agentLabels} selection={runGraphSelection} onRangeChange={onRunGraphRange} onSelectionChange={selectRunGraphEvidence} onCollapse={() => setRunGraphExpanded(false)} />

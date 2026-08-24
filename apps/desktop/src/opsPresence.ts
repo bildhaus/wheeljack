@@ -60,6 +60,32 @@ export function opsCardActivitySummary(
   return runtimes.length ? resolveRunState(runtimes[0].status).label : "No active agent";
 }
 
+export type OpsPresencePhase =
+  | "idle"
+  | "starting"
+  | "testing"
+  | "working"
+  | "reconciling"
+  | "retrying"
+  | "waiting"
+  | "attention";
+
+export function opsCardPresence(
+  card: Pick<OpsCard, "paused" | "reconciliation" | "verificationRun">,
+  runtimes: Array<Pick<PaneRuntime, "status">>,
+): OpsPresencePhase {
+  const reconciliation = card.reconciliation;
+  if (reconciliation && ["queued", "running", "awaiting_repair", "retrying"].includes(reconciliation.status)) {
+    return reconciliation.status === "retrying" || reconciliation.status === "awaiting_repair" ? "retrying" : "reconciling";
+  }
+  if (card.verificationRun?.status === "running") return "testing";
+  const status = runtimes[0]?.status;
+  return attentionStatuses.has(status!) ? "attention"
+    : card.paused ? "waiting"
+      : status === "starting" ? "starting"
+        : runtimes.length ? "working" : "idle";
+}
+
 export function opsAttentionReason(
   card: OpsCard,
   role: "queued" | "active" | "review" | "done",

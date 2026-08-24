@@ -873,6 +873,14 @@ const waitForTaskLane = async (title) => {
   throw new Error(`The isolated task lane for ${title} did not persist its card, node, and session metadata.`);
 };
 const laneFixture = await waitForTaskLane(editedOpsTaskTitle);
+await waitFor(`(()=>{const card=[...document.querySelectorAll('.wj-task-card[data-presence-phase="working"]')].find(node=>node.textContent?.includes(${JSON.stringify(editedOpsTaskTitle)}));return Boolean(card)})()`, "live Plan task presence");
+await selectProjectView("Run");
+await waitFor(`(()=>{const item=document.querySelector('.wj-floor-now-list > button[data-presence-phase="working"]');return item?.textContent?.includes(${JSON.stringify(editedOpsTaskTitle)})})()`, "live Run Now item");
+await cdp("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+await waitFor(`getComputedStyle(document.querySelector('.wj-floor-now-list > button'), '::after').animationName==="none"`, "reduced-motion live presence");
+await cdp("Emulation.setEmulatedMedia", { features: [] });
+await selectProjectView("Plan");
+await waitFor(`Boolean(document.querySelector(".wj-board"))`, "Plan after live presence proof");
 const waitForPersistedCard = async (cardId, predicate, description, timeoutMilliseconds = 30_000) => {
   const deadline = Date.now() + timeoutMilliseconds;
   let lastCard;
