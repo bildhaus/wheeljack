@@ -478,7 +478,10 @@ fn pi_agent_settled_requests_authoritative_usage_snapshot() {
         db_path: PathBuf::new(),
         session_id: "pi-session".to_string(),
         stdin: stdin.clone(),
-        rpc_state: Arc::new(Mutex::new(StructuredAgentRpcState::default())),
+        rpc_state: Arc::new(Mutex::new(StructuredAgentRpcState {
+            turn_active: true,
+            ..Default::default()
+        })),
         provider: Some("openrouter".to_string()),
         model: Some("model-pi".to_string()),
         thinking: None,
@@ -486,14 +489,81 @@ fn pi_agent_settled_requests_authoritative_usage_snapshot() {
         sandbox: None,
     };
 
+    for event in [
+        json!({ "type": "message_end", "message": { "role": "user" } }),
+        json!({ "type": "message_end", "message": { "role": "assistant" } }),
+        json!({ "type": "turn_end" }),
+        json!({ "type": "agent_end" }),
+    ] {
+        handle_structured_protocol_line(&driver, &event.to_string()).unwrap();
+        assert!(driver.rpc_state.lock().unwrap().turn_active);
+    }
+
     handle_structured_protocol_line(&driver, &json!({ "type": "agent_settled" }).to_string())
         .unwrap();
+    assert!(!driver.rpc_state.lock().unwrap().turn_active);
     drop(driver);
     drop(stdin);
     let output = child.wait_with_output().unwrap();
     let request: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(request["id"], 1);
     assert_eq!(request["type"], "get_session_stats");
+}
+
+#[test]
+fn codex_turn_start_json_rpc_error_finishes_the_turn() {
+    let (command, args) = test_capture_stdin_line_command();
+    let mut child = Command::new(command)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+    let driver = StructuredProtocolDriver {
+        protocol: "codex-app-server".to_string(),
+        cwd: ".".to_string(),
+        db_path: PathBuf::new(),
+        session_id: "codex-turn-error".to_string(),
+        stdin: stdin.clone(),
+        rpc_state: Arc::new(Mutex::new(StructuredAgentRpcState {
+            turn_active: true,
+            next_id: 2,
+            codex: CodexRpcState {
+                thread_id: Some("thread-1".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })),
+        provider: None,
+        model: None,
+        thinking: None,
+        approval_policy: None,
+        sandbox: None,
+    };
+
+    send_codex_turn_start(&driver, "thread-1", &StructuredPrompt::text("test")).unwrap();
+    handle_structured_protocol_line(
+        &driver,
+        &json!({ "id": 99, "error": { "message": "unrelated request failed" } }).to_string(),
+    )
+    .unwrap();
+    assert!(driver.rpc_state.lock().unwrap().turn_active);
+
+    let error = handle_structured_protocol_line(
+        &driver,
+        &json!({ "id": 3, "error": { "message": "turn rejected" } }).to_string(),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("turn rejected"));
+    assert!(!driver.rpc_state.lock().unwrap().turn_active);
+    drop(driver);
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    let request: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(request["id"], 3);
+    assert_eq!(request["method"], "turn/start");
 }
 
 #[test]
@@ -1999,6 +2069,57 @@ fn agent_protocol_parse_dedupes_pi_chat_messages() {
 }
 
 #[test]
+fn agent_protocol_parse_keeps_pi_active_until_agent_settled() {
+    let core = Core::new(
+        test_init("agent-protocol-pi-settled"),
+        Arc::new(NullEventSink),
+    )
+    .expect("core");
+    let parse = |lines: Vec<String>| {
+        serde_json::from_str::<Value>(
+            &core.call_json(
+                &json!({
+                    "id": "parse-pi-settled",
+                    "command": "agent_protocol_parse",
+                    "payload": {
+                        "adapterId": "pi-coding-agent",
+                        "protocol": "pi-rpc",
+                        "lines": lines
+                    }
+                })
+                .to_string(),
+            ),
+        )
+        .unwrap()
+    };
+    let intermediate = vec![
+        json!({
+            "type": "message_update",
+            "assistantMessageEvent": { "type": "text_delta", "delta": "Working" }
+        })
+        .to_string(),
+        json!({
+            "type": "message_end",
+            "message": { "role": "assistant", "content": [{ "type": "text", "text": "Working" }] }
+        })
+        .to_string(),
+        json!({ "type": "turn_end" }).to_string(),
+        json!({ "type": "agent_end" }).to_string(),
+    ];
+
+    assert_eq!(parse(intermediate.clone())["payload"]["active"], true);
+    assert_eq!(
+        parse(
+            intermediate
+                .into_iter()
+                .chain([json!({ "type": "agent_settled" }).to_string()])
+                .collect()
+        )["payload"]["active"],
+        false
+    );
+}
+
+#[test]
 fn agent_protocol_parse_surfaces_failed_pi_turns() {
     let core = Core::new(
         test_init("agent-protocol-pi-error"),
@@ -3378,6 +3499,67 @@ fn structured_opencode_sse_driver_posts_prompt_and_emits_events() {
         .pending_interactions
         .is_empty());
     sse_reader.join().unwrap();
+}
+
+#[test]
+fn opencode_wrapped_step_finish_keeps_the_turn_active_until_session_idle() {
+    let driver = StructuredSseDriver {
+        protocol: "opencode-sse".to_string(),
+        port: 0,
+        db_path: temp_dir("structured-sse-step-finish").join(DB_FILE_NAME),
+        session_id: "session_sse".to_string(),
+        node_id: "node_sse".to_string(),
+        adapter_id: "opencode".to_string(),
+        seq: Arc::new(AtomicU64::new(0)),
+        rpc_state: Arc::new(Mutex::new(StructuredAgentRpcState {
+            turn_active: true,
+            opencode: OpenCodeRpcState {
+                session_id: Some("session-opencode".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })),
+        events: Arc::new(RecordingSink::default()),
+        cancellation: StructuredReaderCancellation {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            rollback: Arc::new(AtomicBool::new(false)),
+        },
+        model: None,
+        thinking: None,
+        approval_policy: None,
+        protocol_state: Arc::new(Mutex::new(AgentProtocolStreamState::default())),
+    };
+
+    dispatch_sse_event(
+        &driver,
+        None,
+        None,
+        &[json!({
+            "payload": {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "sessionID": "session-opencode",
+                        "type": "step-finish"
+                    }
+                }
+            }
+        })
+        .to_string()],
+    );
+    assert!(driver.rpc_state.lock().unwrap().turn_active);
+
+    dispatch_sse_event(
+        &driver,
+        None,
+        None,
+        &[json!({
+            "type": "session.idle",
+            "properties": { "sessionID": "session-opencode" }
+        })
+        .to_string()],
+    );
+    assert!(!driver.rpc_state.lock().unwrap().turn_active);
 }
 
 #[test]

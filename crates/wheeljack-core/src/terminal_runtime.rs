@@ -518,6 +518,7 @@ pub(crate) struct ClaudeRpcState {
 pub(crate) struct CodexRpcState {
     pub(crate) thread_id: Option<String>,
     pub(crate) turn_id: Option<String>,
+    pub(crate) turn_start_request_id: Option<u64>,
     pub(crate) pending_interaction: Option<Value>,
     pub(crate) resume_thread_id: Option<String>,
 }
@@ -1946,6 +1947,7 @@ pub(crate) fn begin_structured_turn(state: &Arc<Mutex<StructuredAgentRpcState>>)
     }
     state.turn_active = true;
     state.codex.turn_id = None;
+    state.codex.turn_start_request_id = None;
     state.cancel_requested = false;
     state.claude.pending_interaction = None;
     state.codex.pending_interaction = None;
@@ -1957,6 +1959,7 @@ pub(crate) fn finish_structured_turn(state: &Arc<Mutex<StructuredAgentRpcState>>
     if let Ok(mut state) = state.lock() {
         state.turn_active = false;
         state.codex.turn_id = None;
+        state.codex.turn_start_request_id = None;
         state.cancel_requested = false;
         state.claude.pending_interaction = None;
         state.codex.pending_interaction = None;
@@ -2080,9 +2083,7 @@ pub(crate) fn mark_structured_turn_done_if_needed(
                 || name == "refusal"
                 || name.contains("agent end")
         }
-        "pi-rpc" => {
-            name.contains("message end") || name.contains("turn end") || name.contains("agent end")
-        }
+        "pi-rpc" => name == "agent settled",
         _ => false,
     };
     if done {
@@ -2443,6 +2444,12 @@ pub(crate) fn send_codex_turn_start(
     if let Some(sandbox) = driver.sandbox.as_deref() {
         params["sandboxPolicy"] = codex_sandbox_policy(sandbox, &driver.cwd)?;
     }
+    driver
+        .rpc_state
+        .lock()
+        .map_err(|error| anyhow!(error.to_string()))?
+        .codex
+        .turn_start_request_id = Some(request_id);
     structured_write_json(
         &driver.stdin,
         &json!({
@@ -2505,6 +2512,26 @@ pub(crate) fn handle_codex_app_server_line(
     driver: &StructuredProtocolDriver,
     parsed: &Value,
 ) -> Result<()> {
+    if let Some(response_id) = json_id_as_u64(parsed) {
+        let is_turn_start_response = {
+            let mut state = driver
+                .rpc_state
+                .lock()
+                .map_err(|error| anyhow!(error.to_string()))?;
+            if state.codex.turn_start_request_id == Some(response_id) {
+                state.codex.turn_start_request_id = None;
+                true
+            } else {
+                false
+            }
+        };
+        if is_turn_start_response {
+            if let Some(error) = parsed.get("error") {
+                finish_structured_turn(&driver.rpc_state);
+                bail!("codex could not start the turn: {error}");
+            }
+        }
+    }
     if matches!(
         json_string_at(parsed, &["method"]).as_deref(),
         Some(
@@ -3786,9 +3813,9 @@ pub(crate) fn normalized_protocol_event_name(value: &Value) -> String {
         json_string_at(value, &["params", "update", "event"]),
         json_string_at(value, &["result", "stopReason"]),
         json_string_at(value, &["result", "stop_reason"]),
-        json_string_at(value, &["payload", "properties", "part", "type"]),
         json_string_at(value, &["payload", "event"]),
         json_string_at(value, &["payload", "type"]),
+        json_string_at(value, &["payload", "properties", "part", "type"]),
         json_string_at(value, &["method"]),
     ]
     .into_iter()
