@@ -2430,7 +2430,7 @@ fn parse_pi_event(adapter_id: &str, sequence: usize, raw: &Value) -> Vec<AgentPr
     }
 
     if name.contains("message end") {
-        if message_role.as_deref() == Some("user") {
+        if message_role.as_deref() != Some("assistant") {
             return Vec::new();
         }
         let mut events = Vec::new();
@@ -2446,17 +2446,14 @@ fn parse_pi_event(adapter_id: &str, sequence: usize, raw: &Value) -> Vec<AgentPr
                 },
             ));
         }
-        events.push(agent_protocol_event(
-            adapter_id,
-            sequence,
-            raw,
-            "turn_done",
-            AgentProtocolEventParts::default(),
-        ));
         return events;
     }
 
     if name.contains("turn end") || name.contains("agent end") {
+        return Vec::new();
+    }
+
+    if name == "agent settled" {
         return vec![agent_protocol_event(
             adapter_id,
             sequence,
