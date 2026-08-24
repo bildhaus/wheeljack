@@ -190,7 +190,7 @@ export function AgentMessageContent({ text, streaming = false }: { text: string;
 }
 
 function isProgressUpdate(item: AgentMessage): boolean {
-  return item.kind === "commentary";
+  return item.kind === "commentary" || (item.role === "assistant" && item.kind === "message");
 }
 
 function AgentActivityMessage({ items, active }: { items: AgentMessage[]; active: boolean }) {
@@ -540,8 +540,8 @@ function AgentChatComponent({
     [runtime.messages, runtime.status],
   );
   const allVisibleMessages = useMemo(
-    () => groupAgentMessages(displayMessages),
-    [displayMessages],
+    () => groupAgentMessages(displayMessages, turnActive),
+    [displayMessages, turnActive],
   );
   const hiddenMessageCount = Math.max(0, allVisibleMessages.length - visibleMessageLimit);
   const visibleMessages = useMemo(
@@ -981,33 +981,58 @@ function AgentChatComponent({
 
 export const AgentChat = memo(AgentChatComponent);
 
-function isActivityMessage(messages: AgentMessage[], index: number): boolean {
-  const item = messages[index];
+function isActivityMessage(item: AgentMessage): boolean {
   return ["commentary", "reasoning", "tool"].includes(item.kind);
 }
 
-export function groupAgentMessages(messages: AgentMessage[]): Array<AgentMessage | AgentMessage[]> {
+function isAssistantAnswer(item: AgentMessage): boolean {
+  return item.role === "assistant" && item.kind === "message";
+}
+
+export function groupAgentMessages(messages: AgentMessage[], currentTurnActive = false): Array<AgentMessage | AgentMessage[]> {
   const grouped: Array<AgentMessage | AgentMessage[]> = [];
-  let activityGroup: AgentMessage[] | undefined;
-  messages.forEach((item, index) => {
-    if (!isActivityMessage(messages, index)) {
-      grouped.push(item);
-      if (item.role === "user") activityGroup = undefined;
+  let turn: AgentMessage[] = [];
+  const appendTurn = (items: AgentMessage[], completed: boolean) => {
+    let activityGroup: AgentMessage[] | undefined;
+    let finalAnswer = -1;
+    if (completed) {
+      for (let index = items.length - 1; index >= 0; index -= 1) {
+        if (!isAssistantAnswer(items[index])) continue;
+        if (!items.slice(index + 1).some(isActivityMessage)) finalAnswer = index;
+        break;
+      }
+    }
+    items.forEach((item, index) => {
+      const collapsible = isActivityMessage(item) || (completed && isAssistantAnswer(item) && index !== finalAnswer);
+      if (!collapsible) {
+        grouped.push(item);
+        activityGroup = undefined;
+        return;
+      }
+      if (!activityGroup) {
+        activityGroup = [];
+        grouped.push(activityGroup);
+      }
+      const previousItem = activityGroup.at(-1);
+      if (item.kind === "tool" && previousItem?.kind === "tool" && /-agent-\d+-tool$/.test(item.id)) {
+        activityGroup[activityGroup.length - 1] = {
+          ...previousItem,
+          text: `${previousItem.text}${item.text}`,
+          streaming: Boolean(previousItem.streaming && item.streaming),
+        };
+      } else activityGroup.push(item);
+    });
+  };
+  messages.forEach((item) => {
+    if (item.role !== "user") {
+      turn.push(item);
       return;
     }
-    if (!activityGroup) {
-      activityGroup = [];
-      grouped.push(activityGroup);
-    }
-    const previousItem = activityGroup.at(-1);
-    if (item.kind === "tool" && previousItem?.kind === "tool" && /-agent-\d+-tool$/.test(item.id)) {
-      activityGroup[activityGroup.length - 1] = {
-        ...previousItem,
-        text: `${previousItem.text}${item.text}`,
-        streaming: Boolean(previousItem.streaming && item.streaming),
-      };
-    } else activityGroup.push(item);
+    appendTurn(turn, true);
+    turn = [];
+    grouped.push(item);
   });
+  appendTurn(turn, !currentTurnActive);
   return grouped;
 }
 

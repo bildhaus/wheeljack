@@ -1,11 +1,12 @@
 ---
-title: Plan and review
-description: Turn project intent into durable specifications, task contracts, isolated worktree lanes, verification, and review evidence.
+title: Plan and reconcile
+description: Turn project intent into autonomous execution, durable task reports, and safely reconciled worktree changes.
 editUrl: https://github.com/bildhaus/wheeljack/edit/main/docs/guides/plan-and-review.md
 ---
 
-Plan keeps intent, execution, and proof attached to the same project. Its Floor,
-Board, and Spec views are different projections of one durable local plan.
+wheeljack keeps intent, execution, and proof attached to the same project. **Run**
+is the operational view of the swarm; **Plan** is the durable task model; and
+**Spec** keeps the PRD and TDD beside the work derived from them.
 
 ## Establish project documents
 
@@ -13,7 +14,7 @@ Plan can read and manage three project-level documents:
 
 - **PRD:** the user-visible outcome, workflow, constraints, and acceptance criteria.
 - **TDD:** architecture, boundaries, implementation strategy, and verification.
-- **Kanban:** implementation-ready tasks and their current state.
+- **Plan:** implementation-ready tasks, relationships, and their current state.
 
 You can create templates manually or ask a verified structured agent to propose
 one document or a coherent bundle. Agent output is staged for review before it
@@ -46,34 +47,44 @@ independent. Declare dependencies and avoid concurrent changes to shared
 contracts, migrations, generated files, or release metadata.
 :::
 
-## Follow work on Floor and Board
+## Operate the swarm from Run
 
-- **Floor** shows active agents, coordination, attention, and the current run graph.
-- **Board** organizes backlog, active, review, blocked, and completed task state.
+- **Run** shows active agents, current execution, reconciliation, and exceptions
+  that actually need intervention.
+- **Plan** organizes planned, running, reconciling, intervention, and completed
+  task state. Its default list emphasizes outcomes rather than card shuffling;
+  the status projection is available when you need it.
 - **Spec** keeps PRD and TDD context close to the tasks derived from them.
 
-Agent coordination requests—message, child task, handoff, or review—flow through
-the configured autonomy policy and are recorded in history.
+Agent coordination requests—messages, child tasks, and handoffs—flow through the
+configured autonomy policy and are recorded in history. Relationships are soft
+by default, so they share context without serializing work. Mark a relationship
+hard only when the downstream task truly cannot start first.
 
-## Verify before review
+## Report and reconcile
 
-Run the task's verification commands in its assigned lane. wheeljack records the
-run status, output summary, and interruption or failure. A failed or interrupted
-verification remains visible and cannot be represented as passing evidence.
+Each worker is responsible for checking its own work and reporting the commands,
+evidence, risks, and outcome it produced. That report is durable task evidence;
+it does not automatically create a second verification or reviewer task.
 
-## Review evidence
+The reconciler then advances the result:
 
-Review compares the implementation against its contract using changed files,
-handoff notes, acceptance criteria, and verification results. A reviewer returns
-an explicit approve or request-changes verdict. Only completed proof and an
-acceptable review should move a task to delivery.
+- shared-checkout or no-change work can complete directly from the report;
+- committed task-worktree changes are integrated idempotently into the opened
+  project branch;
+- uncommitted source changes or integration conflicts are returned to a worker
+  for autonomous repair; and
+- target-checkout changes, exhausted recovery, or explicit human-acceptance
+  policy appear as an intervention instead of stalling the entire swarm.
 
-When the lane is no longer needed, use **Remove worktree** from the task menu or
-task inspector. Clean lanes close immediately. If the lane has local changes,
-wheeljack assigns the existing or a fresh task agent to preserve valuable work
-on the task branch and make the lane clean before removal. Delete and archive
-requests use the same cleanup queue, so they do not require a separate manual
-worktree step.
+Failed agents and temporary launch errors retry only their own task with bounded
+backoff. Other eligible work continues to run.
+
+After integration, wheeljack automatically removes the clean task worktree while
+preserving its branch. If a lane is still dirty, it assigns the existing or a
+fresh task agent to preserve valuable work and make the lane safe to remove.
+Delete and archive requests use the same cleanup queue, so they do not require a
+separate manual worktree step.
 
 The **Git** utility panel lists registered worktrees, their branch, path, clean
 or dirty state, and any linked Plan task. It also surfaces task lanes whose Git

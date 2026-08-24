@@ -666,3 +666,34 @@ fn migration_promotes_legacy_ops_nodes_to_canonical_state() {
         .unwrap();
     assert_eq!(legacy_nodes, 0);
 }
+
+#[test]
+fn migration_promotes_canvas_ops_state_to_project_authority() {
+    let db = Connection::open_in_memory().unwrap();
+    run_migrations(&db).unwrap();
+    db.execute_batch(
+        r#"
+        INSERT INTO projects (id, name, path, created_at, updated_at)
+        VALUES ('project_ops_shared', 'Ops', '.', 'now', 'now');
+        INSERT INTO canvases (id, project_id, name, camera_json, created_at, updated_at)
+        VALUES
+          ('canvas_old', 'project_ops_shared', 'Old', '{}', 'now', 'now'),
+          ('canvas_new', 'project_ops_shared', 'New', '{}', 'now', 'now');
+        INSERT INTO ops_states (canvas_id, project_id, revision, state_json, updated_at)
+        VALUES
+          ('canvas_old', 'project_ops_shared', 8, '{"cards":[{"id":"old"}]}', '2026-01-01T00:00:00Z'),
+          ('canvas_new', 'project_ops_shared', 2, '{"cards":[{"id":"new"}]}', '2026-02-01T00:00:00Z');
+        DROP TABLE ops_project_states;
+        PRAGMA user_version = 17;
+        "#,
+    )
+    .unwrap();
+
+    run_migrations(&db).unwrap();
+
+    let record = load_project_ops_state(&db, "project_ops_shared")
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.revision, 2);
+    assert_eq!(record.state["cards"][0]["id"], "new");
+}

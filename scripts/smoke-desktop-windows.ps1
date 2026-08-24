@@ -264,7 +264,7 @@ try {
     $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $runtimeProfile 'webview2-recovery'
     $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--force-renderer-accessibility --remote-debugging-port=9344'
     $recoveryProcess = Start-Process -FilePath $exe -PassThru
-    & $bun (Join-Path $root 'scripts\smoke-desktop-recovery-webview.mjs') --port 9344 --expected-panes 10 --lane-state $laneStatePath --close-flush true
+    & $bun (Join-Path $root 'scripts\smoke-desktop-recovery-webview.mjs') --port 9344 --expected-panes 9 --lane-state $laneStatePath --close-flush true
     if ($LASTEXITCODE -ne 0) { throw 'Packaged forced-recovery smoke failed.' }
     if (-not $recoveryProcess.WaitForExit(30000) -or $recoveryProcess.ExitCode -ne 0) {
         throw 'wheeljack did not close cleanly after flushing the recovered layout.'
@@ -273,7 +273,7 @@ try {
     $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $runtimeProfile 'webview2-graceful-recovery'
     $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--force-renderer-accessibility --remote-debugging-port=9354'
     $gracefulRecoveryProcess = Start-Process -FilePath $exe -PassThru
-    & $bun (Join-Path $root 'scripts\smoke-desktop-recovery-webview.mjs') --port 9354 --expected-panes 11 --lane-state $laneStatePath --expect-interrupted false
+    & $bun (Join-Path $root 'scripts\smoke-desktop-recovery-webview.mjs') --port 9354 --expected-panes 10 --lane-state $laneStatePath --expect-interrupted false
     if ($LASTEXITCODE -ne 0) { throw 'Packaged graceful-recovery smoke failed.' }
     if (-not $gracefulRecoveryProcess.WaitForExit(30000) -or $gracefulRecoveryProcess.ExitCode -ne 0) {
         throw 'wheeljack did not close cleanly after graceful recovery.'

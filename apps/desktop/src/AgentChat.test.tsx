@@ -278,7 +278,24 @@ test("keeps live reasoning compact within the turn activity disclosure", async (
   expect(completedReasoning.getAttribute("aria-expanded")).toBe("true");
 });
 
-test("keeps assistant messages visible while grouping only explicit turn activity", async () => {
+test("starts new live activity after an interim assistant response", () => {
+  renderChat({
+    status: "running",
+    messages: [
+      { id: "tool-one", role: "system", kind: "tool", text: "main.rs", tool: "Read" },
+      { id: "progress", role: "assistant", kind: "message", text: "I’ll inspect the command boundary next." },
+      { id: "tool-two", role: "system", kind: "tool", text: "tests", tool: "Search", streaming: true },
+    ],
+  });
+
+  const activities = screen.getAllByRole("button", { name: /1 tool used/i });
+  expect(activities).toHaveLength(2);
+  expect(activities[0].getAttribute("aria-label") ?? activities[0].textContent).toMatch(/Activity/i);
+  expect(activities[1].getAttribute("aria-label") ?? activities[1].textContent).toMatch(/Search/i);
+  expect(screen.getByText("I’ll inspect the command boundary next.").closest('[data-chat-part="answer"]')).not.toBeNull();
+});
+
+test("collapses interim assistant responses into completed turn activity", async () => {
   const user = userEvent.setup();
   renderChat({
     status: "completed",
@@ -296,12 +313,12 @@ test("keeps assistant messages visible while grouping only explicit turn activit
 
   const firstUpdate = screen.getByText("I’ll inspect the command boundary next.");
   const secondUpdate = screen.getByText("The decoder contract is the blocker.");
-  expect(firstUpdate.closest('[data-chat-part="answer"]')).not.toBeNull();
-  expect(secondUpdate.closest('[data-chat-part="answer"]')).not.toBeNull();
-  const activity = screen.getByRole("button", { name: /Activity.*3 tools used.*Completed/i });
-  expect(activity.textContent).not.toContain("updates");
+  expect(firstUpdate.closest('[data-chat-part="activity"]')).not.toBeNull();
+  expect(secondUpdate.closest('[data-chat-part="activity"]')).not.toBeNull();
+  const activity = screen.getByRole("button", { name: /Activity.*3 tools used.*2 updates.*Completed/i });
+  expect(activity.getAttribute("aria-expanded")).toBe("false");
   expect(screen.getAllByRole("button", { name: /Activity/i })).toHaveLength(1);
-  expect(screen.getByText("Implemented the decoder-boundary coverage.")).toBeTruthy();
+  expect(screen.getByText("Implemented the decoder-boundary coverage.").closest('[data-chat-part="answer"]')).not.toBeNull();
   await user.click(activity);
   expect(screen.getByText("Read the task")).toBeTruthy();
   expect(screen.getByText("Compare signatures")).toBeTruthy();

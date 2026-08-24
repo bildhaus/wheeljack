@@ -25,8 +25,10 @@ same project from the project controls.
   work that needs attention.
 - **Work** contains canvases and panes. A pane can be a shell, structured agent,
   Markdown note, checklist, or browser preview.
-- **Plan** contains Floor, Board, and Spec views for project planning,
-  dependencies, task lanes, verification, and review.
+- **Run** is the low-interaction operational view for autonomous execution,
+  reconciliation, and the exceptions that actually need you.
+- **Plan** contains the durable task list and status projection; **Spec** keeps
+  project documents beside it.
 - **Bots** stores reusable specialist profiles that can be launched into Work.
 - **Settings** controls appearance, workspace density, shortcuts, coding-agent
   profiles, autonomy, application data, and updates.

@@ -307,6 +307,17 @@ export interface GitWorktreeReview {
   truncated: boolean;
 }
 
+export interface GitWorktreeIntegrate {
+  status: "integrated" | "empty" | "source_dirty" | "target_dirty" | "conflict";
+  branch: string;
+  baseCommit: string;
+  sourceHead: string;
+  targetHead: string;
+  previousTargetHead: string;
+  commits: string[];
+  message: string;
+}
+
 export interface OpsReviewEvidence {
   scope: "task" | "shared";
   isRepo: boolean;
@@ -357,6 +368,7 @@ export interface RouteExecuteResult {
 
 export interface OpsCard {
   id: string;
+  kind?: "task" | "objective";
   columnId: string;
   title: string;
   detail: string;
@@ -368,6 +380,7 @@ export interface OpsCard {
   lastNote: string;
   agentFiles?: Record<string, string[]>;
   dependencyIds?: string[];
+  dependencyKinds?: Record<string, "hard" | "soft">;
   parentId?: string;
   events?: OpsTaskEvent[];
   startedAt?: string;
@@ -380,12 +393,36 @@ export interface OpsCard {
   verificationCommand?: string;
   verificationRun?: OpsVerificationRun;
   approvalAttempt?: OpsApprovalAttempt;
+  report?: OpsTaskReport;
+  reconciliation?: OpsTaskReconciliation;
+  attemptCount?: number;
+  retryAt?: string;
   reviewPolicy?: "human" | "agent" | "either";
   taskLane?: OpsTaskLane;
   runProgress?: OpsRunProgress;
   steeringDirective?: OpsSteeringDirective;
   workerSpecialist?: AgentSpecialistSuggestion;
   reviewerSpecialist?: AgentSpecialistSuggestion;
+}
+
+export interface OpsTaskReport {
+  status: "reported";
+  summary: string;
+  evidence: string;
+  checks: string[];
+  risks: string[];
+  reportedAt: string;
+  agentId?: string;
+}
+
+export interface OpsTaskReconciliation {
+  status: "queued" | "running" | "awaiting_repair" | "retrying" | "integrated" | "needs_human";
+  attempts: number;
+  message: string;
+  updatedAt: string;
+  reason?: "source_dirty" | "target_dirty" | "conflict" | "closed_before_integration" | "error";
+  sourceHead?: string;
+  targetHead?: string;
 }
 
 export type OpsRunStepState = "pending" | "running" | "blocked" | "done" | "failed";
@@ -446,6 +483,10 @@ export interface OpsTaskLane {
     status: "queued" | "resolving" | "blocked";
     requestedAt: string;
     message?: string;
+    attempts?: number;
+    retryAt?: string;
+    requiresIntegration?: boolean;
+    agentId?: string;
   };
 }
 
@@ -661,6 +702,13 @@ export interface AgentControlAudit {
 
 export interface OpsStateRecord {
   canvasId: string;
+  projectId: string;
+  revision: number;
+  state: OpsState;
+  updatedAt: string;
+}
+
+export interface ProjectOpsStateRecord {
   projectId: string;
   revision: number;
   state: OpsState;

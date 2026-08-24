@@ -73,6 +73,23 @@ fn resolve_workspace_folder_path_trims_and_expands_home_aliases() {
     assert!(resolve_workspace_folder_path("~/definitely/missing/wheeljack/path").is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn paths_equivalent_resolves_symlinked_parent_of_a_missing_path() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_dir("missing-path-alias");
+    let real = root.join("real");
+    let alias = root.join("alias");
+    fs::create_dir_all(&real).unwrap();
+    symlink(&real, &alias).unwrap();
+
+    assert!(paths_equivalent(
+        &real.join("missing-worktree"),
+        &alias.join("missing-worktree")
+    ));
+}
+
 #[test]
 fn git_status_and_worktree_roundtrip() {
     let repo = temp_dir("git-repo");
@@ -276,6 +293,119 @@ fn git_worktree_remove_refuses_current_primary_and_dirty_worktrees() {
             "refs/heads/wheeljack-native-safety"
         ]
     ));
+}
+
+#[test]
+fn git_worktree_remove_prunes_a_registered_missing_worktree() {
+    let repo = committed_repo("git-stale-worktree");
+    let worktree = repo.with_file_name(format!(
+        "{}-linked",
+        repo.file_name().unwrap().to_string_lossy()
+    ));
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-b",
+            "wheeljack-stale-worktree",
+            worktree.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    fs::remove_dir_all(&worktree).unwrap();
+
+    let core = Core::new(
+        test_init("git-stale-worktree-core"),
+        Arc::new(NullEventSink),
+    )
+    .unwrap();
+    let wrong_branch = json!({
+        "id": "remove-stale-wrong-branch",
+        "command": "git_worktree_remove",
+        "payload": {
+            "projectPath": repo,
+            "worktreePath": worktree,
+            "expectedBranch": "wheeljack-wrong-stale-worktree"
+        }
+    });
+    let response: Value = serde_json::from_str(&core.call_json(&wrong_branch.to_string())).unwrap();
+    assert_eq!(response["ok"], false, "{response:#}");
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("branch mismatch"));
+
+    let remove = json!({
+        "id": "remove-stale",
+        "command": "git_worktree_remove",
+        "payload": {
+            "projectPath": repo,
+            "worktreePath": worktree,
+            "expectedBranch": "wheeljack-stale-worktree"
+        }
+    });
+    let response: Value = serde_json::from_str(&core.call_json(&remove.to_string())).unwrap();
+    assert_eq!(response["ok"], true, "{response:#}");
+    assert!(git_succeeds(
+        &repo,
+        [
+            "rev-parse",
+            "--verify",
+            "refs/heads/wheeljack-stale-worktree"
+        ]
+    ));
+    assert!(!read_worktrees(&repo)
+        .iter()
+        .any(|candidate| paths_equivalent(Path::new(&candidate.path), &worktree)));
+}
+
+#[test]
+fn git_worktree_remove_only_drops_the_requested_stale_registration() {
+    let repo = committed_repo("git-two-stale-worktrees");
+    let first = repo.with_file_name(format!(
+        "{}-first",
+        repo.file_name().unwrap().to_string_lossy()
+    ));
+    let second = repo.with_file_name(format!(
+        "{}-second",
+        repo.file_name().unwrap().to_string_lossy()
+    ));
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-b",
+            "wheeljack-stale-first",
+            first.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-b",
+            "wheeljack-stale-second",
+            second.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    fs::remove_dir_all(&first).unwrap();
+    fs::remove_dir_all(&second).unwrap();
+
+    run_git_worktree_remove(&repo, &first).unwrap();
+    let remaining = read_worktrees(&repo);
+    assert!(!remaining
+        .iter()
+        .any(|candidate| paths_equivalent(Path::new(&candidate.path), &first)));
+    assert!(remaining
+        .iter()
+        .any(|candidate| paths_equivalent(Path::new(&candidate.path), &second)));
+
+    run_git_worktree_remove(&repo, &second).unwrap();
 }
 
 #[test]
@@ -661,6 +791,125 @@ fn git_task_worktree_rejects_unborn_and_creation_collisions() {
     )
     .unwrap();
     assert_eq!(removed["ok"], true);
+}
+
+#[test]
+fn git_worktree_integrate_is_idempotent_and_preserves_dirty_targets() {
+    let repo = committed_repo("git-task-integrate");
+    let core = Core::new(
+        test_init("git-task-integrate-core"),
+        Arc::new(NullEventSink),
+    )
+    .unwrap();
+    let created: Value = serde_json::from_str(
+        &core.call_json(
+            &json!({
+                "id": "create-task",
+                "command": "git_worktree_create",
+                "payload": { "projectPath": repo, "taskId": "integrate-task" }
+            })
+            .to_string(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(created["ok"], true);
+    let worktree = PathBuf::from(created["payload"]["worktree"]["path"].as_str().unwrap());
+    let branch = created["payload"]["worktree"]["branch"].as_str().unwrap();
+    let base_commit = created["payload"]["baseCommit"].as_str().unwrap();
+    fs::write(worktree.join("feature.txt"), "integrated task\n").unwrap();
+    run_git(&worktree, ["add", "."]).unwrap();
+    run_git(&worktree, ["commit", "-m", "task feature"]).unwrap();
+
+    let request = || {
+        json!({
+            "id": "integrate-task",
+            "command": "git_worktree_integrate",
+            "payload": { "req": {
+                "projectPath": repo,
+                "worktreePath": worktree,
+                "expectedBranch": branch,
+                "baseCommit": base_commit
+            }}
+        })
+    };
+    let integrated: Value = serde_json::from_str(&core.call_json(&request().to_string())).unwrap();
+    assert_eq!(integrated["ok"], true);
+    assert_eq!(integrated["payload"]["status"], "integrated");
+    assert_eq!(
+        fs::read_to_string(repo.join("feature.txt")).unwrap().trim(),
+        "integrated task"
+    );
+    let integrated_head = git_text(&repo, ["rev-parse", "HEAD"]);
+
+    let repeated: Value = serde_json::from_str(&core.call_json(&request().to_string())).unwrap();
+    assert_eq!(repeated["ok"], true);
+    assert_eq!(repeated["payload"]["status"], "integrated");
+    assert_eq!(git_text(&repo, ["rev-parse", "HEAD"]), integrated_head);
+
+    fs::write(worktree.join("second.txt"), "second task change\n").unwrap();
+    run_git(&worktree, ["add", "."]).unwrap();
+    run_git(&worktree, ["commit", "-m", "second task change"]).unwrap();
+    fs::write(repo.join("local.txt"), "local target change\n").unwrap();
+    let dirty: Value = serde_json::from_str(&core.call_json(&request().to_string())).unwrap();
+    assert_eq!(dirty["ok"], true);
+    assert_eq!(dirty["payload"]["status"], "target_dirty");
+    assert!(!repo.join("second.txt").exists());
+}
+
+#[test]
+fn git_worktree_integrate_rolls_back_conflicts() {
+    let repo = committed_repo("git-task-integrate-conflict");
+    let core = Core::new(
+        test_init("git-task-integrate-conflict-core"),
+        Arc::new(NullEventSink),
+    )
+    .unwrap();
+    let created: Value = serde_json::from_str(
+        &core.call_json(
+            &json!({
+                "id": "create-task",
+                "command": "git_worktree_create",
+                "payload": { "projectPath": repo, "taskId": "conflict-task" }
+            })
+            .to_string(),
+        ),
+    )
+    .unwrap();
+    let worktree = PathBuf::from(created["payload"]["worktree"]["path"].as_str().unwrap());
+    let branch = created["payload"]["worktree"]["branch"].as_str().unwrap();
+    let base_commit = created["payload"]["baseCommit"].as_str().unwrap();
+    fs::write(worktree.join("README.md"), "task version\n").unwrap();
+    run_git(&worktree, ["add", "."]).unwrap();
+    run_git(&worktree, ["commit", "-m", "task readme"]).unwrap();
+    fs::write(repo.join("README.md"), "target version\n").unwrap();
+    run_git(&repo, ["add", "."]).unwrap();
+    run_git(&repo, ["commit", "-m", "target readme"]).unwrap();
+    let target_head = git_text(&repo, ["rev-parse", "HEAD"]);
+
+    let response: Value = serde_json::from_str(
+        &core.call_json(
+            &json!({
+                "id": "integrate-conflict",
+                "command": "git_worktree_integrate",
+                "payload": { "req": {
+                    "projectPath": repo,
+                    "worktreePath": worktree,
+                    "expectedBranch": branch,
+                    "baseCommit": base_commit
+                }}
+            })
+            .to_string(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["payload"]["status"], "conflict");
+    assert_eq!(git_text(&repo, ["rev-parse", "HEAD"]), target_head);
+    assert_eq!(
+        fs::read_to_string(repo.join("README.md")).unwrap().trim(),
+        "target version"
+    );
+    assert!(!repo.join(".git").join("CHERRY_PICK_HEAD").exists());
 }
 
 fn committed_repo(name: &str) -> PathBuf {

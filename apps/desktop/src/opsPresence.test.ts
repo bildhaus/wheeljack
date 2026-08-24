@@ -8,6 +8,7 @@ import {
   opsAutomaticApprovalRetryDelay,
   opsAutomaticFileConflictInstructions,
   opsCardActivitySummary,
+  opsCardPresence,
   opsCardParticipantIds,
   opsCanCompleteWithOverride,
   opsCurrentCardForAgent,
@@ -51,8 +52,8 @@ const card = (id: string, columnId: string, expectedFiles: string[]): OpsCard =>
 describe("ops presence", () => {
   it("presents review policy as automatic until the assigned reviewer takes over", () => {
     const review = { ...card("review", "review", []), reviewPolicy: "agent" as const };
-    expect(opsReviewLabel(review)).toBe("Agent · Automatic");
-    expect(opsReviewLabel({ ...review, reviewPolicy: "human" })).toBe("Human approval · Required");
+    expect(opsReviewLabel(review)).toBe("Reconciler · Automatic");
+    expect(opsReviewLabel({ ...review, reviewPolicy: "human" })).toBe("Human acceptance · Required");
     expect(opsReviewLabel({ ...review, reviewerId: "reviewer", agentStatuses: { reviewer: "running" } }, "Codex")).toBe("Codex · Running");
     expect(opsReviewLabel({ ...review, reviewerId: "removed-reviewer", agentStatuses: { "removed-reviewer": "completed" } })).toBe("Reviewer · Verdict missing");
     expect(opsReviewLabel({
@@ -234,6 +235,39 @@ describe("ops presence", () => {
     expect(opsNextAutonomousTask({ ...state, cards: [blocked, { ...foundation, columnId: "done" }] })?.id).toBe("blocked");
   });
 
+  it("never schedules an objective parent as executable work", () => {
+    const objective = { ...card("objective", "queued", []), kind: "objective" as const };
+    const child = { ...card("child", "queued", []), parentId: objective.id };
+    const state = {
+      columns: [
+        { id: "queued", title: "Ready", role: "queued" as const },
+        { id: "done", title: "Done", role: "done" as const },
+      ],
+      cards: [objective, child],
+    };
+
+    expect(opsNextAutonomousTask(state)?.id).toBe("child");
+  });
+
+  it("lets soft relationships coordinate without serializing scheduler pickup", () => {
+    const upstream = card("upstream", "active", []);
+    const soft = { ...card("soft", "queued", []), dependencyIds: ["upstream"], dependencyKinds: { upstream: "soft" as const } };
+    const hard = { ...card("hard", "queued", []), dependencyIds: ["upstream"], dependencyKinds: { upstream: "hard" as const } };
+    const state = {
+      columns: [
+        { id: "queued", title: "Ready", role: "queued" as const },
+        { id: "active", title: "Active", role: "active" as const },
+        { id: "done", title: "Done", role: "done" as const },
+      ],
+      cards: [hard, soft, upstream],
+    };
+
+    expect(opsNextAutonomousTask(state)?.id).toBe("soft");
+    expect(opsWaitingRelationships(state.cards, new Set(["done"]))).toEqual([
+      { cardId: "hard", waitingOnCardIds: ["upstream"], waitingOnAgentIds: [] },
+    ]);
+  });
+
   it("derives execution lanes, intervention reasons, and verification progress", () => {
     const active = card("active", "active", []);
     active.assigneeIds = ["claude"];
@@ -289,6 +323,21 @@ describe("ops presence", () => {
     expect(opsCardActivitySummary(active, [{ status: "running", statusSummary: "Agent is working..." }], 0)).toBe("Working");
     expect(opsCardActivitySummary({ ...active, paused: true }, [], 0)).toBe("Paused");
     expect(opsCardActivitySummary(active, [], 0)).toBe("No active agent");
+  });
+
+  it("derives honest visual presence from recorded agent and reconciliation state", () => {
+    const active = card("active", "active", []);
+    expect(opsCardPresence(active, [{ status: "running" }])).toBe("working");
+    expect(opsCardPresence({ ...active, paused: true }, [])).toBe("waiting");
+    expect(opsCardPresence(active, [{ status: "needs_input" }])).toBe("attention");
+    expect(opsCardPresence({
+      ...active,
+      reconciliation: { status: "running", attempts: 1, message: "Integrating worker evidence", updatedAt: "2026-08-24T10:00:00Z" },
+    }, [])).toBe("reconciling");
+    expect(opsCardPresence({
+      ...active,
+      reconciliation: { status: "retrying", attempts: 2, message: "Retrying integration", updatedAt: "2026-08-24T10:01:00Z" },
+    }, [])).toBe("retrying");
   });
 
   it("rejects stale verification command, cwd, base, snapshot, and approval evidence", () => {
@@ -509,7 +558,7 @@ describe("ops presence", () => {
       { key: "docs", title: "Docs", detail: "", definitionOfDone: "", constraints: "", verificationCommand: "", expectedFiles: ["README.md"], dependencyKeys: ["ui"], agentId: "b" },
     ];
 
-    expect(opsDispatchableDecompositionKeys(tasks, new Set(["a", "b"]))).toEqual(["ui"]);
+    expect(opsDispatchableDecompositionKeys(tasks, new Set(["a", "b"]))).toEqual(["ui", "docs"]);
     expect(opsDecompositionHasCycle(tasks)).toBe(false);
     expect(opsDecompositionHasCycle([
       { ...tasks[0], dependencyKeys: ["api"] },

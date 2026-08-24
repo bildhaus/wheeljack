@@ -170,7 +170,7 @@ test("gates the accessible three-step guide until desktop startup has hydrated",
   expect(paritySource).toContain("Review this repository and tell me what it does, how to run it, and one useful next task. Don’t change files.");
 });
 
-test("starts onboarding agents in the background but still reveals onboarding shells immediately", () => {
+test("reveals onboarding agents and shells in Work immediately", () => {
   const onboardingActions = appSource.slice(
     appSource.indexOf("const startOnboardingAgent"),
     appSource.indexOf("const terminalAgents"),
@@ -178,8 +178,9 @@ test("starts onboarding agents in the background but still reveals onboarding sh
   const agentAction = onboardingActions.slice(0, onboardingActions.indexOf("const startOnboardingShell"));
   const shellAction = onboardingActions.slice(onboardingActions.indexOf("const startOnboardingShell"));
 
-  expect(agentAction).toContain("return spawnAgent(prompt)");
-  expect(agentAction).not.toContain("setSurface(");
+  expect(agentAction.indexOf('setSurface("terminal")'))
+    .toBeLessThan(agentAction.indexOf("await spawnAgent(prompt)"));
+  expect(agentAction).toContain('if (!started) setSurface("home")');
   expect(paritySource).toContain("Agent started in Work.");
   expect(shellAction.indexOf('setSurface("terminal")'))
     .toBeLessThan(shellAction.indexOf("await spawnShell()"));
@@ -210,7 +211,7 @@ test("keeps agent launches on the current surface while pane creation settles", 
 
   const planLaunchSource = appSource.slice(
     appSource.indexOf("const startAgentForOpsTask = async"),
-    appSource.indexOf("const startReviewerForOpsTask"),
+    appSource.indexOf("const updateOpsDependencies"),
   );
   expect(planLaunchSource).toContain("return spawnAgent(prompt, card, prompt, role, schedulerLeaseId, launchAdapterId)");
   expect(planLaunchSource).not.toContain("setSurface(");
@@ -442,7 +443,7 @@ test("keeps the animated expandable Plan stepper in the title bar while merging 
   expect(paritySource).toContain('window.dispatchEvent(new Event(projectEmptyExitEvent))');
   expect(paritySource).toContain('characters.slice(0, typedCharacterCount).join("")');
   expect(paritySource).toContain('className="wj-empty-type-caret"');
-  expect(paritySource).toContain('<TabsList aria-label="Plan views" data-page={page}><TabsTrigger value="floor"><span className="wj-mode-label">Floor</span></TabsTrigger><TabsTrigger value="board"><span className="wj-mode-label">Board</span></TabsTrigger><TabsTrigger value="spec"><span className="wj-mode-label">Spec</span></TabsTrigger></TabsList>');
+  expect(paritySource).toContain('<TabsList aria-label="Project views" data-page={page}><TabsTrigger value="floor"><span className="wj-mode-label">Run</span></TabsTrigger><TabsTrigger value="board"><span className="wj-mode-label">Plan</span></TabsTrigger><TabsTrigger value="spec"><span className="wj-mode-label">Spec</span></TabsTrigger></TabsList>');
   expect(opsSource).not.toContain('className="wj-project-plan-sections"');
   expect(titleBarSource).toContain('className="wj-title-branch"');
   expect(titleBarSource).toContain('{project.githubRemote ? <GitHub /> : <GitBranch />}{project.branch}');
@@ -450,7 +451,7 @@ test("keeps the animated expandable Plan stepper in the title bar while merging 
   expect(workToolbarSource).not.toContain("project?.branch");
   expect(workToolbarSource).not.toContain("<ProjectModeSwitch");
   expect(workToolbarSource).not.toContain('{project?.name ?? "No project"}');
-  expect(opsSource).toContain('aria-label="Columns view"');
+  expect(opsSource).toContain('aria-label="Plan list view"');
   expect(opsSource).toContain("<ProjectEmptyState");
   expect(paritySource).toContain('className="wj-project-empty"');
   expect(opsSource).not.toContain('title="No tasks yet"');
@@ -466,8 +467,8 @@ test("offers responsive board and list task views without horizontal scrolling",
     paritySource.indexOf("export function OpsSurface"),
     paritySource.indexOf("export function SettingsSurface"),
   );
-  expect(opsSource).toContain('useState<"board" | "list">("board")');
-  expect(opsSource).toContain('<TabsList aria-label="Task view"><TabsTrigger aria-label="Columns view" value="board">Columns</TabsTrigger><TabsTrigger aria-label="List view" value="list">List</TabsTrigger></TabsList>');
+  expect(opsSource).toContain('useState<"board" | "list">("list")');
+  expect(opsSource).toContain('<TabsList aria-label="Plan task view"><TabsTrigger aria-label="Plan list view" value="list">Plan</TabsTrigger><TabsTrigger aria-label="Execution status columns" value="board">Status</TabsTrigger></TabsList>');
   expect(opsSource).not.toContain("horizontal=");
   expect(opsSource).toContain('data-view={boardView}');
   expect(opsSource.match(/renderTaskMenuItems\(card, cardRole, childProgress/g)).toHaveLength(2);
@@ -626,7 +627,7 @@ test("orders isolated task setup before spawn and keeps review evidence separate
   expect(reviewSource).not.toContain("setGit(");
   expect(reviewSource).not.toContain("setGitDiff(");
   expect(paritySource).toContain("Start fresh task agent");
-  expect(paritySource).toContain("Send fresh reviewer");
+  expect(paritySource).not.toContain("Send fresh reviewer");
   expect(paritySource).toContain("resolveAgentLabel(nodes[id]?.title, state.agentLabels?.[id])");
   expect(paritySource).toContain("reviewerName(card.reviewerId)");
   expect(paritySource).toContain("reviewerName(inspectedCard.reviewerId)");
@@ -646,7 +647,7 @@ test("makes Floor the evidence-only Plan default and combines PRD/TDD under Spec
 
   expect(appSource).toContain('useState<OpsPage>("floor")');
   expect(appSource).toContain('if (project?.id) setOpsPage("floor")');
-  expect(floorSource).toContain("Needs you");
+  expect(floorSource).toContain("Exceptions");
   expect(floorSource).toContain('id="floor-agents-heading">Agents</h2>');
   expect(floorSource).not.toContain("Running now");
   expect(floorSource).toContain("Ready next");
@@ -658,7 +659,7 @@ test("makes Floor the evidence-only Plan default and combines PRD/TDD under Spec
   expect(floorSource).toContain("Response needed");
   expect(floorSource).toContain("Agent stopped");
   expect(floorSource).toContain("Review ready");
-  expect(floorSource).toContain("Blocked by dependency");
+  expect(floorSource).not.toContain("Blocked by dependency");
   expect(floorSource).toContain("Automatic ownership resolution stalled");
   expect(floorSource).toContain('label: "Approve"');
   expect(floorSource).toContain('label: "Deny"');
@@ -676,7 +677,7 @@ test("makes Floor the evidence-only Plan default and combines PRD/TDD under Spec
   expect(floorSource).toContain("Available");
   expect(floorSource).toContain('className="wj-floor-agent-empty"');
   expect(floorSource).toContain('className="wj-floor-panel wj-floor-docked-inspector"');
-  expect(floorSource).toContain('aria-label="Resize floor side rail"');
+  expect(floorSource).toContain('aria-label="Resize Run side rail"');
   expect(floorSource).toContain("{dockedInspector ?? <>");
   expect(floorSource).toContain("Claimed files");
   expect(floorSource).toContain("Latest directive");
@@ -1196,55 +1197,26 @@ test("activates Plan only for meaningful state, existing documents, or explicit 
   expect(appSource).toContain("hasProjectPlanDocuments(next)");
 });
 
-test("runs explicit task verification through PTY history and revalidates approval", () => {
-  const verificationSource = appSource.slice(
-    appSource.indexOf("const finishOpsVerification"),
-    appSource.indexOf("const inspectOpsTask"),
+test("reconciles worker reports and starts repair agents only for integration failures", () => {
+  const reconciliationSource = appSource.slice(
+    appSource.indexOf("const reconcileReportedTask"),
+    appSource.indexOf("const removeSelectedProject"),
   );
-  expect(verificationSource).toContain('shellCommand: command');
-  expect(verificationSource).toContain('adapterId: "generic-shell"');
-  expect(verificationSource).toContain('callCore("session_kill"');
-  const cancelVerificationSource = verificationSource.slice(
-    verificationSource.indexOf("const cancelOpsVerification"),
-    verificationSource.indexOf("const viewOpsVerificationOutput"),
-  );
-  expect(cancelVerificationSource.indexOf("persistOpsImmediately")).toBeLessThan(cancelVerificationSource.indexOf('callCore("session_kill"'));
-  expect(verificationSource).toContain('callCore<SessionTranscriptPage>("session_transcript_page"');
-  expect(verificationSource).toContain("pendingVerificationExitsRef.current");
-  expect(verificationSource).toContain("automaticVerificationKeysRef.current");
-  expect(verificationSource).toContain("void runOpsVerification(candidate)");
-  expect(verificationSource).toContain('card.reviewPolicy === "agent"');
-  expect(verificationSource).toContain("void startReviewerForOpsTask(candidate)");
-  expect(appSource).toContain("verificationSessionIdsRef.current.has(sessionId) || verificationSpawnCountRef.current > 0");
-  const persistenceSource = appSource.slice(
-    appSource.indexOf("const captureVerificationPersistence"),
-    appSource.indexOf("const finishOpsVerification"),
-  );
-  expect(persistenceSource).toContain("activeCanvas.projectId !== activeProject.id");
-  expect(persistenceSource).toContain("canvasRef.current?.id !== persistence.canvas.id");
-  expect(persistenceSource).toContain("projectRef.current?.id !== persistence.project.id");
-  expect(persistenceSource).not.toContain("persistence.state");
-  expect(appSource).toContain("opsState.cards.find((card) => card.id === current.id)");
-  const approvalSource = appSource.slice(appSource.indexOf("const reviewOpsTask"), appSource.indexOf("const previewReviewChanges"));
-  expect(approvalSource).toContain("await ensureOpsTaskLane(currentCard)");
-  expect(approvalSource).toContain("await fetchOpsTaskReview(validatedCard)");
-  expect(paritySource).toContain("Run verification");
-  expect(paritySource).toContain("Cancel verification");
-  expect(paritySource).toContain("View verification output");
-  expect(paritySource).toContain("Approve verification");
-  expect(paritySource).toContain("Verification stale");
-  expect(paritySource).toContain("Save contract");
-  expect(paritySource).toContain("approval.reason");
-  expect(appSource).toContain("REVIEW VERDICT: APPROVE");
-  expect(appSource).toContain(
-    'opsVerificationApproval(latestCandidate.card, latestCandidate.hasFileConflict, result.snapshotId, "agent")',
-  );
-  expect(appSource).toContain("opsNextAutomaticApprovalCandidate");
-  expect(appSource).toContain("persistOpsImmediately((current) =>");
-  expect(appSource).not.toContain("automaticApprovalKeysRef");
+  expect(reconciliationSource).toContain('callCore<GitWorktreeIntegrate>("git_worktree_integrate"');
+  expect(reconciliationSource).toContain('result.status === "integrated" || result.status === "empty"');
+  expect(reconciliationSource).toContain('if (result.status === "target_dirty")');
+  expect(reconciliationSource).toContain('recordReconciliation("retrying"');
+  expect(reconciliationSource).not.toContain("Automatic reconciliation exhausted");
+  expect(reconciliationSource).toContain('result.status === "source_dirty"');
+  expect(reconciliationSource).toContain("Reconciliation rolled back a Git conflict");
+  expect(reconciliationSource).toContain('startAgentForOpsTask(card, repairPrompt, "worker")');
+  expect(reconciliationSource).not.toContain("runOpsVerification(candidate)");
+  expect(reconciliationSource).not.toContain("startReviewerForOpsTask(candidate)");
+  expect(paritySource).toContain("Worker results and automatic reconciliation state.");
+  expect(paritySource).toContain("Send repair task");
 });
 
-test("preserves live verification across canvases and interrupts missing sessions after restart", () => {
+test("migrates legacy verification state without starting redundant verification jobs", () => {
   const state = parseOpsState({
     version: 2,
     cards: [{
@@ -1332,11 +1304,11 @@ test("preserves live verification across canvases and interrupts missing session
     appSource.indexOf("const activateCanvas"),
     appSource.indexOf("const refreshProjectData"),
   );
-  expect(activationSource).toContain('callCore<Record<string, { status: string; exitCode?: number }>>("session_statuses"');
+  expect(activationSource).not.toContain('"session_statuses"');
   expect(activationSource).toContain("const recoveredVerification =");
   expect(activationSource).toContain("await persistOpsQueued(nextOps, nextCanvas");
-  expect(activationSource).toContain("pendingVerificationExitsRef.current.delete(run.sessionId)");
-  expect(activationSource).toContain("verificationExitHandlerRef.current?.(");
+  expect(activationSource).toContain("recoverOpsVerificationRuns(");
+  expect(appSource).not.toContain("const _runOpsVerification");
 
   const merged = mergeProjectDocuments(state, {
     projectPath: "C:\\repo",

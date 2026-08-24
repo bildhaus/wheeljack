@@ -771,6 +771,28 @@ pub struct GitWorktreeReviewResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitWorktreeIntegrateRequest {
+    pub project_path: String,
+    pub worktree_path: String,
+    pub expected_branch: String,
+    pub base_commit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorktreeIntegrateResult {
+    pub status: String,
+    pub branch: String,
+    pub base_commit: String,
+    pub source_head: String,
+    pub target_head: String,
+    pub previous_target_head: String,
+    pub commits: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitWorktreeRemoveRequest {
     pub project_path: String,
     pub worktree_path: String,
@@ -801,6 +823,8 @@ pub struct CoordinationBoardEnsureRequest {
 pub struct CoordinationAgentEventDto {
     pub callsign: String,
     pub task: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
     #[serde(default)]
     pub task_id: Option<String>,
     #[serde(default)]

@@ -117,6 +117,9 @@ function parseOpsTaskLane(value: unknown): OpsCard["taskLane"] {
           status: cleanup.status as "queued" | "resolving" | "blocked",
           requestedAt: cleanup.requestedAt,
           message: typeof cleanup.message === "string" ? cleanup.message : undefined,
+          attempts: typeof cleanup.attempts === "number" ? cleanup.attempts : 0,
+          retryAt: typeof cleanup.retryAt === "string" ? cleanup.retryAt : undefined,
+          requiresIntegration: cleanup.requiresIntegration === true,
         }
       : undefined,
   };
@@ -162,6 +165,53 @@ function parseOpsApprovalAttempt(value: unknown): OpsCard["approvalAttempt"] {
     message: attempt.message,
     attemptedAt: attempt.attemptedAt,
   };
+}
+
+function parseOpsTaskReport(value: unknown): OpsCard["report"] {
+  if (!value || typeof value !== "object") return undefined;
+  const report = value as Record<string, unknown>;
+  if (report.status !== "reported" || typeof report.reportedAt !== "string") return undefined;
+  return {
+    status: "reported",
+    summary: typeof report.summary === "string" ? report.summary : "",
+    evidence: typeof report.evidence === "string" ? report.evidence : "",
+    checks: Array.isArray(report.checks) ? report.checks.filter((item): item is string => typeof item === "string") : [],
+    risks: Array.isArray(report.risks) ? report.risks.filter((item): item is string => typeof item === "string") : [],
+    reportedAt: report.reportedAt,
+    agentId: typeof report.agentId === "string" ? report.agentId : undefined,
+  };
+}
+
+function parseOpsTaskReconciliation(value: unknown): OpsCard["reconciliation"] {
+  if (!value || typeof value !== "object") return undefined;
+  const reconciliation = value as Record<string, unknown>;
+  if (
+    !["queued", "running", "awaiting_repair", "retrying", "integrated", "needs_human"].includes(String(reconciliation.status))
+    || typeof reconciliation.updatedAt !== "string"
+  ) return undefined;
+  const recoveredRunning = reconciliation.status === "running";
+  const reason = ["source_dirty", "target_dirty", "conflict", "closed_before_integration", "error"].includes(String(reconciliation.reason))
+    ? reconciliation.reason as NonNullable<OpsCard["reconciliation"]>["reason"]
+    : undefined;
+  return {
+    status: recoveredRunning ? "retrying" : reconciliation.status as NonNullable<OpsCard["reconciliation"]>["status"],
+    attempts: typeof reconciliation.attempts === "number" ? reconciliation.attempts : 0,
+    message: recoveredRunning ? "Recovered an interrupted reconciliation; retrying safely." : typeof reconciliation.message === "string" ? reconciliation.message : "",
+    updatedAt: reconciliation.updatedAt,
+    reason: recoveredRunning ? "error" : reason,
+    sourceHead: typeof reconciliation.sourceHead === "string" ? reconciliation.sourceHead : undefined,
+    targetHead: typeof reconciliation.targetHead === "string" ? reconciliation.targetHead : undefined,
+  };
+}
+
+function legacyReviewApproved(card: OpsCard): boolean {
+  const verificationPassed = card.verificationRun?.status === "passed"
+    && card.verificationRun.exitCode === 0
+    && Boolean(card.verificationRun.snapshotId);
+  const verdict = [...(card.events ?? [])].reverse().find((event) => /REVIEW\s+VERDICT\s*:/i.test(event.message));
+  const reviewerApproved = Boolean(verdict && /REVIEW\s+VERDICT\s*:\s*(?:APPROVE|APPROVED|PASS|PASSED)\b/i.test(verdict.message));
+  const manuallyApproved = (card.events ?? []).some((event) => event.kind === "completion" && event.id.startsWith("manual:approve:"));
+  return verificationPassed && (reviewerApproved || manuallyApproved);
 }
 
 export function recoverOpsVerificationRuns(
@@ -247,6 +297,7 @@ function parseOpsCards(value: unknown): OpsCard[] {
     if (typeof item.id !== "string" || typeof item.title !== "string") return [];
     return [{
       id: item.id,
+      kind: item.kind === "objective" ? "objective" : "task",
       columnId: typeof item.columnId === "string" ? item.columnId : "queued",
       title: item.title,
       detail: typeof item.detail === "string" ? item.detail : "",
@@ -263,6 +314,9 @@ function parseOpsCards(value: unknown): OpsCard[] {
             Array.isArray(files) ? [[id, files.filter((file): file is string => typeof file === "string")]] : []))
         : {},
       dependencyIds: Array.isArray(item.dependencyIds) ? item.dependencyIds.filter((id): id is string => typeof id === "string") : [],
+      dependencyKinds: item.dependencyKinds && typeof item.dependencyKinds === "object"
+        ? Object.fromEntries(Object.entries(item.dependencyKinds).filter((entry): entry is [string, "hard" | "soft"] => entry[1] === "hard" || entry[1] === "soft"))
+        : {},
       parentId: typeof item.parentId === "string" ? item.parentId : undefined,
       events: Array.isArray(item.events) ? item.events.flatMap((event) => {
         if (!event || typeof event !== "object") return [];
@@ -297,6 +351,10 @@ function parseOpsCards(value: unknown): OpsCard[] {
       runProgress: parseOpsRunProgress(item.runProgress),
       steeringDirective: parseOpsSteeringDirective(item.steeringDirective),
       approvalAttempt: parseOpsApprovalAttempt(item.approvalAttempt),
+      report: parseOpsTaskReport(item.report),
+      reconciliation: parseOpsTaskReconciliation(item.reconciliation),
+      attemptCount: typeof item.attemptCount === "number" ? item.attemptCount : 0,
+      retryAt: typeof item.retryAt === "string" ? item.retryAt : undefined,
       reviewPolicy: ["human", "agent", "either"].includes(String(item.reviewPolicy))
         ? item.reviewPolicy as "human" | "agent" | "either"
         : "agent",
@@ -309,9 +367,7 @@ export function parseOpsState(value?: JsonObject): OpsState {
   if (!value || value.version !== 2 || !Array.isArray(value.cards)) {
     return defaultOpsState();
   }
-  const cards = parseOpsCards(value.cards);
-  const liveCardIds = new Set(cards.map((card) => card.id));
-  const archivedCards = parseOpsCards(value.archivedCards).filter((card) => !liveCardIds.has(card.id));
+  const parsedCards = parseOpsCards(value.cards);
   const columns = Array.isArray(value.columns)
     ? value.columns.flatMap((candidate) => {
         if (!candidate || typeof candidate !== "object") return [];
@@ -324,9 +380,49 @@ export function parseOpsState(value?: JsonObject): OpsState {
         return [{ id: item.id, title: item.title, role: item.role as "queued" | "active" | "review" | "done" }];
       })
     : [];
+  const effectiveColumns = columns.length ? columns : defaultKanbanColumns();
+  const reviewColumnIds = new Set(effectiveColumns.filter((column) => column.role === "review").map((column) => column.id));
+  const doneColumnId = effectiveColumns.find((column) => column.role === "done")?.id ?? "done";
+  const reviewColumnId = effectiveColumns.find((column) => column.role === "review")?.id ?? "review";
+  const cards = parsedCards.map((card) => {
+    const legacyDoneLane = card.columnId === doneColumnId && card.taskLane && !card.taskLane.closedAt;
+    const cleanupInProgress = Boolean(card.taskLane?.cleanup?.requiresIntegration);
+    const needsMigration = (reviewColumnIds.has(card.columnId) || legacyDoneLane) && !card.report && !cleanupInProgress;
+    if (!needsMigration) return card;
+    const timestamp = card.events?.at(-1)?.timestamp ?? card.completedAt ?? new Date(0).toISOString();
+    const safeToReconcile = Boolean(legacyDoneLane || legacyReviewApproved(card));
+    const needsHuman = card.reviewPolicy === "human" || !safeToReconcile;
+    return {
+      ...card,
+      columnId: legacyDoneLane ? reviewColumnId : card.columnId,
+      report: {
+        status: "reported" as const,
+        summary: card.lastNote || "Legacy task evidence is ready for reconciliation.",
+        evidence: card.lastNote || "Imported from the previous Review workflow.",
+        checks: card.verificationRun?.status === "passed" && card.verificationRun.exitCode === 0
+          ? [`${card.verificationRun.command} — passed`]
+          : [],
+        risks: [],
+        reportedAt: timestamp,
+        agentId: card.assigneeIds[0],
+      },
+      reconciliation: {
+        status: needsHuman ? "needs_human" as const : "queued" as const,
+        attempts: 0,
+        message: card.reviewPolicy === "human"
+          ? "This task explicitly requires human acceptance."
+          : safeToReconcile
+            ? "Migrated approved evidence from the previous Review workflow."
+            : "Legacy review evidence was incomplete or unsuccessful; inspect it before retrying.",
+        updatedAt: timestamp,
+      },
+    };
+  });
+  const liveCardIds = new Set(cards.map((card) => card.id));
+  const archivedCards = parseOpsCards(value.archivedCards).filter((card) => !liveCardIds.has(card.id));
   return {
     version: 2,
-    columns: columns.length ? columns : defaultKanbanColumns(),
+    columns: effectiveColumns,
     cards,
     archivedCards,
     prd: typeof value.prd === "string" ? value.prd : "",
@@ -384,6 +480,7 @@ export function renderKanban(state: OpsState): string {
       output += `\n- [${column.role === "done" ? "x" : " "}] ${card.title.trim()}\n`;
       output += `  <!-- wheeljack:task ${JSON.stringify({
         id: card.id,
+        kind: card.kind ?? "task",
         priority: card.priority,
         assignee: card.assignee,
         parentId: card.parentId,
@@ -419,6 +516,7 @@ export function mergeProjectDocuments(current: OpsState, documents: ProjectDocum
             : card.columnId;
           return {
             ...card,
+            kind: currentCard?.kind ?? "task",
             columnId,
             assigneeIds: currentCard?.assigneeIds ?? [],
             agentStatuses: currentCard?.agentStatuses ?? {},
@@ -426,6 +524,7 @@ export function mergeProjectDocuments(current: OpsState, documents: ProjectDocum
             lastNote: currentCard?.lastNote ?? "",
             agentFiles: currentCard?.agentFiles ?? {},
             dependencyIds: currentCard?.dependencyIds ?? [],
+            dependencyKinds: currentCard?.dependencyKinds ?? {},
             parentId: currentCard?.parentId,
             events: currentCard?.events ?? [],
             startedAt: currentCard?.startedAt,
@@ -440,6 +539,10 @@ export function mergeProjectDocuments(current: OpsState, documents: ProjectDocum
             runProgress: currentCard?.runProgress,
             steeringDirective: currentCard?.steeringDirective,
             approvalAttempt: currentCard?.approvalAttempt,
+            report: currentCard?.report,
+            reconciliation: currentCard?.reconciliation,
+            attemptCount: currentCard?.attemptCount,
+            retryAt: currentCard?.retryAt,
             reviewPolicy: currentCard?.reviewPolicy ?? card.reviewPolicy ?? "agent",
             taskLane: currentCard?.taskLane,
             workerSpecialist: currentCard?.workerSpecialist,
@@ -453,5 +556,79 @@ export function mergeProjectDocuments(current: OpsState, documents: ProjectDocum
     ...board,
     prd: documents.documents.prd.exists ? documents.documents.prd.content : current.prd,
     tdd: documents.documents.tdd.exists ? documents.documents.tdd.content : current.tdd,
+  };
+}
+
+/** Merge editable specifications without treating KANBAN.md as live task state. */
+export function mergeProjectSpecificationDocuments(
+  current: OpsState,
+  documents: ProjectDocuments,
+): OpsState {
+  return {
+    ...current,
+    prd: documents.documents.prd.exists ? documents.documents.prd.content : current.prd,
+    tdd: documents.documents.tdd.exists ? documents.documents.tdd.content : current.tdd,
+  };
+}
+
+function unchanged<T>(value: T, baseline: T | undefined): boolean {
+  return JSON.stringify(value) === JSON.stringify(baseline);
+}
+
+function cardTimestamp(card: OpsCard): string {
+  return card.events?.at(-1)?.timestamp
+    ?? card.reconciliation?.updatedAt
+    ?? card.completedAt
+    ?? card.startedAt
+    ?? "";
+}
+
+/** Three-way merge used when another wheeljack window saved the same Plan. */
+export function mergeConcurrentOpsState(
+  baseline: OpsState,
+  local: OpsState,
+  remote: OpsState,
+): OpsState {
+  const baseCards = new Map(baseline.cards.map((card) => [card.id, card]));
+  const localCards = new Map(local.cards.map((card) => [card.id, card]));
+  const remoteCards = new Map(remote.cards.map((card) => [card.id, card]));
+  const cardIds = new Set([...baseCards.keys(), ...localCards.keys(), ...remoteCards.keys()]);
+  const cards = [...cardIds].flatMap((id): OpsCard[] => {
+    const base = baseCards.get(id);
+    const ours = localCards.get(id);
+    const theirs = remoteCards.get(id);
+    if (!ours && !theirs) return [];
+    if (!ours) return base && unchanged(theirs, base) ? [] : [theirs!];
+    if (!theirs) return base && unchanged(ours, base) ? [] : [ours];
+    if (unchanged(ours, base)) return [theirs];
+    if (unchanged(theirs, base)) return [ours];
+    const newer = cardTimestamp(ours) >= cardTimestamp(theirs) ? ours : theirs;
+    const older = newer === ours ? theirs : ours;
+    const events = [...(older.events ?? []), ...(newer.events ?? [])]
+      .filter((event, index, all) => all.findIndex((candidate) => candidate.id === event.id) === index)
+      .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+    return [{
+      ...older,
+      ...newer,
+      assigneeIds: [...new Set([...(older.assigneeIds ?? []), ...(newer.assigneeIds ?? [])])],
+      agentStatuses: { ...older.agentStatuses, ...newer.agentStatuses },
+      agentFiles: { ...older.agentFiles, ...newer.agentFiles },
+      events,
+    }];
+  });
+  const choose = <T,>(ours: T, theirs: T, base: T): T =>
+    unchanged(ours, base) ? theirs : ours;
+  return {
+    ...remote,
+    ...local,
+    columns: choose(local.columns, remote.columns, baseline.columns),
+    cards,
+    archivedCards: [
+      ...(remote.archivedCards ?? []),
+      ...(local.archivedCards ?? []),
+    ].filter((card, index, all) => all.findIndex((candidate) => candidate.id === card.id) === index),
+    prd: choose(local.prd, remote.prd, baseline.prd),
+    tdd: choose(local.tdd, remote.tdd, baseline.tdd),
+    agentLabels: { ...remote.agentLabels, ...local.agentLabels },
   };
 }

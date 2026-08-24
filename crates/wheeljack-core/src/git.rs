@@ -176,7 +176,9 @@ pub(crate) fn read_worktrees(path: &Path) -> Vec<GitWorktreeDto> {
         .unwrap_or_default();
     let mut worktrees = parse_worktree_list(&output);
     for worktree in &mut worktrees {
-        worktree.dirty = worktree_path_is_dirty(Path::new(&worktree.path));
+        let worktree_path = Path::new(&worktree.path);
+        worktree.dirty =
+            worktree_path.exists() && worktree_path_is_dirty(worktree_path).unwrap_or(true);
     }
     worktrees
 }
@@ -218,10 +220,10 @@ fn parse_worktree_list(output: &str) -> Vec<GitWorktreeDto> {
     worktrees
 }
 
-fn worktree_path_is_dirty(path: &Path) -> bool {
-    read_git_status_porcelain(path, true)
-        .map(|output| !parse_git_status_porcelain(&output).1.is_empty())
-        .unwrap_or(false)
+fn worktree_path_is_dirty(path: &Path) -> Result<bool> {
+    let output = read_git_status_porcelain(path, true)
+        .ok_or_else(|| anyhow!("Could not read git status for worktree {}.", path.display()))?;
+    Ok(!parse_git_status_porcelain(&output).1.is_empty())
 }
 
 pub(crate) fn resolve_git_worktree_context(project_path: &Path) -> Result<(PathBuf, PathBuf)> {
@@ -599,37 +601,316 @@ pub(crate) fn removable_worktree<'a>(
             );
         }
     }
-    if worktree.dirty {
+    if target_path.exists() && worktree.dirty {
         bail!("Worktree has local changes; commit, stash, or clean it before removal.");
     }
     Ok(worktree)
 }
 
-pub(crate) fn run_git_worktree_remove(repo_path: &Path, target_path: &Path) -> Result<()> {
+struct MissingWorktreeRegistration {
+    admin_dir: PathBuf,
+    path: PathBuf,
+    branch: String,
+}
+
+fn find_missing_worktree_registration(
+    repo_path: &Path,
+    target_path: &Path,
+) -> Result<Option<MissingWorktreeRegistration>> {
     let output = git_command()
         .arg("-C")
         .arg(repo_path)
-        .arg("worktree")
-        .arg("remove")
-        .arg(target_path)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
+    if !output.status.success() {
         bail!(
-            "git worktree remove failed: {}",
+            "could not locate Git worktree metadata: {}",
             command_output_detail(&output)
         );
+    }
+    let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let registrations = common_dir.join("worktrees");
+    if !registrations.is_dir() {
+        return Ok(None);
+    }
+    for entry in fs::read_dir(&registrations)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let admin_dir = entry.path();
+        let gitdir = fs::read_to_string(admin_dir.join("gitdir")).unwrap_or_default();
+        let registered_git_file = PathBuf::from(gitdir.trim());
+        let registered_path = registered_git_file
+            .parent()
+            .unwrap_or(&registered_git_file)
+            .to_path_buf();
+        if !paths_equivalent(&registered_path, target_path) {
+            continue;
+        }
+        if admin_dir.parent() != Some(registrations.as_path()) {
+            bail!("refusing to remove worktree metadata outside the Git common directory");
+        }
+        let head = fs::read_to_string(admin_dir.join("HEAD")).unwrap_or_default();
+        let branch = head
+            .trim()
+            .strip_prefix("ref: refs/heads/")
+            .unwrap_or("detached")
+            .to_string();
+        return Ok(Some(MissingWorktreeRegistration {
+            admin_dir,
+            path: registered_path,
+            branch,
+        }));
+    }
+    Ok(None)
+}
+
+pub(crate) fn removable_missing_worktree(
+    repo_path: &Path,
+    target_path: &Path,
+    expected_branch: Option<&str>,
+) -> Result<String> {
+    if paths_equivalent(repo_path, target_path) {
+        bail!("wheeljack will not remove the currently opened project worktree.");
+    }
+    let registration = find_missing_worktree_registration(repo_path, target_path)?
+        .ok_or_else(|| anyhow!("Worktree path is not registered with this repository."))?;
+    if let Some(expected_branch) = expected_branch {
+        if registration.branch != expected_branch {
+            bail!(
+                "Worktree branch mismatch: expected {expected_branch}, found {}.",
+                registration.branch
+            );
+        }
+    }
+    Ok(registration.path.to_string_lossy().to_string())
+}
+
+pub(crate) fn run_git_worktree_remove(repo_path: &Path, target_path: &Path) -> Result<()> {
+    if !target_path.exists() {
+        let registration = find_missing_worktree_registration(repo_path, target_path)?
+            .ok_or_else(|| anyhow!("Missing worktree registration was not found."))?;
+        fs::remove_dir_all(&registration.admin_dir).with_context(|| {
+            format!(
+                "remove stale worktree registration {}",
+                registration.admin_dir.display()
+            )
+        })?;
+        if registration.admin_dir.exists() {
+            bail!("Git kept the missing worktree registered after its metadata was removed.");
+        }
+        return Ok(());
+    }
+    let mut last_detail = String::new();
+    for attempt in 0..5 {
+        let output = git_command()
+            .arg("-C")
+            .arg(repo_path)
+            .arg("worktree")
+            .arg("remove")
+            .arg(target_path)
+            .output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+        last_detail = command_output_detail(&output);
+        if attempt < 4 {
+            thread::sleep(Duration::from_millis(150 * (attempt + 1)));
+        }
+    }
+    bail!("git worktree remove failed after retries: {last_detail}");
+}
+
+pub(crate) fn integrate_git_worktree(
+    target_path: &Path,
+    source_path: &Path,
+    expected_branch: &str,
+    base_commit: &str,
+) -> Result<GitWorktreeIntegrateResult> {
+    let worktrees = read_worktrees(target_path);
+    let source = worktrees
+        .iter()
+        .find(|worktree| paths_equivalent(Path::new(&worktree.path), source_path))
+        .ok_or_else(|| anyhow!("Task worktree is not registered with this repository."))?;
+    if source.detached || source.bare || source.branch != expected_branch {
+        bail!("Task worktree branch does not match the expected integration source.");
+    }
+    let base_commit = validate_full_commit(target_path, base_commit)?;
+    let source_head = read_git_head(source_path)?;
+    let previous_target_head = read_git_head(target_path)?;
+    let result = |status: &str, target_head: String, commits: Vec<String>, message: &str| {
+        GitWorktreeIntegrateResult {
+            status: status.to_string(),
+            branch: source.branch.clone(),
+            base_commit: base_commit.clone(),
+            source_head: source_head.clone(),
+            target_head,
+            previous_target_head: previous_target_head.clone(),
+            commits,
+            message: message.to_string(),
+        }
+    };
+    if worktree_path_is_dirty(source_path)? {
+        return Ok(result(
+            "source_dirty",
+            previous_target_head.clone(),
+            Vec::new(),
+            "The worker must commit or otherwise resolve its remaining task changes.",
+        ));
+    }
+    if worktree_path_is_dirty(target_path)? {
+        return Ok(result(
+            "target_dirty",
+            previous_target_head.clone(),
+            Vec::new(),
+            "The opened project checkout has local changes, so wheeljack preserved the task branch without modifying it.",
+        ));
+    }
+    let source_contains_base = git_command()
+        .arg("-C")
+        .arg(source_path)
+        .args(["merge-base", "--is-ancestor", &base_commit, &source_head])
+        .status()?;
+    if !source_contains_base.success() {
+        bail!("Task branch no longer descends from its recorded base commit.");
+    }
+    let already_integrated = git_command()
+        .arg("-C")
+        .arg(target_path)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &source_head,
+            &previous_target_head,
+        ])
+        .status()?;
+    if already_integrated.success() {
+        return Ok(result(
+            "integrated",
+            previous_target_head.clone(),
+            Vec::new(),
+            "Task commits were already present in the opened project branch.",
+        ));
+    }
+    let commits_output = git_command()
+        .arg("-C")
+        .arg(source_path)
+        .args([
+            "rev-list",
+            "--reverse",
+            &format!("{base_commit}..{source_head}"),
+        ])
+        .output()?;
+    if !commits_output.status.success() {
+        bail!(
+            "Could not enumerate task commits: {}",
+            command_output_detail(&commits_output)
+        );
+    }
+    let source_commits = String::from_utf8_lossy(&commits_output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|commit| !commit.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if source_commits.is_empty() {
+        return Ok(result(
+            "empty",
+            previous_target_head.clone(),
+            source_commits,
+            "The task completed without repository changes.",
+        ));
+    }
+    let cherry_output = git_command()
+        .arg("-C")
+        .arg(source_path)
+        .args(["cherry", &previous_target_head, &source_head, &base_commit])
+        .output()?;
+    if !cherry_output.status.success() {
+        bail!(
+            "Could not compare task patches with the opened project branch: {}",
+            command_output_detail(&cherry_output)
+        );
+    }
+    let pending = String::from_utf8_lossy(&cherry_output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("+ "))
+        .map(str::trim)
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    let commits = source_commits
+        .into_iter()
+        .filter(|commit| pending.contains(commit.as_str()))
+        .collect::<Vec<_>>();
+    if commits.is_empty() {
+        return Ok(result(
+            "integrated",
+            previous_target_head.clone(),
+            commits,
+            "Equivalent task commits were already present in the opened project branch.",
+        ));
+    }
+    let current_target_head = read_git_head(target_path)?;
+    if current_target_head != previous_target_head {
+        return Ok(result(
+            "target_dirty",
+            current_target_head,
+            commits,
+            "The opened project branch changed while reconciliation was preparing. wheeljack preserved the task branch and will retry against the new target.",
+        ));
+    }
+    let mut command = git_command();
+    command.arg("-C").arg(target_path).arg("cherry-pick");
+    for commit in &commits {
+        command.arg(commit);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        let detail = command_output_detail(&output);
+        let _ = git_command()
+            .arg("-C")
+            .arg(target_path)
+            .args(["cherry-pick", "--abort"])
+            .output();
+        return Ok(result(
+            "conflict",
+            read_git_head(target_path).unwrap_or_else(|_| previous_target_head.clone()),
+            commits,
+            &format!("Task integration conflicted and was rolled back: {detail}"),
+        ));
+    }
+    Ok(result(
+        "integrated",
+        read_git_head(target_path)?,
+        commits,
+        "Task commits were integrated into the opened project branch.",
+    ))
+}
+
+fn resolve_path_with_existing_ancestor(path: &Path) -> PathBuf {
+    let mut ancestor = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(mut resolved) = ancestor.canonicalize() {
+            for component in missing.iter().rev() {
+                resolved.push(component);
+            }
+            return resolved;
+        }
+        let Some(component) = ancestor.file_name().map(ToOwned::to_owned) else {
+            return path.to_path_buf();
+        };
+        missing.push(component);
+        if !ancestor.pop() {
+            return path.to_path_buf();
+        }
     }
 }
 
 pub(crate) fn paths_equivalent(left: &Path, right: &Path) -> bool {
-    match (left.canonicalize(), right.canonicalize()) {
-        (Ok(left), Ok(right)) => normalize_command_cwd(left) == normalize_command_cwd(right),
-        _ => {
-            normalize_command_cwd(left.to_path_buf()) == normalize_command_cwd(right.to_path_buf())
-        }
-    }
+    normalize_command_cwd(resolve_path_with_existing_ancestor(left))
+        == normalize_command_cwd(resolve_path_with_existing_ancestor(right))
 }
 
 pub(crate) fn git_command() -> Command {
