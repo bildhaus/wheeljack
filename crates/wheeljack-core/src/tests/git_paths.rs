@@ -73,6 +73,23 @@ fn resolve_workspace_folder_path_trims_and_expands_home_aliases() {
     assert!(resolve_workspace_folder_path("~/definitely/missing/wheeljack/path").is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn paths_equivalent_resolves_symlinked_parent_of_a_missing_path() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_dir("missing-path-alias");
+    let real = root.join("real");
+    let alias = root.join("alias");
+    fs::create_dir_all(&real).unwrap();
+    symlink(&real, &alias).unwrap();
+
+    assert!(paths_equivalent(
+        &real.join("missing-worktree"),
+        &alias.join("missing-worktree")
+    ));
+}
+
 #[test]
 fn git_status_and_worktree_roundtrip() {
     let repo = temp_dir("git-repo");

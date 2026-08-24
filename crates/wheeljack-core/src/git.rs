@@ -888,13 +888,29 @@ pub(crate) fn integrate_git_worktree(
     ))
 }
 
-pub(crate) fn paths_equivalent(left: &Path, right: &Path) -> bool {
-    match (left.canonicalize(), right.canonicalize()) {
-        (Ok(left), Ok(right)) => normalize_command_cwd(left) == normalize_command_cwd(right),
-        _ => {
-            normalize_command_cwd(left.to_path_buf()) == normalize_command_cwd(right.to_path_buf())
+fn resolve_path_with_existing_ancestor(path: &Path) -> PathBuf {
+    let mut ancestor = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(mut resolved) = ancestor.canonicalize() {
+            for component in missing.iter().rev() {
+                resolved.push(component);
+            }
+            return resolved;
+        }
+        let Some(component) = ancestor.file_name().map(ToOwned::to_owned) else {
+            return path.to_path_buf();
+        };
+        missing.push(component);
+        if !ancestor.pop() {
+            return path.to_path_buf();
         }
     }
+}
+
+pub(crate) fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    normalize_command_cwd(resolve_path_with_existing_ancestor(left))
+        == normalize_command_cwd(resolve_path_with_existing_ancestor(right))
 }
 
 pub(crate) fn git_command() -> Command {
