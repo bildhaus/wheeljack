@@ -176,7 +176,9 @@ pub(crate) fn read_worktrees(path: &Path) -> Vec<GitWorktreeDto> {
         .unwrap_or_default();
     let mut worktrees = parse_worktree_list(&output);
     for worktree in &mut worktrees {
-        worktree.dirty = worktree_path_is_dirty(Path::new(&worktree.path));
+        let worktree_path = Path::new(&worktree.path);
+        worktree.dirty =
+            worktree_path.exists() && worktree_path_is_dirty(worktree_path).unwrap_or(true);
     }
     worktrees
 }
@@ -218,10 +220,10 @@ fn parse_worktree_list(output: &str) -> Vec<GitWorktreeDto> {
     worktrees
 }
 
-fn worktree_path_is_dirty(path: &Path) -> bool {
-    read_git_status_porcelain(path, true)
-        .map(|output| !parse_git_status_porcelain(&output).1.is_empty())
-        .unwrap_or(false)
+fn worktree_path_is_dirty(path: &Path) -> Result<bool> {
+    let output = read_git_status_porcelain(path, true)
+        .ok_or_else(|| anyhow!("Could not read git status for worktree {}.", path.display()))?;
+    Ok(!parse_git_status_porcelain(&output).1.is_empty())
 }
 
 pub(crate) fn resolve_git_worktree_context(project_path: &Path) -> Result<(PathBuf, PathBuf)> {
@@ -599,13 +601,33 @@ pub(crate) fn removable_worktree<'a>(
             );
         }
     }
-    if worktree.dirty {
+    if target_path.exists() && worktree.dirty {
         bail!("Worktree has local changes; commit, stash, or clean it before removal.");
     }
     Ok(worktree)
 }
 
 pub(crate) fn run_git_worktree_remove(repo_path: &Path, target_path: &Path) -> Result<()> {
+    if !target_path.exists() {
+        let output = git_command()
+            .arg("-C")
+            .arg(repo_path)
+            .args(["worktree", "prune", "--expire", "now"])
+            .output()?;
+        if !output.status.success() {
+            bail!(
+                "git worktree prune failed: {}",
+                command_output_detail(&output)
+            );
+        }
+        if read_worktrees(repo_path)
+            .iter()
+            .any(|worktree| paths_equivalent(Path::new(&worktree.path), target_path))
+        {
+            bail!("Git kept the missing worktree registered after pruning it.");
+        }
+        return Ok(());
+    }
     let mut last_detail = String::new();
     for attempt in 0..5 {
         let output = git_command()
@@ -655,7 +677,7 @@ pub(crate) fn integrate_git_worktree(
             message: message.to_string(),
         }
     };
-    if worktree_path_is_dirty(source_path) {
+    if worktree_path_is_dirty(source_path)? {
         return Ok(result(
             "source_dirty",
             previous_target_head.clone(),
@@ -663,7 +685,7 @@ pub(crate) fn integrate_git_worktree(
             "The worker must commit or otherwise resolve its remaining task changes.",
         ));
     }
-    if worktree_path_is_dirty(target_path) {
+    if worktree_path_is_dirty(target_path)? {
         return Ok(result(
             "target_dirty",
             previous_target_head.clone(),

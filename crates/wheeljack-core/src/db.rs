@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 17;
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 18;
 type Migration = (i32, fn(&Connection) -> Result<()>);
 const SQLITE_WRITE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(25),
@@ -261,7 +261,8 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
         (14, add_usage_ledger),
         (15, add_bot_profiles),
         (16, migrate_interim_bot_profiles),
-        (LATEST_SCHEMA_VERSION, add_session_node_title),
+        (17, add_session_node_title),
+        (LATEST_SCHEMA_VERSION, add_project_ops_state),
     ];
     for (version, migration) in migrations {
         if current_version >= *version {
@@ -684,6 +685,40 @@ fn add_ops_runtime(connection: &Connection) -> Result<()> {
             "#,
         )?;
     }
+    Ok(())
+}
+
+fn add_project_ops_state(connection: &Connection) -> Result<()> {
+    let source_tables_exist: bool = connection.query_row(
+        "SELECT
+           EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects')
+           AND EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ops_states')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !source_tables_exist {
+        return Ok(());
+    }
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS ops_project_states (
+          project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+          revision INTEGER NOT NULL,
+          state_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        INSERT OR IGNORE INTO ops_project_states (project_id, revision, state_json, updated_at)
+        SELECT current.project_id, current.revision, current.state_json, current.updated_at
+        FROM ops_states current
+        WHERE current.rowid = (
+          SELECT candidate.rowid FROM ops_states candidate
+          WHERE candidate.project_id = current.project_id
+          ORDER BY candidate.updated_at DESC, candidate.revision DESC, candidate.rowid DESC
+          LIMIT 1
+        );
+        "#,
+    )?;
     Ok(())
 }
 

@@ -82,6 +82,10 @@ const waitFor = async (expression, description, timeoutMilliseconds = 60_000) =>
   const body = await evaluate("document.body.innerText");
   throw new Error(`Timed out waiting for ${description}.\nVisible text: ${body}`);
 };
+const showRunGraph = async () => {
+  await evaluate(`(()=>{if(document.querySelector('.wj-floor-run-graph .wj-run-graph'))return true;const summary=document.querySelector('.wj-floor-run-graph-summary');summary?.click();return Boolean(summary)})()`);
+  await waitFor(`Boolean(document.querySelector('.wj-floor-run-graph .wj-run-graph')) && document.querySelector('.wj-run-graph-range button[aria-pressed="true"]')?.textContent?.trim()==="40m"`, "expanded Run Graph at the default range");
+};
 const sendTerminalCommand = async (command) => {
   const sent = await evaluate(`(()=>{const pane=[...document.querySelectorAll("[data-pane-id]")].find(node=>node.querySelector(".pane-status.running")&&node.querySelector('textarea[aria-label="Terminal input"]'));const input=pane?.querySelector('textarea[aria-label="Terminal input"]');if(!input)return false;const transfer=new DataTransfer();transfer.setData("text/plain",${JSON.stringify(command)});input.focus();input.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:transfer}));input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",code:"Enter",bubbles:true}));return true})()`);
   if (!sent) throw new Error(`No running terminal accepted command: ${command}`);
@@ -295,14 +299,18 @@ if (!exerciseOnboarding) {
   await coreCall("settings_import", { settings: { desktopOnboardingVersion: 1 } });
 }
 await evaluate("location.reload(); true");
-await waitFor(`document.body?.innerText.includes(${JSON.stringify(projectPath)})`, "smoke project hydration", 120_000);
 if (exerciseOnboarding) {
   await waitFor(
     `Boolean(document.querySelector('#onboarding-prompt')) && [...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Start first agent" && !node.disabled)`,
     "resumed first-agent onboarding step",
+    120_000,
   );
 } else {
-  await waitFor("Boolean(document.querySelector('.wj-terminal-page'))", "active-project terminal surface");
+  await waitFor(
+    `document.querySelector('.wj-title-name')?.textContent?.trim()===${JSON.stringify(openedProject.name)} && Boolean(document.querySelector('.wj-terminal-page'))`,
+    "active-project terminal surface",
+    120_000,
+  );
 }
 if (dataPanesOnly) {
   await waitFor(
@@ -379,7 +387,7 @@ if (floorOnly) {
   await waitFor(`Boolean(document.querySelector(".wj-floor-operator")) && Boolean(document.querySelector(".wj-floor-needs")) && Boolean(document.querySelector(".wj-floor-live")) && Boolean(document.querySelector(".wj-floor-ready")) && Boolean(document.querySelector(".wj-floor-activity"))`, "operator cockpit regions");
   await waitFor(`Boolean(document.querySelector(".wj-floor-scheduler-intent"))`, "truthful scheduler intent");
   await waitFor(`Boolean(document.querySelector('.wj-floor-agent-matrix, .wj-floor-agent-empty'))`, "stable agent matrix state");
-  await waitFor(`Boolean(document.querySelector('.wj-floor-run-graph .wj-run-graph')) && document.querySelector('.wj-run-graph-range button[aria-pressed="true"]')?.textContent?.trim()==="40m"`, "always-visible Run Graph at the default range");
+  await showRunGraph();
   await cdp("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   await waitFor(`(()=>{const floor=document.querySelector('.wj-floor');return floor&&floor.scrollHeight<=floor.clientHeight+1})()`, "wide Floor cockpit without page scrolling");
   if (floorWideScreenshotPath) {
@@ -739,7 +747,7 @@ await waitFor(`Boolean(document.querySelector(".wj-floor"))`, "default Ops Floor
 await waitFor(`Boolean(document.querySelector(".wj-floor-operator")) && Boolean(document.querySelector(".wj-floor-needs")) && Boolean(document.querySelector(".wj-floor-live")) && Boolean(document.querySelector(".wj-floor-ready")) && Boolean(document.querySelector(".wj-floor-activity"))`, "operator cockpit regions");
 await waitFor(`Boolean(document.querySelector('.wj-floor-agent-matrix, .wj-floor-agent-empty'))`, "stable agent matrix state");
 await waitFor(`(()=>{const floor=document.querySelector('.wj-floor');return floor&&floor.scrollHeight<=floor.clientHeight+1})()`, "wide Floor cockpit without page scrolling");
-await waitFor(`Boolean(document.querySelector('.wj-floor-run-graph .wj-run-graph')) && document.querySelector('.wj-run-graph-range button[aria-pressed="true"]')?.textContent?.trim()==="40m"`, "always-visible Run Graph at the default range");
+await showRunGraph();
 for (const range of ["10m", "4h", "40m"]) {
   await evaluate(`(()=>{const button=[...document.querySelectorAll('.wj-run-graph-range button')].find(node=>node.textContent?.trim()===${JSON.stringify(range)});button?.focus();return Boolean(button)})()`);
   await waitFor(`document.activeElement?.textContent?.trim()===${JSON.stringify(range)}`, `focused Run Graph ${range} range`);

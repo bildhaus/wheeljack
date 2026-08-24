@@ -15,6 +15,15 @@ pub(crate) struct OpsStateRecord {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectOpsStateRecord {
+    pub(crate) project_id: String,
+    pub(crate) revision: u64,
+    pub(crate) state: Value,
+    pub(crate) updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct OpsSchedulerConfig {
     pub(crate) project_id: String,
     pub(crate) canvas_id: String,
@@ -80,6 +89,87 @@ pub(crate) fn save_ops_state(
     retry_sqlite_write(|| save_ops_state_once(db, canvas_id, project_id, state, expected_revision))
 }
 
+pub(crate) fn load_project_ops_state(
+    db: &Connection,
+    project_id: &str,
+) -> Result<Option<ProjectOpsStateRecord>> {
+    db.query_row(
+        "SELECT project_id, revision, state_json, updated_at
+         FROM ops_project_states WHERE project_id = ?1",
+        params![project_id],
+        |row| {
+            let state_json: String = row.get(2)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                state_json,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    )
+    .optional()?
+    .map(|(project_id, revision, state_json, updated_at)| {
+        Ok(ProjectOpsStateRecord {
+            project_id,
+            revision,
+            state: serde_json::from_str(&state_json)?,
+            updated_at,
+        })
+    })
+    .transpose()
+}
+
+pub(crate) fn save_project_ops_state(
+    db: &Connection,
+    project_id: &str,
+    state: &Value,
+    expected_revision: Option<u64>,
+) -> Result<ProjectOpsStateRecord> {
+    retry_sqlite_write(|| {
+        let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+        let project_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+            params![project_id],
+            |row| row.get(0),
+        )?;
+        if !project_exists {
+            bail!("project was not found");
+        }
+        let current_revision = tx
+            .query_row(
+                "SELECT revision FROM ops_project_states WHERE project_id = ?1",
+                params![project_id],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if expected_revision.is_some_and(|expected| expected != current_revision) {
+            bail!(
+                "ops state revision conflict: expected {}, current {current_revision}",
+                expected_revision.unwrap_or_default()
+            );
+        }
+        let revision = current_revision + 1;
+        let updated_at = now();
+        tx.execute(
+            "INSERT INTO ops_project_states (project_id, revision, state_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id) DO UPDATE SET
+               revision = excluded.revision,
+               state_json = excluded.state_json,
+               updated_at = excluded.updated_at",
+            params![project_id, revision, state.to_string(), updated_at],
+        )?;
+        tx.commit()?;
+        Ok(ProjectOpsStateRecord {
+            project_id: project_id.to_string(),
+            revision,
+            state: state.clone(),
+            updated_at,
+        })
+    })
+}
+
 fn save_ops_state_once(
     db: &Connection,
     canvas_id: &str,
@@ -127,6 +217,15 @@ fn save_ops_state_once(
             state.to_string(),
             updated_at
         ],
+    )?;
+    tx.execute(
+        "INSERT INTO ops_project_states (project_id, revision, state_json, updated_at)
+         VALUES (?1, 1, ?2, ?3)
+         ON CONFLICT(project_id) DO UPDATE SET
+           revision = ops_project_states.revision + 1,
+           state_json = excluded.state_json,
+           updated_at = excluded.updated_at",
+        params![project_id, state.to_string(), updated_at],
     )?;
     tx.commit()?;
     Ok(OpsStateRecord {
@@ -176,6 +275,13 @@ pub(crate) fn configure_ops_scheduler(
              SET state = 'released', finished_at = ?1
              WHERE project_id = ?2 AND state = 'pending'",
             params![updated_at, project_id],
+        )?;
+    } else {
+        db.execute(
+            "UPDATE ops_task_leases
+             SET state = 'released', finished_at = ?1
+             WHERE project_id = ?2 AND state = 'pending' AND canvas_id <> ?3",
+            params![updated_at, project_id, canvas_id],
         )?;
     }
     Ok(OpsSchedulerConfig {
@@ -243,6 +349,11 @@ pub(crate) fn claim_ops_lease(
     }
     let _ = fill_project_leases(db, project_id)?;
     let tx = db.unchecked_transaction()?;
+    let Some(record) = load_project_ops_state(&tx, project_id)? else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    release_ineligible_pending_leases(&tx, project_id, &record.state)?;
     let candidate = tx
         .query_row(
             "SELECT id FROM ops_task_leases
@@ -316,10 +427,10 @@ fn fill_project_leases(db: &Connection, project_id: &str) -> Result<Vec<OpsTaskL
     if !config.enabled || config.paused {
         return Ok(Vec::new());
     }
-    let Some(record) = load_ops_state(db, &config.canvas_id)? else {
+    let Some(record) = load_project_ops_state(db, project_id)? else {
         return Ok(Vec::new());
     };
-    release_missing_pending_leases(db, project_id, &record.state)?;
+    release_ineligible_pending_leases(db, project_id, &record.state)?;
     let active_count = db.query_row(
         "SELECT COUNT(*) FROM ops_task_leases
          WHERE project_id = ?1 AND state IN ('pending', 'claimed') AND expires_at > ?2",
@@ -365,15 +476,13 @@ fn fill_project_leases(db: &Connection, project_id: &str) -> Result<Vec<OpsTaskL
     Ok(created)
 }
 
-fn release_missing_pending_leases(db: &Connection, project_id: &str, state: &Value) -> Result<()> {
-    let task_ids = state
-        .get("cards")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|card| card.get("id").and_then(Value::as_str).map(str::to_string))
-        .collect::<HashSet<_>>();
-    let missing_lease_ids = {
+fn release_ineligible_pending_leases(
+    db: &Connection,
+    project_id: &str,
+    state: &Value,
+) -> Result<()> {
+    let eligible = eligible_task_ids(state);
+    let stale_lease_ids = {
         let mut statement = db.prepare(
             "SELECT id, task_id FROM ops_task_leases
              WHERE project_id = ?1 AND state = 'pending'",
@@ -385,14 +494,14 @@ fn release_missing_pending_leases(db: &Connection, project_id: &str, state: &Val
             .collect::<rusqlite::Result<Vec<_>>>()?;
         leases
             .into_iter()
-            .filter_map(|(lease_id, task_id)| (!task_ids.contains(&task_id)).then_some(lease_id))
+            .filter_map(|(lease_id, task_id)| (!eligible.contains(&task_id)).then_some(lease_id))
             .collect::<Vec<_>>()
     };
-    if missing_lease_ids.is_empty() {
+    if stale_lease_ids.is_empty() {
         return Ok(());
     }
     let finished_at = now();
-    for lease_id in missing_lease_ids {
+    for lease_id in stale_lease_ids {
         db.execute(
             "UPDATE ops_task_leases SET state = 'released', finished_at = ?1
              WHERE id = ?2 AND state = 'pending'",
@@ -402,7 +511,7 @@ fn release_missing_pending_leases(db: &Connection, project_id: &str, state: &Val
     Ok(())
 }
 
-fn next_task_id(db: &Connection, project_id: &str, state: &Value) -> Result<Option<String>> {
+fn eligible_task_ids(state: &Value) -> HashSet<String> {
     let current_time = now();
     let columns = state
         .get("columns")
@@ -424,7 +533,7 @@ fn next_task_id(db: &Connection, project_id: &str, state: &Value) -> Result<Opti
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let done_ids = cards
+    let mut done_ids = cards
         .iter()
         .filter(|card| {
             card.get("columnId")
@@ -433,48 +542,75 @@ fn next_task_id(db: &Connection, project_id: &str, state: &Value) -> Result<Opti
         })
         .filter_map(|card| card.get("id").and_then(Value::as_str).map(str::to_string))
         .collect::<HashSet<_>>();
+    done_ids.extend(
+        state
+            .get("archivedCards")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|card| card.get("id").and_then(Value::as_str).map(str::to_string)),
+    );
+    cards
+        .into_iter()
+        .filter_map(|card| {
+            let task_id = card.get("id").and_then(Value::as_str)?;
+            if !card
+                .get("columnId")
+                .and_then(Value::as_str)
+                .is_some_and(|column| queued.contains(column))
+                || card.get("paused").and_then(Value::as_bool) == Some(true)
+                || card
+                    .get("assigneeIds")
+                    .and_then(Value::as_array)
+                    .is_some_and(|assignees| !assignees.is_empty())
+                || card
+                    .pointer("/taskLane/closedAt")
+                    .and_then(Value::as_str)
+                    .is_some()
+                || card
+                    .get("retryAt")
+                    .and_then(Value::as_str)
+                    .is_some_and(|retry_at| retry_at > current_time.as_str())
+            {
+                return None;
+            }
+            let dependency_kinds = card.get("dependencyKinds").and_then(Value::as_object);
+            let dependencies_ready = card
+                .get("dependencyIds")
+                .and_then(Value::as_array)
+                .map(|dependencies| {
+                    dependencies
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .all(|dependency| {
+                            dependency_kinds
+                                .and_then(|kinds| kinds.get(dependency))
+                                .and_then(Value::as_str)
+                                == Some("soft")
+                                || done_ids.contains(dependency)
+                        })
+                })
+                .unwrap_or(true);
+            if !dependencies_ready {
+                return None;
+            }
+            Some(task_id.to_string())
+        })
+        .collect()
+}
+
+fn next_task_id(db: &Connection, project_id: &str, state: &Value) -> Result<Option<String>> {
+    let eligible = eligible_task_ids(state);
+    let cards = state
+        .get("cards")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     for card in cards {
         let Some(task_id) = card.get("id").and_then(Value::as_str) else {
             continue;
         };
-        if !card
-            .get("columnId")
-            .and_then(Value::as_str)
-            .is_some_and(|column| queued.contains(column))
-            || card.get("paused").and_then(Value::as_bool) == Some(true)
-            || card
-                .get("assigneeIds")
-                .and_then(Value::as_array)
-                .is_some_and(|assignees| !assignees.is_empty())
-            || card
-                .pointer("/taskLane/closedAt")
-                .and_then(Value::as_str)
-                .is_some()
-            || card
-                .get("retryAt")
-                .and_then(Value::as_str)
-                .is_some_and(|retry_at| retry_at > current_time.as_str())
-        {
-            continue;
-        }
-        let dependency_kinds = card.get("dependencyKinds").and_then(Value::as_object);
-        let dependencies_ready = card
-            .get("dependencyIds")
-            .and_then(Value::as_array)
-            .map(|dependencies| {
-                dependencies
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .all(|dependency| {
-                        dependency_kinds
-                            .and_then(|kinds| kinds.get(dependency))
-                            .and_then(Value::as_str)
-                            == Some("soft")
-                            || done_ids.contains(dependency)
-                    })
-            })
-            .unwrap_or(true);
-        if !dependencies_ready {
+        if !eligible.contains(task_id) {
             continue;
         }
         let leased: bool = db.query_row(

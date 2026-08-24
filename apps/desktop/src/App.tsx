@@ -231,7 +231,7 @@ import type {
   OpsReviewEvidence,
   OpsState,
   OpsSteeringDirective,
-  OpsStateRecord,
+  ProjectOpsStateRecord,
   OpsSchedulerConfig,
   OpsTaskLease,
   OpsTaskEvent,
@@ -544,7 +544,7 @@ export function App() {
   const opsTimerRef = useRef<number | undefined>(undefined);
   const settingsTimerRef = useRef<number | undefined>(undefined);
   const opsNodeRef = useRef<CanvasNode | undefined>(undefined);
-  const opsRevisionRef = useRef(0);
+  const opsRevisionByProjectRef = useRef(new Map<string, number>());
   const projectDocumentsRef = useRef<ProjectDocuments | undefined>(undefined);
   const documentWritePendingRef = useRef(false);
   const documentWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -1297,6 +1297,9 @@ export function App() {
     setBusy(true);
     setError("");
     try {
+      if (projectRef.current && projectRef.current.id !== nextProject.id) {
+        await flushPendingSavesRef.current();
+      }
       let projectCanvases = await callCore<Canvas[]>("canvas_list_project", {
         projectId: nextProject.id,
       });
@@ -1332,6 +1335,9 @@ export function App() {
   };
 
   const activateCanvas = async (canvasSummary: Canvas) => {
+    if (canvasRef.current && canvasRef.current.id !== canvasSummary.id) {
+      await flushPendingSavesRef.current();
+    }
     await flushAgentCompositions();
     await Promise.all(Object.values(currentRuntimes()).flatMap((runtime) =>
       runtime.terminalSessionId
@@ -1345,7 +1351,7 @@ export function App() {
     const visibleNodes = nextCanvas.nodes.filter((node) => node.kind !== "ops_state");
     const opsNode = nextCanvas.nodes.find((node) => node.kind === "ops_state");
     const [canonicalOps, schedulerConfig] = await Promise.all([
-      callCore<OpsStateRecord | null>("ops_state_get", { canvasId: nextCanvas.id }).catch(() => null),
+      callCore<ProjectOpsStateRecord | null>("ops_project_state_get", { projectId: nextCanvas.projectId }).catch(() => null),
       callCore<OpsSchedulerConfig | null>("ops_scheduler_status", { projectId: nextCanvas.projectId }).catch(() => null),
     ]);
     const activeSchedulerConfig = schedulerConfig?.enabled && schedulerConfig.canvasId !== nextCanvas.id
@@ -1358,7 +1364,7 @@ export function App() {
           adapterId: schedulerConfig.adapterId,
         }).catch(() => schedulerConfig)
       : schedulerConfig;
-    opsRevisionRef.current = canonicalOps?.revision ?? 0;
+    opsRevisionByProjectRef.current.set(nextCanvas.projectId, canonicalOps?.revision ?? 0);
     setAutonomousPickup(Boolean(activeSchedulerConfig?.enabled && !activeSchedulerConfig.paused));
     setAutonomousConcurrency(activeSchedulerConfig?.concurrencyLimit ?? 4);
     const storedOps = parseOpsState(canonicalOps ? canonicalOps.state as unknown as JsonObject : opsNode?.data);
@@ -3785,13 +3791,12 @@ export function App() {
     _activeOpsNode?: CanvasNode,
   ) => {
     try {
-      const saved = await callCore<OpsStateRecord>("ops_state_save", {
-        canvasId: activeCanvas.id,
+      const saved = await callCore<ProjectOpsStateRecord>("ops_project_state_save", {
         projectId: activeProject.id,
         state: next,
-        expectedRevision: opsRevisionRef.current,
+        expectedRevision: opsRevisionByProjectRef.current.get(activeProject.id) ?? 0,
       });
-      opsRevisionRef.current = saved.revision;
+      opsRevisionByProjectRef.current.set(activeProject.id, saved.revision);
     } catch (cause) {
       throw new Error(`Could not save task state: ${message(cause)}`);
     }
@@ -3886,6 +3891,7 @@ export function App() {
     const activeCanvas = canvasRef.current;
     const activeProject = projectRef.current;
     if (!activeCanvas || !activeProject) throw new Error("Open a project before starting a task agent.");
+    if (activeCanvas.projectId !== activeProject.id) throw new Error("The active task workspace no longer belongs to the opened project.");
     activatePlan(activeCanvas.id);
     window.clearTimeout(opsTimerRef.current);
     const next = change(opsStateRef.current);
@@ -5171,15 +5177,25 @@ export function App() {
     detail?: string,
     retryAt?: string,
     attempts?: number,
+    requiresIntegration?: boolean,
   ) => {
     await persistOpsImmediately((current) => ({
       ...current,
       cards: current.cards.map((card) => card.id === cardId && card.taskLane?.cleanup
         ? {
             ...card,
+            report: requiresIntegration === true ? undefined : card.report,
+            reconciliation: requiresIntegration === true ? undefined : card.reconciliation,
             taskLane: {
               ...card.taskLane,
-              cleanup: { ...card.taskLane.cleanup, status, message: detail, retryAt, attempts: attempts ?? card.taskLane.cleanup.attempts },
+              cleanup: {
+                ...card.taskLane.cleanup,
+                status,
+                message: detail,
+                retryAt,
+                attempts: attempts ?? card.taskLane.cleanup.attempts,
+                requiresIntegration: requiresIntegration ?? card.taskLane.cleanup.requiresIntegration,
+              },
             },
             lastNote: detail ?? card.lastNote,
           }
@@ -5199,12 +5215,12 @@ export function App() {
     await setTaskLaneCleanupStatus(cardId, "queued", detail, retryAt, attempts);
   };
 
-  const finalizeTaskLaneCleanup = async (card: OpsCard, registered: boolean) => {
+  const finalizeTaskLaneCleanup = async (card: OpsCard, registered: boolean, projectId: string) => {
     const currentCard = opsStateRef.current.cards.find((candidate) => candidate.id === card.id);
     const lane = currentCard?.taskLane;
     const cleanup = lane?.cleanup;
     const activeProject = projectRef.current;
-    if (!currentCard || !lane || lane.closedAt || !cleanup || !activeProject) return;
+    if (!currentCard || !lane || lane.closedAt || !cleanup || activeProject?.id !== projectId) return;
     let nextGit: GitStatus | undefined;
     if (registered) {
       const removed = await callCore<{ status: GitStatus }>("git_worktree_remove", {
@@ -5216,6 +5232,7 @@ export function App() {
       });
       nextGit = removed.status;
     }
+    if (projectRef.current?.id !== projectId) return;
     const timestamp = new Date().toISOString();
     const note = registered
       ? `Removed task worktree; branch ${lane.branch} was preserved.`
@@ -5300,16 +5317,50 @@ export function App() {
         return;
       }
       if ((!registered || !registered.dirty) && participants.length === 0) {
-        await finalizeTaskLaneCleanup(latest, Boolean(registered));
+        const requiresIntegration = latest.taskLane.cleanup.action === "remove" && latest.taskLane.cleanup.requiresIntegration;
+        if (requiresIntegration && registered) {
+          if (latest.reconciliation?.status === "needs_human") return;
+          if (!latest.report) {
+            const timestamp = new Date().toISOString();
+            await persistOpsImmediately((current) => ({
+              ...current,
+              cards: current.cards.map((candidate) => candidate.id === latest.id
+                ? appendOpsTaskEvent({
+                    ...candidate,
+                    columnId: columnIdForRole(current, "review"),
+                    report: {
+                      status: "reported",
+                      summary: "Task workspace cleanup finished.",
+                      evidence: "The cleanup agent exited and the task worktree is clean; repository reconciliation is pending.",
+                      checks: [],
+                      risks: [],
+                      reportedAt: timestamp,
+                    },
+                    reconciliation: { status: "queued", attempts: candidate.reconciliation?.attempts ?? 0, message: "Clean task commits are ready for automatic reconciliation.", updatedAt: timestamp },
+                  }, {
+                    id: `automatic:cleanup-report:${latest.id}:${timestamp}`,
+                    kind: "handoff",
+                    timestamp,
+                    message: "Recovered cleanup completion from the clean task worktree.",
+                  })
+                : candidate),
+            }));
+            return;
+          }
+          if (latest.reconciliation?.status !== "integrated") return;
+        }
+        await finalizeTaskLaneCleanup(latest, Boolean(registered), activeProject.id);
         return;
       }
       if (latest.taskLane.cleanup.status === "queued" && participants.length > 0) {
         queueOpsSteering(latest, taskWorktreeCleanupPrompt(latest));
-        await setTaskLaneCleanupStatus(latest.id, "resolving");
+        const retryAt = new Date(Date.now() + 5_000).toISOString();
+        await setTaskLaneCleanupStatus(latest.id, "resolving", undefined, retryAt, undefined, latest.taskLane.cleanup.action === "remove");
         return;
       }
       if (latest.taskLane.cleanup.status === "queued" && registered?.dirty && cleanupRuntimeCount < Math.max(1, autonomousConcurrency)) {
-        await setTaskLaneCleanupStatus(latest.id, "resolving");
+        const retryAt = new Date(Date.now() + 5_000).toISOString();
+        await setTaskLaneCleanupStatus(latest.id, "resolving", undefined, retryAt, undefined, latest.taskLane.cleanup.action === "remove");
         const resolvingCard = opsStateRef.current.cards.find((card) => card.id === latest.id) ?? latest;
         const started = await startAgentForOpsTask(resolvingCard, taskWorktreeCleanupPrompt(resolvingCard), "worker", undefined, undefined, true);
         if (!started) await retryTaskLaneCleanup(latest.id, "No task agent was available to resolve this dirty worktree.");
@@ -5350,6 +5401,10 @@ export function App() {
     const activeProject = projectRef.current;
     const card = opsStateRef.current.cards.find((candidate) => candidate.id === reportedCard.id);
     if (!activeProject || !card?.report || card.reviewPolicy === "human") return;
+    const projectId = activeProject.id;
+    const assertActiveProject = () => {
+      if (projectRef.current?.id !== projectId) throw new Error("Reconciliation changed projects before it finished; the durable task will recover on its next activation.");
+    };
     const attempts = (card.reconciliation?.attempts ?? 0) + 1;
     const runningAt = new Date().toISOString();
     await persistOpsImmediately((current) => ({
@@ -5358,7 +5413,8 @@ export function App() {
         ? { ...candidate, reconciliation: { status: "running", attempts, message: "Integrating worker evidence…", updatedAt: runningAt } }
         : candidate),
     }));
-    const complete = async (messageText: string, targetHead?: string) => {
+    const complete = async (messageText: string, sourceHead?: string, targetHead?: string) => {
+      assertActiveProject();
       await persistOpsImmediately((current) => {
         const approved = applyOpsOrchestration(current, card.id, "approve");
         const timestamp = new Date().toISOString();
@@ -5367,7 +5423,7 @@ export function App() {
           cards: approved.cards.map((candidate) => candidate.id === card.id
             ? appendOpsTaskEvent({
                 ...candidate,
-                reconciliation: { status: "integrated", attempts, message: messageText, updatedAt: timestamp, targetHead },
+                reconciliation: { status: "integrated", attempts, message: messageText, updatedAt: timestamp, sourceHead, targetHead },
                 attemptCount: 0,
                 retryAt: undefined,
               }, {
@@ -5380,10 +5436,18 @@ export function App() {
         };
       });
     };
-    if (!card.taskLane || card.taskLane.closedAt) {
-      await complete(card.taskLane?.closedAt
-        ? "Task workspace was already reconciled and closed."
-        : "Shared-checkout worker evidence was accepted without an additional verification agent.");
+    if (!card.taskLane) {
+      await complete("Shared-checkout worker evidence was accepted without an additional verification agent.");
+      return;
+    }
+    if (card.taskLane.closedAt) {
+      const timestamp = new Date().toISOString();
+      await persistOpsImmediately((current) => ({
+        ...current,
+        cards: current.cards.map((candidate) => candidate.id === card.id
+          ? { ...candidate, reconciliation: { status: "needs_human", attempts, reason: "closed_before_integration", message: `Task branch ${card.taskLane!.branch} was closed before its latest report could be integrated. The branch was preserved.`, updatedAt: timestamp } }
+          : candidate),
+      }));
       return;
     }
     const result = await callCore<GitWorktreeIntegrate>("git_worktree_integrate", {
@@ -5395,17 +5459,22 @@ export function App() {
       },
     });
     if (result.status === "integrated" || result.status === "empty") {
-      await complete(result.message, result.targetHead);
+      await complete(result.message, result.sourceHead, result.targetHead);
       return;
     }
-    const recordReconciliation = async (status: "retrying" | "needs_human", detail: string) => {
+    const recordReconciliation = async (
+      status: "awaiting_repair" | "retrying" | "needs_human",
+      detail: string,
+      reason: NonNullable<OpsCard["reconciliation"]>["reason"],
+    ) => {
+      assertActiveProject();
       const timestamp = new Date().toISOString();
       await persistOpsImmediately((current) => ({
         ...current,
         cards: current.cards.map((candidate) => candidate.id === card.id
           ? appendOpsTaskEvent({
               ...candidate,
-              reconciliation: { status, attempts, message: detail, updatedAt: timestamp },
+              reconciliation: { status, attempts, reason, message: detail, updatedAt: timestamp },
               lastNote: detail,
             }, {
               id: `reconcile:${status}:${card.id}:${Date.now()}`,
@@ -5416,11 +5485,12 @@ export function App() {
           : candidate),
       }));
     };
+    const reason = result.status === "source_dirty" ? "source_dirty" : result.status === "target_dirty" ? "target_dirty" : "conflict";
     if (result.status === "target_dirty" || attempts >= 3) {
-      await recordReconciliation("needs_human", result.message);
+      await recordReconciliation("needs_human", result.message, reason);
       return;
     }
-    await recordReconciliation("retrying", result.message);
+    await recordReconciliation("awaiting_repair", result.message, reason);
     const repairPrompt = result.status === "source_dirty"
       ? `Reconciliation found uncommitted task changes. Inspect every staged, unstaged, and untracked file, preserve valuable work in commits on ${card.taskLane.branch}, rerun the relevant checks, and report completed again. Do not discard changes merely to clean the tree.`
       : `Reconciliation rolled back a Git conflict while integrating ${card.taskLane.branch}. Rebase the task branch onto the current opened project branch, resolve the conflict autonomously, rerun the relevant checks, commit the resolution, and report completed again.`;
@@ -5443,17 +5513,20 @@ export function App() {
           && Date.parse(card.reconciliation.updatedAt) + Math.min(30_000, 1_000 * 2 ** Math.max(0, (card.reconciliation.attempts ?? 1) - 1)) <= now))
       && !reconciliationCardIdsRef.current.has(card.id));
     if (!candidate) return;
+    const projectId = projectRef.current?.id;
+    if (!projectId) return;
     reconciliationCardIdsRef.current.add(candidate.id);
     const queued = reconciliationQueueRef.current.catch(() => undefined).then(() => reconcileReportedTask(candidate));
     reconciliationQueueRef.current = queued;
     void queued.catch((cause) => {
+      if (projectRef.current?.id !== projectId) return;
       const detail = message(cause);
       const attempts = (candidate.reconciliation?.attempts ?? 0) + 1;
       const exhausted = attempts >= 3;
       void persistOpsImmediately((current) => ({
         ...current,
         cards: current.cards.map((card) => card.id === candidate.id
-          ? { ...card, reconciliation: { status: exhausted ? "needs_human" : "retrying", attempts, message: exhausted ? `Automatic reconciliation exhausted its retries: ${detail}` : detail, updatedAt: new Date().toISOString() } }
+          ? { ...card, reconciliation: { status: exhausted ? "needs_human" : "retrying", attempts, reason: "error", message: exhausted ? `Automatic reconciliation exhausted its retries: ${detail}` : detail, updatedAt: new Date().toISOString() } }
           : card),
       })).catch(() => undefined);
       if (exhausted) setError(`Reconciliation needs intervention for “${candidate.title}”: ${detail}`);
@@ -5860,23 +5933,24 @@ export function App() {
     const currentCard = opsStateRef.current.cards.find((candidate) => candidate.id === reviewCard.id);
     if (currentCard?.report) {
       const timestamp = new Date().toISOString();
+      const acceptedHumanPolicy = currentCard.reviewPolicy === "human";
       await persistOpsImmediately((current) => ({
         ...current,
         cards: current.cards.map((card) => card.id === currentCard.id
           ? appendOpsTaskEvent({
               ...card,
-              reviewPolicy: "either",
+              reviewPolicy: acceptedHumanPolicy ? "either" : card.reviewPolicy,
               reconciliation: {
                 status: "queued",
                 attempts: card.reconciliation?.attempts ?? 0,
-                message: "Human acceptance recorded; automatic reconciliation resumed.",
+                message: acceptedHumanPolicy ? "Human acceptance recorded; automatic reconciliation resumed." : "Reconciliation retry requested after the intervention was resolved.",
                 updatedAt: timestamp,
               },
             }, {
               id: `manual:accept:${timestamp}`,
               kind: "review",
               timestamp,
-              message: "Human acceptance recorded",
+              message: acceptedHumanPolicy ? "Human acceptance recorded" : "Reconciliation retry requested",
             })
           : card),
       }));
@@ -6147,6 +6221,16 @@ export function App() {
         ownerId: schedulerOwnerIdRef.current,
       });
       if (!lease) return;
+      if (projectRef.current?.id !== activeProject.id) {
+        await callCore("ops_scheduler_finish", {
+          leaseId: lease.id,
+          ownerId: schedulerOwnerIdRef.current,
+          state: "released",
+        }).catch(() => undefined);
+        schedulerFinalizedLeaseIdsRef.current.add(lease.id);
+        lease = null;
+        return;
+      }
       if (lease.canvasId !== canvasRef.current?.id) {
         throw new Error("The scheduler lease belongs to a different canvas.");
       }
@@ -6181,7 +6265,7 @@ export function App() {
       setError(`A task could not start and will recover independently: ${detail}`);
     } finally {
       schedulerClaimPendingRef.current = false;
-      if (autonomousPickup) queueMicrotask(() => schedulerLeaseHandlerRef.current?.());
+      if (autonomousPickup && started) queueMicrotask(() => schedulerLeaseHandlerRef.current?.());
     }
   };
   schedulerLeaseHandlerRef.current = () => void claimScheduledTask();
@@ -7921,8 +8005,8 @@ function opsTaskAgentPrompt(
     role === "reviewer"
       ? "- Before your final response, append completed with a handoff whose first line is exactly REVIEW VERDICT: APPROVE or REVIEW VERDICT: REQUEST CHANGES, followed by concise evidence."
       : missingContract
-        ? `- Before your final response, derive the missing contract, run its verification command, commit valuable task changes when working in Git, then append completed with a handoff whose first line is exactly the directive below (replace placeholders); put concise evidence on following lines:\n${contractProposal}`
-        : "- Before your final response, run the relevant checks, commit valuable task changes when working in Git, then append completed with concise evidence and any known risks. wheeljack will reconcile and integrate the report automatically; do not request a separate reviewer unless risk requires one.",
+        ? `- Before your final response, derive the missing contract, run its verification command, commit valuable task changes when working in Git, then append completed with a handoff whose first two lines are exactly the directives below (replace placeholders); put concise evidence on following lines:\n${contractProposal}\nwheeljack.report {"summary":"<outcome>","checks":["<command> — passed"],"risks":[]}`
+        : "- Before your final response, run the relevant checks, commit valuable task changes when working in Git, then append completed with a handoff containing one exact `wheeljack.report` JSON line with summary, only checks actually run (including outcome), and known risks; for example: `wheeljack.report {\"summary\":\"Implemented the task\",\"checks\":[\"bun test — passed\"],\"risks\":[]}`. Put concise supporting evidence on following lines. wheeljack will reconcile and integrate the report automatically; do not request a separate reviewer unless risk requires one.",
     "",
     "Task instruction:",
     prompt.trim(),
@@ -8199,7 +8283,11 @@ export function applyCoordinationEvents(
         ? parseOpsTaskContractProposal(event.handoff ?? "")
         : undefined;
       const contractApplies = contractProposal?.taskId === card.id;
-      const visibleHandoff = contractApplies ? withoutOpsTaskContractProposal(event.handoff ?? "") : event.handoff;
+      const contractHandoff = contractApplies ? withoutOpsTaskContractProposal(event.handoff ?? "") : event.handoff ?? "";
+      const parsedReport = parseOpsTaskReportHandoff(contractHandoff);
+      const visibleHandoff = parsedReport.evidence;
+      const maintenanceAgent = Boolean(card.taskLane?.cleanup?.requiresIntegration && (card.events ?? []).some((entry) =>
+        entry.id.startsWith("manual:maintenance:") && entry.targetId === callsign));
       const agentStatuses = { ...card.agentStatuses, [callsign]: event.status };
       const agentFiles = { ...card.agentFiles, [callsign]: event.expectedFiles };
       let columnId = card.columnId;
@@ -8208,15 +8296,15 @@ export function applyCoordinationEvents(
       else if (event.status === "paused") columnId = columnIdForRole(current, "queued");
       else if (event.status === "completed" && statuses.every((status) => status === "completed" || status === "done")) columnId = columnIdForRole(current, "review");
       else if (event.status === "done" && statuses.every((status) => status === "done")) columnId = columnIdForRole(current, "review");
-      else if (event.status === "running" || event.status === "in_progress") columnId = columnIdForRole(current, "active");
+      else if ((event.status === "running" || event.status === "in_progress") && !maintenanceAgent) columnId = columnIdForRole(current, "active");
       const kind = coordinationEventKind({ ...event, callsign }, card);
       const reported = ["completed", "done"].includes(event.status);
       const report = reported ? {
         status: "reported" as const,
-        summary: (visibleHandoff || event.note || "Worker completed the task.").split(/\r?\n/)[0].slice(0, 500),
+        summary: parsedReport.summary || (visibleHandoff || event.note || "Worker completed the task.").split(/\r?\n/)[0].slice(0, 500),
         evidence: visibleHandoff || event.note || "Worker reported completion.",
-        checks: card.verificationCommand?.trim() ? [card.verificationCommand.trim()] : [],
-        risks: [],
+        checks: parsedReport.checks,
+        risks: parsedReport.risks,
         reportedAt: event.timestamp,
         agentId: callsign,
       } : card.report;
@@ -8241,6 +8329,9 @@ export function applyCoordinationEvents(
         approvalAttempt: undefined,
         report,
         reconciliation,
+        taskLane: reported && card.taskLane?.cleanup?.requiresIntegration
+          ? { ...card.taskLane, cleanup: { ...card.taskLane.cleanup, retryAt: undefined } }
+          : card.taskLane,
         startedAt: card.startedAt || (["running", "in_progress"].includes(event.status) ? event.timestamp : undefined),
         completedAt: columnId === columnIdForRole(current, "done")
           ? event.timestamp
@@ -8568,6 +8659,33 @@ async function probeAdapters(adapters: Adapter[], profiles: AgentProfile[]): Pro
       return adapter;
     }
   }));
+}
+
+export function parseOpsTaskReportHandoff(value: string): { summary: string; checks: string[]; risks: string[]; evidence: string } {
+  const marker = "wheeljack.report ";
+  let summary = "";
+  let checks: string[] = [];
+  let risks: string[] = [];
+  const evidenceLines: string[] = [];
+  for (const line of value.split(/\r?\n/)) {
+    if (!line.trimStart().startsWith(marker)) {
+      evidenceLines.push(line);
+      continue;
+    }
+    try {
+      const payload = JSON.parse(line.trimStart().slice(marker.length)) as Record<string, unknown>;
+      summary = typeof payload.summary === "string" ? payload.summary.trim().slice(0, 500) : "";
+      checks = Array.isArray(payload.checks)
+        ? payload.checks.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim().slice(0, 500)).slice(0, 20)
+        : [];
+      risks = Array.isArray(payload.risks)
+        ? payload.risks.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim().slice(0, 500)).slice(0, 20)
+        : [];
+    } catch {
+      evidenceLines.push(line);
+    }
+  }
+  return { summary, checks, risks, evidence: evidenceLines.join("\n").trim() };
 }
 
 function percentile(values: number[], amount: number): number | undefined {

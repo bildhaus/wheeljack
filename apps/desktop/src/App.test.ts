@@ -30,6 +30,7 @@ import {
   parseAgentTaskCardProposals,
   parseOpsDecompositionProposal,
   parseOpsTaskContractProposal,
+  parseOpsTaskReportHandoff,
   parseProjectDocumentDiff,
   parseProjectDocumentProposal,
   parseProjectDocumentProposals,
@@ -946,6 +947,7 @@ test("turns completed worker coordination into a durable report queued for recon
         callsign: "beta",
         status: "done",
         expectedFiles: [],
+        handoff: "Implemented the feature.\nwheeljack.report {\"summary\":\"Feature shipped\",\"checks\":[\"bun run test — passed\"],\"risks\":[]}",
         timestamp: "2026-07-23T12:01:00Z",
       },
     ],
@@ -955,12 +957,19 @@ test("turns completed worker coordination into a durable report queued for recon
 
   expect(result.cards[0]).toMatchObject({
     columnId: "review",
-    report: { status: "reported", reportedAt: "2026-07-23T12:01:00Z" },
+    report: {
+      status: "reported",
+      summary: "Feature shipped",
+      evidence: "Implemented the feature.",
+      checks: ["bun run test — passed"],
+      risks: [],
+      reportedAt: "2026-07-23T12:01:00Z",
+    },
     reconciliation: { status: "queued", attempts: 0 },
   });
 });
 
-test("migrates legacy review cards into the reconciliation flow", () => {
+test("holds unverified legacy review cards for explicit recovery", () => {
   const state = parseOpsState({
     version: 2,
     columns: [
@@ -973,8 +982,147 @@ test("migrates legacy review cards into the reconciliation flow", () => {
 
   expect(state.cards[0]).toMatchObject({
     report: { status: "reported", summary: "Worker finished and ran tests." },
-    reconciliation: { status: "queued" },
+    reconciliation: { status: "needs_human" },
   });
+  expect(state.cards[0].reconciliation?.reason).toBeUndefined();
+});
+
+test("migrates verified and approved legacy review cards into reconciliation", () => {
+  const state = parseOpsState({
+    version: 2,
+    columns: [
+      { id: "review", title: "Review", role: "review" },
+      { id: "done", title: "Done", role: "done" },
+    ],
+    cards: [{
+      id: "legacy-approved",
+      title: "Legacy approved",
+      columnId: "review",
+      verificationRun: {
+        sessionId: "verification",
+        command: "bun run test",
+        worktreePath: "C:\\repo-task",
+        cwd: "C:\\repo-task",
+        baseCommit: "base",
+        status: "passed",
+        startedAt: "2026-07-23T12:00:00Z",
+        endedAt: "2026-07-23T12:01:00Z",
+        exitCode: 0,
+        snapshotId: "snapshot",
+      },
+      events: [{
+        id: "review-verdict",
+        kind: "review",
+        timestamp: "2026-07-23T12:01:00Z",
+        message: "REVIEW VERDICT: APPROVED",
+      }],
+    }],
+  });
+
+  expect(state.cards[0].reconciliation?.status).toBe("queued");
+});
+
+test("recovers interrupted reconciliation as a safe retry", () => {
+  const state = parseOpsState({
+    version: 2,
+    cards: [{
+      id: "interrupted",
+      title: "Interrupted",
+      columnId: "review",
+      report: {
+        status: "reported",
+        summary: "Complete",
+        evidence: "Committed.",
+        checks: [],
+        risks: [],
+        reportedAt: "2026-07-23T11:59:00Z",
+      },
+      reconciliation: {
+        status: "running",
+        attempts: 1,
+        message: "Integrating",
+        updatedAt: "2026-07-23T12:00:00Z",
+      },
+    }],
+  });
+
+  expect(state.cards[0].reconciliation).toMatchObject({
+    status: "retrying",
+    reason: "error",
+    attempts: 1,
+  });
+});
+
+test("accepts only explicit worker-reported checks", () => {
+  expect(parseOpsTaskReportHandoff("Tests are probably fine.")).toEqual({
+    summary: "",
+    checks: [],
+    risks: [],
+    evidence: "Tests are probably fine.",
+  });
+  expect(parseOpsTaskReportHandoff(
+    "Verified locally.\nwheeljack.report {\"summary\":\"Ready\",\"checks\":[\"bun run test — 24 passed\"],\"risks\":[\"Windows only\"]}",
+  )).toEqual({
+    summary: "Ready",
+    checks: ["bun run test — 24 passed"],
+    risks: ["Windows only"],
+    evidence: "Verified locally.",
+  });
+});
+
+test("keeps a running cleanup agent out of the ordinary Active lane", () => {
+  const current = parseOpsState({
+    version: 2,
+    columns: [
+      { id: "queued", title: "Ready", role: "queued" },
+      { id: "active", title: "Active", role: "active" },
+      { id: "review", title: "Review", role: "review" },
+      { id: "done", title: "Done", role: "done" },
+    ],
+    cards: [{
+      id: "cleanup-task",
+      title: "Cleanup",
+      columnId: "done",
+      assigneeIds: ["cleanup-agent"],
+      agentStatuses: { "cleanup-agent": "assigned" },
+      taskLane: {
+        kind: "git-worktree",
+        worktreePath: "C:\\repo-task",
+        cwd: "C:\\repo-task",
+        branch: "wheeljack/task-cleanup",
+        baseCommit: "base",
+        cleanup: {
+          action: "remove",
+          status: "resolving",
+          requestedAt: "2026-07-23T12:00:00Z",
+          requiresIntegration: true,
+        },
+      },
+      events: [{
+        id: "manual:maintenance:2026-07-23T12:00:00Z:cleanup-agent",
+        kind: "assignment",
+        timestamp: "2026-07-23T12:00:00Z",
+        message: "Assigned cleanup agent",
+        targetId: "cleanup-agent",
+      }],
+    }],
+  });
+
+  const result = applyCoordinationEvents(current, {
+    events: [{
+      id: "cleanup-running",
+      taskId: "cleanup-task",
+      task: "Cleanup",
+      callsign: "cleanup-agent",
+      status: "running",
+      expectedFiles: [],
+      timestamp: "2026-07-23T12:00:01Z",
+    }],
+    cursors: { "cleanup-agent": 1 },
+    warnings: [],
+  });
+
+  expect(result.cards[0].columnId).toBe("done");
 });
 
 test("persists a deduplicated coordination timeline and elapsed boundaries", () => {

@@ -415,10 +415,12 @@ export interface OpsTaskReport {
 }
 
 export interface OpsTaskReconciliation {
-  status: "queued" | "running" | "retrying" | "integrated" | "needs_human";
+  status: "queued" | "running" | "awaiting_repair" | "retrying" | "integrated" | "needs_human";
   attempts: number;
   message: string;
   updatedAt: string;
+  reason?: "source_dirty" | "target_dirty" | "conflict" | "closed_before_integration" | "error";
+  sourceHead?: string;
   targetHead?: string;
 }
 
@@ -482,6 +484,7 @@ export interface OpsTaskLane {
     message?: string;
     attempts?: number;
     retryAt?: string;
+    requiresIntegration?: boolean;
   };
 }
 
@@ -697,6 +700,13 @@ export interface AgentControlAudit {
 
 export interface OpsStateRecord {
   canvasId: string;
+  projectId: string;
+  revision: number;
+  state: OpsState;
+  updatedAt: string;
+}
+
+export interface ProjectOpsStateRecord {
   projectId: string;
   revision: number;
   state: OpsState;

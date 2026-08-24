@@ -4200,6 +4200,8 @@ export function ReviewDrawerSurface({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const humanAcceptance = reviewCard?.reviewPolicy === "human";
+  const retryableReconciliation = reviewCard?.reconciliation?.status === "needs_human"
+    && ["target_dirty", "error"].includes(reviewCard.reconciliation.reason ?? "");
   const requestChanges = () => {
     if (!reviewCard || !feedback.trim()) return;
     setBusy(true);
@@ -4224,9 +4226,9 @@ export function ReviewDrawerSurface({
         <ActionCard variant="evidence" title="Repository evidence" summary={reviewEvidenceMessage} source={reviewCard.taskLane ? "task worktree" : "shared checkout"} status={reviewEvidenceReady ? "completed" : "pending"} detailLabel={evidence?.changedFiles.length ? `Show ${evidence.changedFiles.length} changed ${evidence.changedFiles.length === 1 ? "file" : "files"}` : "Show repository evidence"} details={<>{evidence?.changedFiles.map((file) => <div className="wj-file-row" key={file}><Files />{file}</div>)}{evidence?.text && <pre className="wj-diff mt-3">{evidence.text}</pre>}</>} />
       </div></ScrollArea>}
       {reviewCard && (humanAcceptance || reviewCard.reconciliation?.status === "needs_human") && <div className="wj-drawer-footer space-y-2">
-        <Textarea aria-label="Task feedback" value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="Describe what the worker should repair…" />
+        {!retryableReconciliation && <Textarea aria-label="Task feedback" value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="Describe what the worker should repair…" />}
         {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
-        <div className="flex justify-end gap-2"><Button variant="outline" disabled={busy || !feedback.trim()} onClick={requestChanges}>Send repair task</Button>{humanAcceptance && <Button disabled={busy} onClick={() => { setBusy(true); void onReviewAction(true).finally(() => setBusy(false)); }}>Accept and reconcile</Button>}</div>
+        <div className="flex justify-end gap-2">{!retryableReconciliation && <Button variant="outline" disabled={busy || !feedback.trim()} onClick={requestChanges}>Send repair task</Button>}{(humanAcceptance || retryableReconciliation) && <Button disabled={busy} onClick={() => { setBusy(true); void onReviewAction(true).finally(() => setBusy(false)); }}>{humanAcceptance ? "Accept and reconcile" : "Retry reconciliation"}</Button>}</div>
       </div>}
     </SheetContent>
   </Sheet>;

@@ -119,6 +119,7 @@ function parseOpsTaskLane(value: unknown): OpsCard["taskLane"] {
           message: typeof cleanup.message === "string" ? cleanup.message : undefined,
           attempts: typeof cleanup.attempts === "number" ? cleanup.attempts : 0,
           retryAt: typeof cleanup.retryAt === "string" ? cleanup.retryAt : undefined,
+          requiresIntegration: cleanup.requiresIntegration === true,
         }
       : undefined,
   };
@@ -185,16 +186,32 @@ function parseOpsTaskReconciliation(value: unknown): OpsCard["reconciliation"] {
   if (!value || typeof value !== "object") return undefined;
   const reconciliation = value as Record<string, unknown>;
   if (
-    !["queued", "running", "retrying", "integrated", "needs_human"].includes(String(reconciliation.status))
+    !["queued", "running", "awaiting_repair", "retrying", "integrated", "needs_human"].includes(String(reconciliation.status))
     || typeof reconciliation.updatedAt !== "string"
   ) return undefined;
+  const recoveredRunning = reconciliation.status === "running";
+  const reason = ["source_dirty", "target_dirty", "conflict", "closed_before_integration", "error"].includes(String(reconciliation.reason))
+    ? reconciliation.reason as NonNullable<OpsCard["reconciliation"]>["reason"]
+    : undefined;
   return {
-    status: reconciliation.status as NonNullable<OpsCard["reconciliation"]>["status"],
+    status: recoveredRunning ? "retrying" : reconciliation.status as NonNullable<OpsCard["reconciliation"]>["status"],
     attempts: typeof reconciliation.attempts === "number" ? reconciliation.attempts : 0,
-    message: typeof reconciliation.message === "string" ? reconciliation.message : "",
+    message: recoveredRunning ? "Recovered an interrupted reconciliation; retrying safely." : typeof reconciliation.message === "string" ? reconciliation.message : "",
     updatedAt: reconciliation.updatedAt,
+    reason: recoveredRunning ? "error" : reason,
+    sourceHead: typeof reconciliation.sourceHead === "string" ? reconciliation.sourceHead : undefined,
     targetHead: typeof reconciliation.targetHead === "string" ? reconciliation.targetHead : undefined,
   };
+}
+
+function legacyReviewApproved(card: OpsCard): boolean {
+  const verificationPassed = card.verificationRun?.status === "passed"
+    && card.verificationRun.exitCode === 0
+    && Boolean(card.verificationRun.snapshotId);
+  const verdict = [...(card.events ?? [])].reverse().find((event) => /REVIEW\s+VERDICT\s*:/i.test(event.message));
+  const reviewerApproved = Boolean(verdict && /REVIEW\s+VERDICT\s*:\s*(?:APPROVE|APPROVED|PASS|PASSED)\b/i.test(verdict.message));
+  const manuallyApproved = (card.events ?? []).some((event) => event.kind === "completion" && event.id.startsWith("manual:approve:"));
+  return verificationPassed && (reviewerApproved || manuallyApproved);
 }
 
 export function recoverOpsVerificationRuns(
@@ -368,9 +385,12 @@ export function parseOpsState(value?: JsonObject): OpsState {
   const reviewColumnId = effectiveColumns.find((column) => column.role === "review")?.id ?? "review";
   const cards = parsedCards.map((card) => {
     const legacyDoneLane = card.columnId === doneColumnId && card.taskLane && !card.taskLane.closedAt;
-    const needsMigration = (reviewColumnIds.has(card.columnId) || legacyDoneLane) && !card.report;
+    const cleanupInProgress = Boolean(card.taskLane?.cleanup?.requiresIntegration);
+    const needsMigration = (reviewColumnIds.has(card.columnId) || legacyDoneLane) && !card.report && !cleanupInProgress;
     if (!needsMigration) return card;
     const timestamp = card.events?.at(-1)?.timestamp ?? card.completedAt ?? new Date(0).toISOString();
+    const safeToReconcile = Boolean(legacyDoneLane || legacyReviewApproved(card));
+    const needsHuman = card.reviewPolicy === "human" || !safeToReconcile;
     return {
       ...card,
       columnId: legacyDoneLane ? reviewColumnId : card.columnId,
@@ -378,15 +398,21 @@ export function parseOpsState(value?: JsonObject): OpsState {
         status: "reported" as const,
         summary: card.lastNote || "Legacy task evidence is ready for reconciliation.",
         evidence: card.lastNote || "Imported from the previous Review workflow.",
-        checks: card.verificationCommand?.trim() ? [card.verificationCommand.trim()] : [],
+        checks: card.verificationRun?.status === "passed" && card.verificationRun.exitCode === 0
+          ? [`${card.verificationRun.command} — passed`]
+          : [],
         risks: [],
         reportedAt: timestamp,
         agentId: card.assigneeIds[0],
       },
       reconciliation: {
-        status: card.reviewPolicy === "human" ? "needs_human" as const : "queued" as const,
+        status: needsHuman ? "needs_human" as const : "queued" as const,
         attempts: 0,
-        message: card.reviewPolicy === "human" ? "This task explicitly requires human acceptance." : "Migrated from the previous Review workflow.",
+        message: card.reviewPolicy === "human"
+          ? "This task explicitly requires human acceptance."
+          : safeToReconcile
+            ? "Migrated approved evidence from the previous Review workflow."
+            : "Legacy review evidence was incomplete or unsuccessful; inspect it before retrying.",
         updatedAt: timestamp,
       },
     };

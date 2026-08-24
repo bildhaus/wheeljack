@@ -279,6 +279,55 @@ fn git_worktree_remove_refuses_current_primary_and_dirty_worktrees() {
 }
 
 #[test]
+fn git_worktree_remove_prunes_a_registered_missing_worktree() {
+    let repo = committed_repo("git-stale-worktree");
+    let worktree = repo.with_file_name(format!(
+        "{}-linked",
+        repo.file_name().unwrap().to_string_lossy()
+    ));
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-b",
+            "wheeljack-stale-worktree",
+            worktree.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    fs::remove_dir_all(&worktree).unwrap();
+
+    let core = Core::new(
+        test_init("git-stale-worktree-core"),
+        Arc::new(NullEventSink),
+    )
+    .unwrap();
+    let remove = json!({
+        "id": "remove-stale",
+        "command": "git_worktree_remove",
+        "payload": {
+            "projectPath": repo,
+            "worktreePath": worktree,
+            "expectedBranch": "wheeljack-stale-worktree"
+        }
+    });
+    let response: Value = serde_json::from_str(&core.call_json(&remove.to_string())).unwrap();
+    assert_eq!(response["ok"], true, "{response:#}");
+    assert!(git_succeeds(
+        &repo,
+        [
+            "rev-parse",
+            "--verify",
+            "refs/heads/wheeljack-stale-worktree"
+        ]
+    ));
+    assert!(!read_worktrees(&repo)
+        .iter()
+        .any(|candidate| paths_equivalent(Path::new(&candidate.path), &worktree)));
+}
+
+#[test]
 fn git_task_worktree_uses_repo_root_nested_cwd_and_source_head() {
     let repo = committed_repo("git-task-nested");
     let nested = repo.join("apps").join("desktop");

@@ -1063,6 +1063,12 @@ impl Core {
                 .map_err(|error| CommandError::new("safety_denied", error.to_string())),
             "ops_state_get" => self.ops_state_get(payload).map_err(CommandError::failed),
             "ops_state_save" => self.ops_state_save(payload).map_err(CommandError::failed),
+            "ops_project_state_get" => self
+                .ops_project_state_get(payload)
+                .map_err(CommandError::failed),
+            "ops_project_state_save" => self
+                .ops_project_state_save(payload)
+                .map_err(CommandError::failed),
             "ops_scheduler_configure" => self
                 .ops_scheduler_configure(payload)
                 .map_err(CommandError::failed),
@@ -1873,6 +1879,30 @@ impl Core {
         )?)?)
     }
 
+    fn ops_project_state_get(&self, payload: Value) -> Result<Value> {
+        let project_id = required_str(&payload, "projectId")?;
+        let db = self.lock_db()?;
+        Ok(serde_json::to_value(load_project_ops_state(
+            &db, project_id,
+        )?)?)
+    }
+
+    fn ops_project_state_save(&self, payload: Value) -> Result<Value> {
+        let project_id = required_str(&payload, "projectId")?;
+        let state = payload
+            .get("state")
+            .filter(|state| state.is_object())
+            .ok_or_else(|| anyhow!("payload.state must be an object"))?;
+        let expected_revision = payload.get("expectedRevision").and_then(Value::as_u64);
+        let db = self.lock_db()?;
+        Ok(serde_json::to_value(save_project_ops_state(
+            &db,
+            project_id,
+            state,
+            expected_revision,
+        )?)?)
+    }
+
     fn ops_scheduler_configure(&self, payload: Value) -> Result<Value> {
         let project_id = required_str(&payload, "projectId")?;
         let canvas_id = required_str(&payload, "canvasId")?;
@@ -1894,6 +1924,14 @@ impl Core {
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty());
         let db = self.lock_db()?;
+        let canvas_project: String = db.query_row(
+            "SELECT project_id FROM canvases WHERE id = ?1",
+            params![canvas_id],
+            |row| row.get(0),
+        )?;
+        if canvas_project != project_id {
+            bail!("canvas does not belong to the requested project");
+        }
         let config = configure_ops_scheduler(
             &db,
             project_id,
@@ -2066,11 +2104,14 @@ impl Core {
             bail!("Project path is not a git repository.");
         }
         let (repo_path, _) = resolve_git_worktree_context(&project_path)?;
-        let target_path = normalize_command_cwd(
-            expand_home_path(req.worktree_path.trim())
-                .canonicalize()
-                .map_err(|_| anyhow!("Worktree path does not exist."))?,
-        );
+        let requested_target = expand_home_path(req.worktree_path.trim());
+        let target_path = if requested_target.exists() {
+            normalize_command_cwd(requested_target.canonicalize()?)
+        } else if requested_target.is_absolute() {
+            normalize_command_cwd(requested_target)
+        } else {
+            bail!("Missing worktree paths must be absolute.");
+        };
         let expected_branch = req
             .expected_branch
             .as_deref()
