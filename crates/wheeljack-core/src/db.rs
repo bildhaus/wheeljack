@@ -637,7 +637,7 @@ fn add_ops_runtime(connection: &Connection) -> Result<()> {
           canvas_id TEXT NOT NULL REFERENCES canvases(id) ON DELETE CASCADE,
           enabled INTEGER NOT NULL DEFAULT 0,
           paused INTEGER NOT NULL DEFAULT 1,
-          concurrency_limit INTEGER NOT NULL DEFAULT 1,
+          concurrency_limit INTEGER NOT NULL DEFAULT 4,
           adapter_id TEXT,
           updated_at TEXT NOT NULL
         );

@@ -606,21 +606,181 @@ pub(crate) fn removable_worktree<'a>(
 }
 
 pub(crate) fn run_git_worktree_remove(repo_path: &Path, target_path: &Path) -> Result<()> {
-    let output = git_command()
+    let mut last_detail = String::new();
+    for attempt in 0..5 {
+        let output = git_command()
+            .arg("-C")
+            .arg(repo_path)
+            .arg("worktree")
+            .arg("remove")
+            .arg(target_path)
+            .output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+        last_detail = command_output_detail(&output);
+        if attempt < 4 {
+            thread::sleep(Duration::from_millis(150 * (attempt + 1)));
+        }
+    }
+    bail!("git worktree remove failed after retries: {last_detail}");
+}
+
+pub(crate) fn integrate_git_worktree(
+    target_path: &Path,
+    source_path: &Path,
+    expected_branch: &str,
+    base_commit: &str,
+) -> Result<GitWorktreeIntegrateResult> {
+    let worktrees = read_worktrees(target_path);
+    let source = worktrees
+        .iter()
+        .find(|worktree| paths_equivalent(Path::new(&worktree.path), source_path))
+        .ok_or_else(|| anyhow!("Task worktree is not registered with this repository."))?;
+    if source.detached || source.bare || source.branch != expected_branch {
+        bail!("Task worktree branch does not match the expected integration source.");
+    }
+    let base_commit = validate_full_commit(target_path, base_commit)?;
+    let source_head = read_git_head(source_path)?;
+    let previous_target_head = read_git_head(target_path)?;
+    let result = |status: &str, target_head: String, commits: Vec<String>, message: &str| {
+        GitWorktreeIntegrateResult {
+            status: status.to_string(),
+            branch: source.branch.clone(),
+            base_commit: base_commit.clone(),
+            source_head: source_head.clone(),
+            target_head,
+            previous_target_head: previous_target_head.clone(),
+            commits,
+            message: message.to_string(),
+        }
+    };
+    if worktree_path_is_dirty(source_path) {
+        return Ok(result(
+            "source_dirty",
+            previous_target_head.clone(),
+            Vec::new(),
+            "The worker must commit or otherwise resolve its remaining task changes.",
+        ));
+    }
+    if worktree_path_is_dirty(target_path) {
+        return Ok(result(
+            "target_dirty",
+            previous_target_head.clone(),
+            Vec::new(),
+            "The opened project checkout has local changes, so Wheeljack preserved the task branch without modifying it.",
+        ));
+    }
+    let source_contains_base = git_command()
         .arg("-C")
-        .arg(repo_path)
-        .arg("worktree")
-        .arg("remove")
+        .arg(source_path)
+        .args(["merge-base", "--is-ancestor", &base_commit, &source_head])
+        .status()?;
+    if !source_contains_base.success() {
+        bail!("Task branch no longer descends from its recorded base commit.");
+    }
+    let already_integrated = git_command()
+        .arg("-C")
         .arg(target_path)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &source_head,
+            &previous_target_head,
+        ])
+        .status()?;
+    if already_integrated.success() {
+        return Ok(result(
+            "integrated",
+            previous_target_head.clone(),
+            Vec::new(),
+            "Task commits were already present in the opened project branch.",
+        ));
+    }
+    let commits_output = git_command()
+        .arg("-C")
+        .arg(source_path)
+        .args([
+            "rev-list",
+            "--reverse",
+            &format!("{base_commit}..{source_head}"),
+        ])
         .output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
+    if !commits_output.status.success() {
         bail!(
-            "git worktree remove failed: {}",
-            command_output_detail(&output)
+            "Could not enumerate task commits: {}",
+            command_output_detail(&commits_output)
         );
     }
+    let source_commits = String::from_utf8_lossy(&commits_output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|commit| !commit.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if source_commits.is_empty() {
+        return Ok(result(
+            "empty",
+            previous_target_head.clone(),
+            source_commits,
+            "The task completed without repository changes.",
+        ));
+    }
+    let cherry_output = git_command()
+        .arg("-C")
+        .arg(source_path)
+        .args(["cherry", &previous_target_head, &source_head, &base_commit])
+        .output()?;
+    if !cherry_output.status.success() {
+        bail!(
+            "Could not compare task patches with the opened project branch: {}",
+            command_output_detail(&cherry_output)
+        );
+    }
+    let pending = String::from_utf8_lossy(&cherry_output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("+ "))
+        .map(str::trim)
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    let commits = source_commits
+        .into_iter()
+        .filter(|commit| pending.contains(commit.as_str()))
+        .collect::<Vec<_>>();
+    if commits.is_empty() {
+        return Ok(result(
+            "integrated",
+            previous_target_head.clone(),
+            commits,
+            "Equivalent task commits were already present in the opened project branch.",
+        ));
+    }
+    let mut command = git_command();
+    command.arg("-C").arg(target_path).arg("cherry-pick");
+    for commit in &commits {
+        command.arg(commit);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        let detail = command_output_detail(&output);
+        let _ = git_command()
+            .arg("-C")
+            .arg(target_path)
+            .args(["cherry-pick", "--abort"])
+            .output();
+        return Ok(result(
+            "conflict",
+            read_git_head(target_path).unwrap_or_else(|_| previous_target_head.clone()),
+            commits,
+            &format!("Task integration conflicted and was rolled back: {detail}"),
+        ));
+    }
+    Ok(result(
+        "integrated",
+        read_git_head(target_path)?,
+        commits,
+        "Task commits were integrated into the opened project branch.",
+    ))
 }
 
 pub(crate) fn paths_equivalent(left: &Path, right: &Path) -> bool {

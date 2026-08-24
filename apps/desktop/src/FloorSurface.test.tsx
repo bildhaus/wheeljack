@@ -262,11 +262,11 @@ describe("FloorSurface", () => {
 
     render(<FloorSurface {...floorProps({ state: state(cards), runtimes, attentionItems })} />);
 
-    for (const heading of ["Permission requested", "Response needed", "Agent stopped", "Review ready", "Blocked by dependency", "Automatic ownership resolution stalled"]) {
+    for (const heading of ["Permission requested", "Response needed", "Agent stopped", "Review ready", "Automatic ownership resolution stalled"]) {
       expect(screen.getAllByText(heading).length).toBeGreaterThan(0);
     }
     expect(screen.getByText("Access to 1 path · …\\agents\\*")).toBeTruthy();
-    for (const action of [/Approve/, /Deny/, /Answer in chat/, /Recover/, /Review evidence/, /Inspect/, /Choose owner/]) {
+    for (const action of [/Approve/, /Deny/, /Answer in chat/, /Recover/, /Review evidence/, /Choose owner/]) {
       expect(screen.getAllByRole("button", { name: action }).length).toBeGreaterThan(0);
     }
   });
@@ -303,7 +303,7 @@ describe("FloorSurface", () => {
     fireEvent.click(conflictSignal!);
     const conflictRow = await waitFor(() => container.querySelector<HTMLElement>('[data-conflict-file="shared.ts"]'));
     await waitFor(() => expect(document.activeElement).toBe(conflictRow));
-    expect(screen.getByRole("heading", { name: "Needs you" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Exceptions" })).toBeTruthy();
   });
 
   test("opens the existing history activity surface from recent activity", async () => {

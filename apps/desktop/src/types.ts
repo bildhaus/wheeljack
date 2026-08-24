@@ -307,6 +307,17 @@ export interface GitWorktreeReview {
   truncated: boolean;
 }
 
+export interface GitWorktreeIntegrate {
+  status: "integrated" | "empty" | "source_dirty" | "target_dirty" | "conflict";
+  branch: string;
+  baseCommit: string;
+  sourceHead: string;
+  targetHead: string;
+  previousTargetHead: string;
+  commits: string[];
+  message: string;
+}
+
 export interface OpsReviewEvidence {
   scope: "task" | "shared";
   isRepo: boolean;
@@ -368,6 +379,7 @@ export interface OpsCard {
   lastNote: string;
   agentFiles?: Record<string, string[]>;
   dependencyIds?: string[];
+  dependencyKinds?: Record<string, "hard" | "soft">;
   parentId?: string;
   events?: OpsTaskEvent[];
   startedAt?: string;
@@ -380,12 +392,34 @@ export interface OpsCard {
   verificationCommand?: string;
   verificationRun?: OpsVerificationRun;
   approvalAttempt?: OpsApprovalAttempt;
+  report?: OpsTaskReport;
+  reconciliation?: OpsTaskReconciliation;
+  attemptCount?: number;
+  retryAt?: string;
   reviewPolicy?: "human" | "agent" | "either";
   taskLane?: OpsTaskLane;
   runProgress?: OpsRunProgress;
   steeringDirective?: OpsSteeringDirective;
   workerSpecialist?: AgentSpecialistSuggestion;
   reviewerSpecialist?: AgentSpecialistSuggestion;
+}
+
+export interface OpsTaskReport {
+  status: "reported";
+  summary: string;
+  evidence: string;
+  checks: string[];
+  risks: string[];
+  reportedAt: string;
+  agentId?: string;
+}
+
+export interface OpsTaskReconciliation {
+  status: "queued" | "running" | "retrying" | "integrated" | "needs_human";
+  attempts: number;
+  message: string;
+  updatedAt: string;
+  targetHead?: string;
 }
 
 export type OpsRunStepState = "pending" | "running" | "blocked" | "done" | "failed";
@@ -446,6 +480,8 @@ export interface OpsTaskLane {
     status: "queued" | "resolving" | "blocked";
     requestedAt: string;
     message?: string;
+    attempts?: number;
+    retryAt?: string;
   };
 }
 

@@ -73,7 +73,7 @@ describe("deriveOpsFloorModel", () => {
     expect(model.sinceLeft.actionable.map((event) => event.id)).toEqual([2, 1]);
   });
 
-  test("ranks interactions, conflicts, runtime failures, reviews, then dependency waits", () => {
+  test("ranks interactions, conflicts, runtime failures, and explicit reviews without surfacing passive waits", () => {
     const state: OpsState = {
       version: 2,
       columns,
@@ -116,17 +116,16 @@ describe("deriveOpsFloorModel", () => {
     ] as Parameters<typeof deriveOpsFloorModel>[0]["attentionItems"];
 
     const model = deriveOpsFloorModel({ state, runtimes, attentionItems, activity: [] });
-    expect(model.attention.map((item) => item.kind)).toEqual(["interaction", "conflict", "runtime", "review", "dependency"]);
+    expect(model.attention.map((item) => item.kind)).toEqual(["interaction", "conflict", "runtime", "review"]);
     expect(model.contentions).toEqual([{ file: "src/shared.ts", cardIds: ["conflict", "conflict-peer"] }]);
     expect(model.actionQueue.map((action) => action.type === "contention" ? action.type : action.item.kind)).toEqual([
       "interaction",
       "contention",
       "runtime",
       "review",
-      "dependency",
     ]);
     expect(model.actionQueue.filter((action) => action.type === "contention")).toHaveLength(1);
-    expect(model.attention.at(-1)?.reason).toContain("blocker");
+    expect(model.attention.some((item) => item.kind === "dependency")).toBe(false);
   });
 
   test("keeps live automatically resolving file overlaps out of the action queue", () => {

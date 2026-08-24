@@ -403,6 +403,7 @@ fn release_missing_pending_leases(db: &Connection, project_id: &str, state: &Val
 }
 
 fn next_task_id(db: &Connection, project_id: &str, state: &Value) -> Result<Option<String>> {
+    let current_time = now();
     let columns = state
         .get("columns")
         .and_then(Value::as_array)
@@ -449,9 +450,14 @@ fn next_task_id(db: &Connection, project_id: &str, state: &Value) -> Result<Opti
                 .pointer("/taskLane/closedAt")
                 .and_then(Value::as_str)
                 .is_some()
+            || card
+                .get("retryAt")
+                .and_then(Value::as_str)
+                .is_some_and(|retry_at| retry_at > current_time.as_str())
         {
             continue;
         }
+        let dependency_kinds = card.get("dependencyKinds").and_then(Value::as_object);
         let dependencies_ready = card
             .get("dependencyIds")
             .and_then(Value::as_array)
@@ -459,7 +465,13 @@ fn next_task_id(db: &Connection, project_id: &str, state: &Value) -> Result<Opti
                 dependencies
                     .iter()
                     .filter_map(Value::as_str)
-                    .all(|dependency| done_ids.contains(dependency))
+                    .all(|dependency| {
+                        dependency_kinds
+                            .and_then(|kinds| kinds.get(dependency))
+                            .and_then(Value::as_str)
+                            == Some("soft")
+                            || done_ids.contains(dependency)
+                    })
             })
             .unwrap_or(true);
         if !dependencies_ready {

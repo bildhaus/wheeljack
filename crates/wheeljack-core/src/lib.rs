@@ -102,9 +102,9 @@ use db::{
 };
 use dto::*;
 use git::{
-    ensure_safe_branch_name, git_command, hidden_command, is_git_repo, paths_equivalent,
-    read_git_diff, read_git_head, read_git_status, read_worktree_snapshot, read_worktrees,
-    removable_worktree, resolve_git_worktree_context, resolve_new_worktree_path,
+    ensure_safe_branch_name, git_command, hidden_command, integrate_git_worktree, is_git_repo,
+    paths_equivalent, read_git_diff, read_git_head, read_git_status, read_worktree_snapshot,
+    read_worktrees, removable_worktree, resolve_git_worktree_context, resolve_new_worktree_path,
     run_git_worktree_add, run_git_worktree_remove, validate_full_commit,
 };
 use intent::{
@@ -1085,6 +1085,9 @@ impl Core {
                 .map_err(CommandError::failed),
             "git_worktree_review" => self
                 .git_worktree_review(payload)
+                .map_err(CommandError::failed),
+            "git_worktree_integrate" => self
+                .git_worktree_integrate(payload)
                 .map_err(CommandError::failed),
             "git_worktree_remove" => self
                 .git_worktree_remove(payload)
@@ -2084,6 +2087,33 @@ impl Core {
             removed_path,
             status: read_git_status(&repo_path, true),
         })?)
+    }
+
+    fn git_worktree_integrate(&self, payload: Value) -> Result<Value> {
+        let req =
+            serde_json::from_value::<GitWorktreeIntegrateRequest>(unwrap_payload(payload, "req"))?;
+        let project_path = normalize_command_cwd(
+            expand_home_path(req.project_path.trim())
+                .canonicalize()
+                .map_err(|_| anyhow!("Project path does not exist."))?,
+        );
+        if !is_git_repo(&project_path) {
+            bail!("Project path is not a git repository.");
+        }
+        let (target_path, _) = resolve_git_worktree_context(&project_path)?;
+        let source_path = normalize_command_cwd(
+            expand_home_path(req.worktree_path.trim())
+                .canonicalize()
+                .map_err(|_| anyhow!("Task worktree path does not exist."))?,
+        );
+        let expected_branch = req.expected_branch.trim();
+        ensure_safe_branch_name(expected_branch)?;
+        Ok(serde_json::to_value(integrate_git_worktree(
+            &target_path,
+            &source_path,
+            expected_branch,
+            &req.base_commit,
+        )?)?)
     }
 
     fn coordination_board_ensure(&self, payload: Value) -> Result<Value> {

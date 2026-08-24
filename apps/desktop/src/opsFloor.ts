@@ -170,22 +170,6 @@ export function deriveOpsFloorModel({
       rank: kind === "interaction" ? 0 : kind === "conflict" ? 1 : kind === "runtime" ? 2 : 3,
     });
   }
-  for (const relationship of waiting) {
-    const card = cardById.get(relationship.cardId);
-    if (!card || attentionById.has(`ops:${card.id}`) || attentionById.has(`review:${card.id}`)) continue;
-    const blockerNames = relationship.waitingOnCardIds.flatMap((id) => cardById.get(id)?.title ?? []);
-    attentionById.set(`dependency:${card.id}`, {
-      id: `dependency:${card.id}`,
-      title: card.title,
-      reason: `Waiting on ${blockerNames.join(", ") || `${relationship.waitingOnCardIds.length} dependencies`}`,
-      kind: "dependency",
-      cardId: card.id,
-      runtimeId: opsCardParticipantIds(card, structuredRuntimes)[0],
-      downstreamBlocked: downstream.get(card.id) ?? 0,
-      waitingSince: card.events?.at(-1)?.timestamp ?? card.startedAt,
-      rank: 4,
-    });
-  }
 
   const priorityRank = (cardId?: string) => {
     const priority = cardId ? cardById.get(cardId)?.priority : undefined;
@@ -303,6 +287,7 @@ function downstreamBlockedCount(cards: OpsCard[], blockerId: string, doneColumnI
     if (seen.has(card.id)) return false;
     seen.add(card.id);
     return (card.dependencyIds ?? []).some((dependencyId) => {
+      if (card.dependencyKinds?.[dependencyId] === "soft") return false;
       if (dependencyId === targetId) return true;
       const dependency = cardById.get(dependencyId);
       return dependency ? dependsOn(dependency, targetId, seen) : false;

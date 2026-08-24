@@ -90,7 +90,8 @@ export function deriveAttention({
       .flatMap((nodeId) => runtimeById.get(nodeId) ?? []);
     const statuses = cardRuntimes.map((runtime) => runtime.status);
     const reason = opsAttentionReason(card, role, statuses, conflictingCardIds.has(card.id));
-    if (!reason && role !== "review") continue;
+    const reviewRequiresHuman = role === "review" && (card.reviewPolicy === "human" || card.reconciliation?.status === "needs_human");
+    if (!reason && !reviewRequiresHuman) continue;
     const target: AttentionTarget = role === "review"
       ? { kind: "review", cardId: card.id }
       : { kind: "ops", cardId: card.id };
@@ -98,7 +99,7 @@ export function deriveAttention({
       id: attentionTargetId(target),
       sources: role === "review" ? ["ops", "review"] : ["ops"],
       title: card.title,
-      detail: reason ?? "Verification is ready for review.",
+      detail: reason ?? "Human acceptance was explicitly requested.",
       status: statuses.find(needsAttention) ?? (role === "review" ? "review" : "attention"),
       target,
       runtimeNodeId: cardRuntimes.find((runtime) => needsAttention(runtime.status))?.nodeId,

@@ -213,9 +213,9 @@ const settingsPageDetails: Record<SettingsPage, { title: string; description: st
 };
 
 const reviewPolicyLabels = {
-  agent: "Agent reviewer (automatic)",
-  human: "Require human approval",
-  either: "Agent or human",
+  agent: "Automatic reconciliation",
+  human: "Require human acceptance",
+  either: "Automatic or human",
 } as const;
 
 function ReviewPolicyOptions() {
@@ -284,11 +284,11 @@ export function opsCanReturnDirectlyToReady(card: OpsCard, runtimes: PaneRuntime
   });
 }
 
-function opsActionTitle(action: OpsOrchestrationAction, card: OpsCard): string {
+function opsActionTitle(action: OpsOrchestrationAction, _card: OpsCard): string {
   if (action === "assign") return "Start task agent";
   if (action === "transfer") return "Transfer ownership";
   if (action === "resume") return "Resume work";
-  if (action === "review") return "Request verification";
+  if (action === "review") return "Inspect evidence";
   if (action === "pause") return "Request pause";
   if (action === "release") return "Return to Ready";
   if (action === "approve") return "Approve verification";
@@ -452,7 +452,7 @@ export function ProjectModeSwitch({ surface, onSurface, page, onPage }: { surfac
         <Button className="wj-mode-trigger" variant="ghost" size="sm" data-active={surface === "terminal" || undefined} aria-pressed={surface === "terminal"} onClick={(event) => navigate("terminal", event.detail > 0)}><Terminal /><span className="wj-mode-label">Work</span></Button>
         <div className="wj-project-plan-slot" data-expanded={surface === "ops" || undefined}>
           {surface === "ops" && page && onPage
-            ? <Tabs className="wj-project-plan-sections" value={page} onValueChange={(value) => onPage(value as OpsPage)}><TabsList aria-label="Plan views" data-page={page}><TabsTrigger value="floor"><span className="wj-mode-label">Floor</span></TabsTrigger><TabsTrigger value="board"><span className="wj-mode-label">Board</span></TabsTrigger><TabsTrigger value="spec"><span className="wj-mode-label">Spec</span></TabsTrigger></TabsList></Tabs>
+            ? <Tabs className="wj-project-plan-sections" value={page} onValueChange={(value) => onPage(value as OpsPage)}><TabsList aria-label="Project views" data-page={page}><TabsTrigger value="floor"><span className="wj-mode-label">Run</span></TabsTrigger><TabsTrigger value="board"><span className="wj-mode-label">Plan</span></TabsTrigger><TabsTrigger value="spec"><span className="wj-mode-label">Spec</span></TabsTrigger></TabsList></Tabs>
             : <Button className="wj-mode-trigger wj-plan-mode-trigger" variant="ghost" size="sm" aria-pressed={false} onClick={(event) => navigate("ops", event.detail > 0)}><LayoutDashboard /><span className="wj-mode-label">Plan</span></Button>}
         </div>
       </div>
@@ -1301,7 +1301,7 @@ export function OpsSurface({
   onRequestDecomposition: (card: OpsCard, plannerId: string) => Promise<OpsDecompositionProposal>;
   onPreviewDecomposition: (card: OpsCard, tasks: OpsDecompositionTaskDraft[]) => Promise<{ dispatchKeys: string[]; preview?: RoutePreview }>;
   onCommitDecomposition: (card: OpsCard, tasks: OpsDecompositionTaskDraft[], dispatchKeys: string[], preview?: RoutePreview) => Promise<void>;
-  onDependencies: (card: OpsCard, dependencyIds: string[]) => void;
+  onDependencies: (card: OpsCard, dependencyIds: string[], hardDependencyIds: string[]) => void;
   onReview: (card: OpsCard) => void;
   onDocument: (kind: "prd" | "tdd", value: string) => void;
   onGenerate: (kind: "prd" | "tdd") => void;
@@ -1355,6 +1355,7 @@ export function OpsSurface({
   const [bulkRecoveryOpen, setBulkRecoveryOpen] = useState(false);
   const [dependencyCard, setDependencyCard] = useState<OpsCard>();
   const [dependencyDraft, setDependencyDraft] = useState<Set<string>>(new Set());
+  const [dependencyHardDraft, setDependencyHardDraft] = useState<Set<string>>(new Set());
   const [contractCard, setContractCard] = useState<OpsCard>();
   const [contractEditDefinition, setContractEditDefinition] = useState("");
   const [contractEditConstraints, setContractEditConstraints] = useState("");
@@ -1368,7 +1369,7 @@ export function OpsSurface({
   const [taskBrief, setTaskBrief] = useState("");
   const [taskCreationBusy, setTaskCreationBusy] = useState(false);
   const [taskCreationError, setTaskCreationError] = useState("");
-  const [boardView, setBoardView] = useState<"board" | "list">("board");
+  const [boardView, setBoardView] = useState<"board" | "list">("list");
   const [specKind, setSpecKind] = useState<"prd" | "tdd">("prd");
   const [steeringCardId, setSteeringCardId] = useState<string>();
   const [steeringDraft, setSteeringDraft] = useState("");
@@ -1382,7 +1383,6 @@ export function OpsSurface({
   const documentWarnings = page === "board" ? kanban?.warnings ?? [] : page === "spec" ? selectedDocument?.warnings ?? [] : [];
   const missingDocumentCount = documents ? Object.values(documents.documents).filter((document) => !document.exists).length : 3;
   const boardWritable = kanban?.format === "wheeljack-v1";
-  const pendingMoveTarget = state.columns.find((column) => column.id === pendingAction?.targetColumnId);
   const structuredRuntimes = runtimes.filter((runtime) => runtime.structured);
   const idleStructuredRuntimes = structuredRuntimes.filter((runtime) =>
     runtime.sessionId && !["running", "in_progress", "starting", "blocked", "needs_input"].includes(runtime.status));
@@ -1411,10 +1411,10 @@ export function OpsSurface({
     conflictCardIds.has(card.id),
   );
   const executionLanes = [
-    { id: "ready", title: "Ready", role: "queued" as const, targetColumnId: state.columns.find((column) => column.role === "queued")?.id },
+    { id: "ready", title: "Planned", role: "queued" as const, targetColumnId: state.columns.find((column) => column.role === "queued")?.id },
     { id: "running", title: "Running", role: "active" as const, targetColumnId: state.columns.find((column) => column.role === "active")?.id },
-    { id: "attention", title: "Needs you", role: undefined, targetColumnId: undefined },
-    { id: "verifying", title: "Verifying", role: "review" as const, targetColumnId: state.columns.find((column) => column.role === "review")?.id },
+    { id: "attention", title: "Intervention", role: undefined, targetColumnId: undefined },
+    { id: "verifying", title: "Reconciling", role: "review" as const, targetColumnId: state.columns.find((column) => column.role === "review")?.id },
     { id: "done", title: "Done", role: "done" as const, targetColumnId: state.columns.find((column) => column.role === "done")?.id },
   ];
   const attentionCards = state.cards.filter((card) => cardLane(card) === "attention");
@@ -1533,6 +1533,7 @@ export function OpsSurface({
   const openDependencies = (card: OpsCard) => {
     setDependencyCard(card);
     setDependencyDraft(new Set(card.dependencyIds ?? []));
+    setDependencyHardDraft(new Set((card.dependencyIds ?? []).filter((id) => card.dependencyKinds?.[id] === "hard")));
   };
   const openContract = (card: OpsCard) => {
     setContractCard(card);
@@ -1616,7 +1617,6 @@ export function OpsSurface({
         }}><Columns2 />Decompose task…</Item>}
         {cardRole !== "done" && childProgress.total === 0 && <><Separator />
           <Item disabled={Boolean(card.taskLane?.closedAt)} onSelect={() => taskRuntime ? onOpenRuntime(taskRuntime) : void onStartAgent(card)}>{taskRuntime ? <Terminal /> : <Play />}{taskRuntime ? "Open task agent" : "Start fresh task agent"}</Item>
-          {cardRole !== "review" && <Item onSelect={() => requestCardMove(card, state.columns.find((item) => item.role === "review")?.id ?? card.columnId)}><Search />Request verification…</Item>}
           {cardRole === "active" && <Item onSelect={() => requestCardMove(card, state.columns.find((item) => item.role === "queued")?.id ?? card.columnId)}>{cardHasLiveParticipant(card) ? "Request pause…" : "Move to Ready"}</Item>}
           {opsCanCompleteWithOverride(card) && <Item onSelect={() => requestCardMove(card, state.columns.find((item) => item.role === "done")?.id ?? card.columnId)}><CheckIcon />Complete with override…</Item>}
         </>}
@@ -1661,7 +1661,7 @@ export function OpsSurface({
         <div className="wj-breadcrumb"><LayoutDashboard /><strong>Plan</strong><span className="wj-board-summary">{state.cards.length} tasks</span></div>
         <div className="wj-ops-actions">
           {missingDocumentCount > 0 && <Button variant="outline" size="sm" onClick={onBootstrapPlan}><MonitorCog /><span>Bootstrap plan</span></Button>}
-          {page === "board" && <div className="wj-view-control"><span>View</span><Tabs className="wj-board-view" value={boardView} onValueChange={(value) => setBoardView(value as "board" | "list")}><TabsList aria-label="Task view"><TabsTrigger aria-label="Columns view" value="board">Columns</TabsTrigger><TabsTrigger aria-label="List view" value="list">List</TabsTrigger></TabsList></Tabs></div>}
+          {page === "board" && <div className="wj-view-control"><span>View</span><Tabs className="wj-board-view" value={boardView} onValueChange={(value) => setBoardView(value as "board" | "list")}><TabsList aria-label="Plan task view"><TabsTrigger aria-label="Plan list view" value="list">Plan</TabsTrigger><TabsTrigger aria-label="Execution status columns" value="board">Status</TabsTrigger></TabsList></Tabs></div>}
           {page === "board" && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -1786,7 +1786,7 @@ export function OpsSurface({
           </form>}
           {attentionCards.length > 0 && <div className="wj-board-floor-link" role="status">
             <span><CircleDot />{attentionCards.length} {attentionCards.length === 1 ? "exception needs" : "exceptions need"} attention</span>
-            <Button variant="ghost" size="sm" onClick={() => onPage("floor")}>Open Floor<ChevronRight /></Button>
+            <Button variant="ghost" size="sm" onClick={() => onPage("floor")}>Open Run<ChevronRight /></Button>
           </div>}
           <div className="wj-ops-content" ref={opsContentRef}>
             <ScrollArea className="min-h-0 min-w-0 flex-1">
@@ -1978,7 +1978,7 @@ export function OpsSurface({
                                 </div>}
                                 {cardRole === "review" && <div className="wj-task-review-state"><span>Review</span><strong>{review}</strong></div>}
                                 {cardRole === "review" && <div className="wj-verification-progress" aria-label={`${verification.passed} of ${verification.total} verification signals`}>
-                                  <div><span>Verification</span><strong>{verification.passed}/{verification.total}</strong></div>
+                                  <div><span>Evidence</span><strong>{verification.passed}/{verification.total}</strong></div>
                                   <span style={{ "--wj-progress": `${verification.passed / verification.total * 100}%` } as React.CSSProperties} />
                                 </div>}
                                 <div className="wj-task-actions" data-quiet={["running", "attention"].includes(lane.id) || undefined}>
@@ -1986,7 +1986,7 @@ export function OpsSurface({
                                     ? <Button variant="ghost" size="xs" onClick={() => setEditingCardId(undefined)}>Done</Button>
                                     : childProgress.total > 0
                                       ? childProgress.done === childProgress.total
-                                        ? <Button variant="ghost" size="xs" onClick={() => requestCardMove(card, state.columns.find((item) => item.role === "review")?.id ?? card.columnId)}><Search />Review parent</Button>
+                                        ? <span className="wj-task-complete"><RefreshCw />Reconciling child results</span>
                                         : <span className="wj-task-complete">{childProgress.done}/{childProgress.total} complete</span>
                                     : ["running", "attention"].includes(lane.id)
                                       ? null
@@ -2330,7 +2330,7 @@ export function OpsSurface({
         <AlertDialogContent className="wj-dialog wj-dialog-medium">
           <AlertDialogHeader>
             <AlertDialogTitle>Verification contract</AlertDialogTitle>
-            <AlertDialogDescription>Define the evidence required before “{contractCard?.title}” can leave Verifying.</AlertDialogDescription>
+            <AlertDialogDescription>Define the checks the worker must run before reporting “{contractCard?.title}” complete.</AlertDialogDescription>
           </AlertDialogHeader>
           <div className="space-y-3">
             <div><Label htmlFor="edit-task-definition">Definition of done</Label><Textarea id="edit-task-definition" value={contractEditDefinition} onChange={(event) => setContractEditDefinition(event.target.value)} placeholder="Observable acceptance criteria" /></div>
@@ -2358,7 +2358,7 @@ export function OpsSurface({
         <AlertDialogContent className="wj-dialog wj-dialog-medium">
           <AlertDialogHeader>
             <AlertDialogTitle>Dependencies for “{dependencyCard?.title}”</AlertDialogTitle>
-            <AlertDialogDescription>Select tasks that must finish before this task can proceed. Cycles are disabled.</AlertDialogDescription>
+            <AlertDialogDescription>Relationships are soft by default and do not block agents. Mark one hard only when its artifact is required first.</AlertDialogDescription>
           </AlertDialogHeader>
           <div className="wj-dependency-picker">
             {dependencyCard && state.cards.filter((card) => card.id !== dependencyCard.id).map((card) => {
@@ -2371,11 +2371,15 @@ export function OpsSurface({
                   onCheckedChange={(value) => setDependencyDraft((current) => {
                     const next = new Set(current);
                     if (value) next.add(card.id);
-                    else next.delete(card.id);
+                    else {
+                      next.delete(card.id);
+                      setDependencyHardDraft((hard) => { const updated = new Set(hard); updated.delete(card.id); return updated; });
+                    }
                     return next;
                   })}
                 />
                 <span><strong>{card.title}</strong><small>{state.columns.find((column) => column.id === card.columnId)?.title}</small></span>
+                {checked && <span role="button" tabIndex={0} aria-label={`${dependencyHardDraft.has(card.id) ? "Make soft" : "Make hard"} relationship with ${card.title}`} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setDependencyHardDraft((current) => { const next = new Set(current); if (next.has(card.id)) next.delete(card.id); else next.add(card.id); return next; }); }} onKeyDown={(event) => { if (event.key !== "Enter" && event.key !== " ") return; event.preventDefault(); event.currentTarget.click(); }}><Badge variant="outline">{dependencyHardDraft.has(card.id) ? "Hard" : "Soft"}</Badge></span>}
               </label>;
             })}
             {dependencyCard && state.cards.length === 1 && <p>No other tasks can be linked yet.</p>}
@@ -2384,7 +2388,7 @@ export function OpsSurface({
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={() => {
               if (!dependencyCard) return;
-              onDependencies(dependencyCard, [...dependencyDraft]);
+              onDependencies(dependencyCard, [...dependencyDraft], [...dependencyHardDraft]);
               setDependencyCard(undefined);
             }}>Save dependencies</AlertDialogAction>
           </AlertDialogFooter>
@@ -2429,7 +2433,7 @@ export function OpsSurface({
               </section>
               {(inspectedCard.dependencyIds?.length || inspectedCard.expectedFiles.length) ? <section>
                 <div className="wj-inspector-section-title"><span>Working set</span></div>
-                {Boolean(inspectedCard.dependencyIds?.length) && <div className="wj-inspector-list"><strong>Dependencies</strong>{inspectedCard.dependencyIds?.map((id) => <span key={id}>{state.cards.find((card) => card.id === id)?.title ?? id}</span>)}</div>}
+                {Boolean(inspectedCard.dependencyIds?.length) && <div className="wj-inspector-list"><strong>Relationships</strong>{inspectedCard.dependencyIds?.map((id) => <span key={id}>{state.cards.find((card) => card.id === id)?.title ?? id} · {inspectedCard.dependencyKinds?.[id] === "hard" ? "Hard" : "Soft"}</span>)}</div>}
                 {inspectedCard.expectedFiles.length > 0 && <div className="wj-inspector-list"><strong>Claimed files</strong>{inspectedCard.expectedFiles.map((file) => <code key={file}>{file}</code>)}</div>}
               </section> : null}
               <section>
@@ -2446,7 +2450,7 @@ export function OpsSurface({
                 : inspectedRole === "review"
                 ? <Button onClick={() => { setInspectedCardId(undefined); onReview(inspectedCard); }}><Search />Review evidence</Button>
                 : inspectedChildProgress.total > 0
-                  ? inspectedChildProgress.done === inspectedChildProgress.total && <Button onClick={() => { setInspectedCardId(undefined); requestCardMove(inspectedCard, state.columns.find((item) => item.role === "review")?.id ?? inspectedCard.columnId); }}><Search />Review parent</Button>
+                  ? inspectedChildProgress.done === inspectedChildProgress.total && <span className="wj-task-complete"><RefreshCw />Reconciling child results</span>
                   : <Button disabled={!boardWritable || Boolean(inspectedCard.taskLane?.closedAt)} onClick={() => { setInspectedCardId(undefined); intervene(inspectedCard); }}><Play />{cardLane(inspectedCard) === "attention" ? "Intervene" : inspectedTaskLaneLive ? "Open task agent" : "Start fresh task agent"}</Button>}
               <Button variant="outline" onClick={() => openDependencies(inspectedCard)}><GitBranch />Dependencies</Button>
             </footer>
@@ -2472,7 +2476,7 @@ export function OpsSurface({
         <ContextMenuItem onSelect={() => selectedDocument?.exists ? onGenerate(specKind) : onCreateDocument(specKind)}>{selectedDocument?.exists ? "Use template" : `Create ${specKind.toUpperCase()}.md`}</ContextMenuItem>
         <ContextMenuItem disabled={!selectedDocument?.exists || !boardWritable} onSelect={() => onCreateTasks(specKind)}><Plus />Create tasks</ContextMenuItem>
       </> : <>
-        <ContextMenuItem onSelect={() => onPage("board")}><LayoutDashboard />Open Board</ContextMenuItem>
+        <ContextMenuItem onSelect={() => onPage("board")}><LayoutDashboard />Open Plan</ContextMenuItem>
         <ContextMenuItem onSelect={onOpenAgentSettings}><Settings />Agent policy settings</ContextMenuItem>
       </>}
       <DevToolsContextItem />
@@ -2568,12 +2572,12 @@ export function FloorSurface({
     return typeof leaseId === "string" && leaseId.length > 0 && !isTerminalSessionStatus(runtime.status);
   }).length;
   const schedulerIntent = !autonomousPickup
-    ? { label: "Manual starts", detail: model.nextAutonomousTask ? `Next ready: ${model.nextAutonomousTask.card.title}` : "No unassigned dependency-ready task is available." }
+    ? { label: "Manual starts", detail: model.nextAutonomousTask ? `Next planned: ${model.nextAutonomousTask.card.title}` : "No unassigned eligible task is available." }
     : schedulerActiveAgents >= autonomousConcurrency
       ? { label: "Auto-start limit reached", detail: `${schedulerActiveAgents}/${autonomousConcurrency} scheduler slots are in use.` }
       : model.nextAutonomousTask
         ? { label: "Next pickup", detail: model.nextAutonomousTask.card.title }
-        : { label: "No eligible pickup", detail: "No unassigned dependency-ready task is available." };
+        : { label: "No eligible pickup", detail: "No unassigned eligible task is available." };
   useEffect(() => {
     if (!runGraphModel.emptyWindow) setRunGraphExpanded(true);
   }, [runGraphModel.emptyWindow]);
@@ -2699,7 +2703,7 @@ export function FloorSurface({
   };
   const renderReadyTask = (task: OpsFloorTask, index: number) => <article className="wj-floor-queue-row" data-card-id={task.card.id} key={task.card.id}>
     <span className="wj-floor-queue-position" aria-label={`Queue position ${index + 1}`}>{String(index + 1).padStart(2, "0")}</span>
-    <button className="wj-floor-queue-task" type="button" onClick={() => dockInspect(task.card.id)}><strong>{task.card.title}</strong><small>{task.card.dependencyIds?.length ? `${task.card.dependencyIds.length} dependencies` : "Dependency-ready"} · {task.verification.passed}/{task.verification.total} checks</small></button>
+    <button className="wj-floor-queue-task" type="button" onClick={() => dockInspect(task.card.id)}><strong>{task.card.title}</strong><small>{task.card.dependencyIds?.length ? `${task.card.dependencyIds.length} relationships · eligible` : "Eligible"} · {task.verification.passed}/{task.verification.total} checks</small></button>
     <Button variant="outline" size="sm" onClick={() => void onStartAgent(task.card)}><Play />Start</Button>
   </article>;
   const floorAttentionActions = (item: OpsFloorAttention): ActionCardAction[] => {
@@ -2723,11 +2727,9 @@ export function FloorSurface({
       ? "Response needed"
       : runtime && floorRuntimeCanRecover(runtime.status)
         ? "Agent stopped"
-        : item.kind === "review"
-          ? "Review ready"
-          : item.kind === "dependency"
-            ? "Blocked by dependency"
-            : "Intervention required";
+         : item.kind === "review"
+           ? "Review ready"
+           : "Intervention required";
   const renderFloorAction = (action: (typeof model.actionQueue)[number]) => {
     if (action.type === "attention") {
       const item = action.item;
@@ -2769,12 +2771,12 @@ export function FloorSurface({
       </section>
       <section><div className="wj-floor-inspector-label"><span>Workspace</span></div><p className="wj-floor-inspector-code">{taskWorkspaceLabel(dockedCard, projectIsRepo)}</p>{dockedCard.taskLane && <><code>{dockedCard.taskLane.branch}</code><code>{dockedCard.taskLane.cwd}</code></>}</section>
       {dockedAttention && <section><div className="wj-floor-inspector-label"><span>Intervention evidence</span><RunStateBadge status={dockedAttention.kind} variant="compact" /></div><p>{dockedAttention.reason}</p></section>}
-      <section><div className="wj-floor-inspector-label"><span>Verification</span><strong>{dockedVerification?.passed}/{dockedVerification?.total}</strong></div><div className="wj-floor-inspector-checks">{dockedVerification?.checks.map((check) => <span data-passed={check.passed || undefined} key={check.label}><CheckIcon />{check.label}</span>)}</div>{dockedConflictFiles.length > 0 && <p className="wj-floor-inspector-warning"><CircleDot />{dockedConflictFiles.length} file {dockedConflictFiles.length === 1 ? "contention" : "contentions"}</p>}</section>
-      {(dockedCard.dependencyIds?.length || dockedCard.expectedFiles.length) ? <section><div className="wj-floor-inspector-label"><span>Working set</span></div>{Boolean(dockedCard.dependencyIds?.length) && <div className="wj-floor-inspector-list"><strong>Dependencies</strong>{dockedCard.dependencyIds?.map((id) => <span key={id}>{cardById.get(id)?.title ?? id}</span>)}</div>}{dockedCard.expectedFiles.length > 0 && <div className="wj-floor-inspector-list"><strong>Claimed files</strong>{dockedCard.expectedFiles.map((file) => <code key={file}>{file}</code>)}</div>}</section> : null}
+      <section><div className="wj-floor-inspector-label"><span>Evidence and reconciliation</span><strong>{dockedVerification?.passed}/{dockedVerification?.total}</strong></div><div className="wj-floor-inspector-checks">{dockedVerification?.checks.map((check) => <span data-passed={check.passed || undefined} key={check.label}><CheckIcon />{check.label}</span>)}</div>{dockedCard.report?.evidence && <p>{dockedCard.report.evidence}</p>}{dockedCard.reconciliation?.message && <small>{dockedCard.reconciliation.message}</small>}{dockedConflictFiles.length > 0 && <p className="wj-floor-inspector-warning"><CircleDot />{dockedConflictFiles.length} file {dockedConflictFiles.length === 1 ? "contention" : "contentions"}</p>}</section>
+      {(dockedCard.dependencyIds?.length || dockedCard.expectedFiles.length) ? <section><div className="wj-floor-inspector-label"><span>Working set</span></div>{Boolean(dockedCard.dependencyIds?.length) && <div className="wj-floor-inspector-list"><strong>Relationships</strong>{dockedCard.dependencyIds?.map((id) => <span key={id}>{cardById.get(id)?.title ?? id} · {dockedCard.dependencyKinds?.[id] === "hard" ? "Hard" : "Soft"}</span>)}</div>}{dockedCard.expectedFiles.length > 0 && <div className="wj-floor-inspector-list"><strong>Claimed files</strong>{dockedCard.expectedFiles.map((file) => <code key={file}>{file}</code>)}</div>}</section> : null}
       {dockedCard.steeringDirective && <section><div className="wj-floor-inspector-label"><span>Latest directive</span><RunStateBadge status={dockedCard.steeringDirective.status} variant="compact" /></div><p>{dockedCard.steeringDirective.text}</p>{dockedCard.steeringDirective.error && <small>{dockedCard.steeringDirective.error}</small>}</section>}
       <section><div className="wj-floor-inspector-label"><span>Task timeline</span><strong>{dockedTimeline.length}</strong></div><ol className="wj-floor-inspector-events">{dockedTimeline.map((item) => <li data-kind={item.kind} key={item.id}><span /><div><strong>{item.message}</strong><small>{item.actor ? `${agentName(item.actor)} · ` : ""}{formatTime(item.timestamp)}</small></div></li>)}</ol>{!dockedTimeline.length && <p className="wj-floor-empty">No task activity yet.</p>}</section>
     </div>
-    <footer className="wj-floor-inspector-actions">{dockedRuntime && <Button size="xs" onClick={() => onOpenRuntime(dockedRuntime)}><Terminal />Open agent</Button>}{dockedRole === "review" && <Button size="xs" onClick={() => onReview(dockedCard)}><Search />Review</Button>}{dockedRole === "queued" && !dockedCard.assigneeIds.length && <Button size="xs" onClick={() => void onStartAgent(dockedCard)}><Play />Start now</Button>}<Button variant="outline" size="xs" onClick={() => onInspect(dockedCard.id)}>Full details</Button></footer>
+    <footer className="wj-floor-inspector-actions">{dockedRuntime && <Button size="xs" onClick={() => onOpenRuntime(dockedRuntime)}><Terminal />Open agent</Button>}{dockedRole === "review" && dockedCard.reviewPolicy === "human" && <Button size="xs" onClick={() => onReview(dockedCard)}><Search />Review evidence</Button>}{dockedRole === "queued" && !dockedCard.assigneeIds.length && <Button size="xs" onClick={() => void onStartAgent(dockedCard)}><Play />Start now</Button>}<Button variant="outline" size="xs" onClick={() => onInspect(dockedCard.id)}>Full details</Button></footer>
   </section> : undefined;
   const concurrencyOptions = Array.from({ length: Math.max(1, Math.min(8, maxAutonomousConcurrency)) }, (_, index) => index + 1);
   const runGraphSummary = runGraphModel.emptyWindow
@@ -2787,8 +2789,8 @@ export function FloorSurface({
       <dl className="wj-floor-metrics">
         <div><dt>Connected</dt><dd>{model.connectedAgents}</dd></div>
         <div><dt>Working</dt><dd>{model.workingAgents}</dd></div>
-        <div data-attention={model.actionQueue.length > 0 || undefined}><dt>Needs you</dt><dd>{model.actionQueue.length}</dd></div>
-        <div><dt>Ready</dt><dd>{model.ready.length}</dd></div>
+        <div data-attention={model.actionQueue.length > 0 || undefined}><dt>Interventions</dt><dd>{model.actionQueue.length}</dd></div>
+        <div><dt>Planned</dt><dd>{model.ready.length}</dd></div>
       </dl>
       <div className="wj-floor-scheduler-controls"><label><span>Autonomy</span><Switch aria-label="Autonomous pickup" checked={autonomousPickup} onCheckedChange={onAutonomousPickupChange} /></label><label><span>New starts</span><Select value={String(autonomousConcurrency)} onValueChange={(value) => onAutonomousConcurrencyChange(Number(value))}><SelectTrigger aria-label="Automatic new-start limit"><SelectValue /></SelectTrigger><SelectContent>{concurrencyOptions.map((limit) => <SelectItem value={String(limit)} key={limit}>{limit} at a time</SelectItem>)}</SelectContent></Select></label><Button variant="ghost" size="sm" onClick={onOpenAgentSettings}><Settings />Policy</Button></div>
     </section>
@@ -2816,7 +2818,7 @@ export function FloorSurface({
         className="wj-floor-resizer"
         role="separator"
         tabIndex={0}
-        aria-label="Resize floor side rail"
+        aria-label="Resize Run side rail"
         aria-orientation="vertical"
         aria-valuemin={FLOOR_RAIL_MIN_WIDTH}
         aria-valuemax={FLOOR_RAIL_MAX_WIDTH}
@@ -2837,10 +2839,10 @@ export function FloorSurface({
       <aside className="wj-floor-rail" aria-label="Interventions and scheduler queue" data-inspecting={Boolean(dockedInspector) || undefined} data-needs-empty={model.actionQueue.length === 0 || undefined}>
         {dockedInspector ?? <>
           {model.actionQueue.length
-            ? <section className="wj-floor-panel wj-floor-needs" aria-labelledby="floor-needs-heading"><header><div><span className="wj-section-label">Intervention queue</span><h2 id="floor-needs-heading">Needs you</h2></div><Badge variant="destructive">{model.actionQueue.length}</Badge></header><div className="wj-floor-action-list" role="region" aria-label="Intervention queue" tabIndex={0}>{model.actionQueue.map(renderFloorAction)}</div></section>
-            : <section className="wj-floor-panel wj-floor-needs wj-floor-clear-strip" aria-labelledby="floor-needs-heading"><CheckIcon /><div><span className="wj-section-label">Needs you</span><h2 id="floor-needs-heading">No intervention required</h2></div><Badge variant="outline">0</Badge></section>}
+            ? <section className="wj-floor-panel wj-floor-needs" aria-labelledby="floor-needs-heading"><header><div><span className="wj-section-label">Intervention queue</span><h2 id="floor-needs-heading">Exceptions</h2></div><Badge variant="destructive">{model.actionQueue.length}</Badge></header><div className="wj-floor-action-list" role="region" aria-label="Intervention queue" tabIndex={0}>{model.actionQueue.map(renderFloorAction)}</div></section>
+            : <section className="wj-floor-panel wj-floor-needs wj-floor-clear-strip" aria-labelledby="floor-needs-heading"><CheckIcon /><div><span className="wj-section-label">Interventions</span><h2 id="floor-needs-heading">No intervention required</h2></div><Badge variant="outline">0</Badge></section>}
           <section className="wj-floor-panel wj-floor-ready" aria-labelledby="floor-ready-heading"><header><div><span className="wj-section-label">Scheduler order</span><h2 id="floor-ready-heading">Ready next</h2></div><Badge variant="outline">{model.ready.length}</Badge></header>
-            {model.ready.length ? <div className="wj-floor-queue-list" role="region" aria-label="Ready tasks" tabIndex={0}>{model.ready.map(renderReadyTask)}</div> : <p className="wj-floor-empty">No dependency-ready tasks are queued.</p>}
+            {model.ready.length ? <div className="wj-floor-queue-list" role="region" aria-label="Ready tasks" tabIndex={0}>{model.ready.map(renderReadyTask)}</div> : <p className="wj-floor-empty">No eligible tasks are queued.</p>}
           </section>
         </>}
       </aside>
@@ -3932,7 +3934,9 @@ export function TranscriptDrawerSurface({
   );
 }
 
-export function ReviewDrawerSurface({
+// Kept during state migration while persisted verification runs and recovery callbacks remain supported.
+// oxlint-disable-next-line eslint(no-unused-vars)
+function LegacyReviewDrawerSurface({
   reviewCard,
   reviewEvidenceReady,
   reviewEvidenceMessage,
@@ -4069,6 +4073,31 @@ export function ReviewDrawerSurface({
       },
     }] : []),
   ] : [];
+  if (reviewCard?.report) {
+    const humanAcceptance = reviewCard.reviewPolicy === "human" && reviewCard.reconciliation?.status === "needs_human";
+    return <Sheet open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <SheetContent className="wj-drawer" side="right" style={{ "--wj-drawer-width": `${drawerWidth}px` } as React.CSSProperties}>
+        <div className="wj-drawer-resizer" role="separator" tabIndex={0} aria-label="Resize task evidence" aria-orientation="vertical" aria-valuemin={320} aria-valuemax={760} aria-valuenow={drawerWidth} onPointerDown={(event) => beginHorizontalResize(event, drawerWidth, 320, 760, -1, setDrawerWidth)} />
+        <SheetHeader><SheetTitle>Task evidence</SheetTitle><SheetDescription>Worker evidence and objective-level reconciliation state.</SheetDescription></SheetHeader>
+        <ScrollArea className="wj-drawer-body"><div className="wj-drawer-review">
+          <ActionCard variant="evidence" title={reviewCard.title} summary={reviewCard.detail} source="worker report" status="completed">
+            <div className="wj-section-label">Report</div><p className="mt-2 text-sm">{reviewCard.report.summary}</p>
+            {reviewCard.report.evidence && <p className="mt-3 text-sm text-muted-foreground">{reviewCard.report.evidence}</p>}
+            {reviewCard.report.checks.length > 0 && <div className="wj-floor-inspector-checks mt-4">{reviewCard.report.checks.map((check) => <span data-passed key={check}><CheckIcon />{check}</span>)}</div>}
+            {reviewCard.report.risks.length > 0 && <div className="wj-inspector-warning mt-4"><CircleDot />{reviewCard.report.risks.join(" · ")}</div>}
+          </ActionCard>
+          <ActionCard variant="evidence" title="Reconciliation" summary={reviewCard.reconciliation?.message || "Waiting for reconciliation."} source="wheeljack core" status={reviewCard.reconciliation?.status === "integrated" ? "completed" : humanAcceptance ? "review" : "verifying"}>
+            {reviewCard.taskLane && <div className="wj-transcript-meta"><code>{reviewCard.taskLane.branch}</code><code>{reviewCard.taskLane.baseCommit.slice(0, 10)}</code><code>{reviewCard.taskLane.worktreePath}</code></div>}
+          </ActionCard>
+          <ActionCard variant="evidence" title="Repository evidence" summary={reviewEvidenceMessage} source={reviewCard.taskLane ? "task worktree" : "shared checkout"} status={reviewEvidenceReady ? "completed" : "pending"} detailLabel={evidence?.changedFiles.length ? `Show ${evidence.changedFiles.length} changed ${evidence.changedFiles.length === 1 ? "file" : "files"}` : "Show repository evidence"} details={<>{evidence?.changedFiles.map((file) => <div className="wj-file-row" key={file}><Files />{file}</div>)}{evidence?.text && <pre className="wj-diff mt-3">{evidence.text}</pre>}</>} />
+        </div></ScrollArea>
+        {humanAcceptance && <div className="wj-drawer-footer wj-review-recommendation"><ActionCard variant="recommendation" title="Explicit acceptance" status="review" recommendation="Accept or request changes" rationale="This task was configured to require a human decision." actions={[
+          { id: "changes", label: feedbackOpen ? "Start fresh worker" : "Request changes", intent: "secondary", disabled: feedbackOpen && !feedback.trim(), pending: changesBusy, onInvoke: () => feedbackOpen ? submitReviewChanges() : setFeedbackOpen(true) },
+          { id: "accept", label: "Accept and reconcile", intent: "primary", pending: approvalBusy, disabled: approvalBusy, onInvoke: () => { setApprovalBusy(true); void onReviewAction(true).finally(() => setApprovalBusy(false)); } },
+        ]}>{feedbackOpen && <div className="space-y-2"><Textarea autoFocus aria-label="Review feedback" value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="What must change?" />{changesError && <p className="text-sm text-destructive" role="alert">{changesError}</p>}</div>}</ActionCard></div>}
+      </SheetContent>
+    </Sheet>;
+  }
   return (
     <Sheet open={Boolean(reviewCard)} onOpenChange={(open) => {
       if (open) return;
@@ -4140,6 +4169,67 @@ export function ReviewDrawerSurface({
       </SheetContent>
     </Sheet>
   );
+}
+
+export function ReviewDrawerSurface({
+  reviewCard,
+  reviewEvidenceReady,
+  reviewEvidenceMessage,
+  evidence,
+  onClose,
+  onReviewAction,
+  onRequestChanges,
+}: {
+  reviewCard?: OpsCard;
+  reviewEvidenceReady: boolean;
+  reviewEvidenceMessage: string;
+  evidence?: OpsReviewEvidence;
+  hasFileConflict?: boolean;
+  verificationBusy?: boolean;
+  onClose: () => void;
+  onReviewAction: (approved: boolean) => Promise<void>;
+  onStartReviewer?: (card: OpsCard) => Promise<boolean>;
+  onRunVerification?: (card: OpsCard) => Promise<void>;
+  onCancelVerification?: (card: OpsCard) => Promise<void>;
+  onViewVerificationOutput?: (card: OpsCard) => Promise<void>;
+  onRequestChanges: (card: OpsCard, feedback: string) => Promise<boolean>;
+  onUpdateContract?: (card: OpsCard, change: OpsTaskEditablePatch) => void;
+}) {
+  const [drawerWidth, setDrawerWidth] = useState(480);
+  const [feedback, setFeedback] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const humanAcceptance = reviewCard?.reviewPolicy === "human";
+  const requestChanges = () => {
+    if (!reviewCard || !feedback.trim()) return;
+    setBusy(true);
+    setError("");
+    void onRequestChanges(reviewCard, feedback).then((started) => {
+      if (started) setFeedback("");
+    }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setBusy(false));
+  };
+  return <Sheet open={Boolean(reviewCard)} onOpenChange={(open) => { if (!open) onClose(); }}>
+    <SheetContent className="wj-drawer" side="right" style={{ "--wj-drawer-width": `${drawerWidth}px` } as React.CSSProperties}>
+      <div className="wj-drawer-resizer" role="separator" tabIndex={0} aria-label="Resize task evidence" aria-orientation="vertical" aria-valuemin={320} aria-valuemax={760} aria-valuenow={drawerWidth} onPointerDown={(event) => beginHorizontalResize(event, drawerWidth, 320, 760, -1, setDrawerWidth)} />
+      <SheetHeader><SheetTitle>Task evidence</SheetTitle><SheetDescription>Worker results and automatic reconciliation state.</SheetDescription></SheetHeader>
+      {reviewCard && <ScrollArea className="wj-drawer-body"><div className="wj-drawer-review">
+        <ActionCard variant="evidence" title={reviewCard.title} summary={reviewCard.report?.summary || reviewCard.lastNote || reviewCard.detail} source={reviewCard.report ? "worker report" : "legacy handoff"} status="completed">
+          {reviewCard.report?.evidence && <p className="mt-3 text-sm text-muted-foreground">{reviewCard.report.evidence}</p>}
+          {reviewCard.report && reviewCard.report.checks.length > 0 && <div className="wj-floor-inspector-checks mt-4">{reviewCard.report.checks.map((check) => <span data-passed key={check}><CheckIcon />{check}</span>)}</div>}
+          {reviewCard.report && reviewCard.report.risks.length > 0 && <div className="wj-inspector-warning mt-4"><CircleDot />{reviewCard.report.risks.join(" · ")}</div>}
+        </ActionCard>
+        <ActionCard variant="evidence" title="Reconciliation" summary={reviewCard.reconciliation?.message || "Queued for automatic reconciliation."} source="wheeljack core" status={reviewCard.reconciliation?.status === "integrated" ? "completed" : reviewCard.reconciliation?.status === "needs_human" ? "review" : "verifying"}>
+          {reviewCard.taskLane && <div className="wj-transcript-meta"><code>{reviewCard.taskLane.branch}</code><code>{reviewCard.taskLane.baseCommit.slice(0, 10)}</code><code>{reviewCard.taskLane.worktreePath}</code></div>}
+        </ActionCard>
+        <ActionCard variant="evidence" title="Repository evidence" summary={reviewEvidenceMessage} source={reviewCard.taskLane ? "task worktree" : "shared checkout"} status={reviewEvidenceReady ? "completed" : "pending"} detailLabel={evidence?.changedFiles.length ? `Show ${evidence.changedFiles.length} changed ${evidence.changedFiles.length === 1 ? "file" : "files"}` : "Show repository evidence"} details={<>{evidence?.changedFiles.map((file) => <div className="wj-file-row" key={file}><Files />{file}</div>)}{evidence?.text && <pre className="wj-diff mt-3">{evidence.text}</pre>}</>} />
+      </div></ScrollArea>}
+      {reviewCard && (humanAcceptance || reviewCard.reconciliation?.status === "needs_human") && <div className="wj-drawer-footer space-y-2">
+        <Textarea aria-label="Task feedback" value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="Describe what the worker should repair…" />
+        {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+        <div className="flex justify-end gap-2"><Button variant="outline" disabled={busy || !feedback.trim()} onClick={requestChanges}>Send repair task</Button>{humanAcceptance && <Button disabled={busy} onClick={() => { setBusy(true); void onReviewAction(true).finally(() => setBusy(false)); }}>Accept and reconcile</Button>}</div>
+      </div>}
+    </SheetContent>
+  </Sheet>;
 }
 
 function Empty({ title, detail, action, icon = <Inbox />, compact = false }: { title: string; detail: string; action?: React.ReactNode; icon?: React.ReactNode; compact?: boolean }) {

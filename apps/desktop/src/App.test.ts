@@ -915,7 +915,7 @@ test("applies coordination events without changing unrelated cards", () => {
   expect(review.eventCursors).toEqual({ alpha: 3, beta: 1 });
 });
 
-test("moves a coordinated task to verification when every agent is done", () => {
+test("turns completed worker coordination into a durable report queued for reconciliation", () => {
   const current = parseOpsState({
     version: 2,
     cards: [
@@ -953,7 +953,28 @@ test("moves a coordinated task to verification when every agent is done", () => 
     warnings: [],
   });
 
-  expect(result.cards[0].columnId).toBe("review");
+  expect(result.cards[0]).toMatchObject({
+    columnId: "review",
+    report: { status: "reported", reportedAt: "2026-07-23T12:01:00Z" },
+    reconciliation: { status: "queued", attempts: 0 },
+  });
+});
+
+test("migrates legacy review cards into the reconciliation flow", () => {
+  const state = parseOpsState({
+    version: 2,
+    columns: [
+      { id: "queued", title: "Ready", role: "queued" },
+      { id: "review", title: "Review", role: "review" },
+      { id: "done", title: "Done", role: "done" },
+    ],
+    cards: [{ id: "legacy-review", title: "Legacy review", columnId: "review", lastNote: "Worker finished and ran tests." }],
+  });
+
+  expect(state.cards[0]).toMatchObject({
+    report: { status: "reported", summary: "Worker finished and ran tests." },
+    reconciliation: { status: "queued" },
+  });
 });
 
 test("persists a deduplicated coordination timeline and elapsed boundaries", () => {
@@ -1053,7 +1074,7 @@ test("applies semantic task orchestration without raw column offsets", () => {
   expect(done.cards[0]).toMatchObject({ columnId: "done", completedAt: "2026-07-23T12:15:00Z" });
   expect(done.cards[0].events?.map((event) => event.kind)).toEqual(["assignment", "update", "completion"]);
   expect(approved.cards[0].columnId).toBe("done");
-  expect(approved.cards[0].events?.at(-1)?.message).toBe("Verification approved");
+  expect(approved.cards[0].events?.at(-1)?.message).toBe("Reconciled and integrated");
   expect(bypassed.cards[0].columnId).toBe("active");
   expect(bypassed.cards[0].events).toEqual([]);
 });

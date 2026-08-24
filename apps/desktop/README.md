@@ -2,8 +2,8 @@
 
 This is the production wheeljack desktop shell. Tauri embeds `wheeljack-core`
 directly; React with shadcn/ui and Sargam Icons renders Home, Work, Plan
-Board/PRD/TDD, Appearance, Interface, activity, Git, history, review, routing,
-and project-removal surfaces.
+and Run surfaces, PRD/TDD, Appearance, Interface, activity, Git, history,
+autonomous reconciliation, routing, and project-removal surfaces.
 
 The terminal renders wheeljack core frames with Canvas 2D and supports
 recursive splits, structured-agent panes, keyboard/IME and mouse input,

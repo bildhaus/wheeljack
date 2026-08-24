@@ -17,7 +17,9 @@ export function opsNextAutonomousTask(state: Pick<OpsState, "cards" | "columns" 
     && !card.paused
     && !card.assigneeIds.length
     && !card.taskLane?.closedAt
+    && (!card.retryAt || card.retryAt <= new Date().toISOString())
     && (card.dependencyIds ?? []).every((id) => {
+      if (card.dependencyKinds?.[id] === "soft") return true;
       const dependency = byId.get(id);
       return dependency ? doneColumnIds.has(dependency.columnId) : archivedIds.has(id);
     }));
@@ -66,6 +68,9 @@ export function opsAttentionReason(
   if (attentionStatus) return opsStatusAttentionReason(attentionStatus);
   if (hasFileConflict && !opsAgentsCoordinating(statuses, hasFileConflict)) return "Overlapping file claims";
   if (card.paused) return "Work is paused";
+  if (card.reconciliation?.status === "needs_human") return card.reconciliation.message || "Reconciliation needs a decision";
+  if (role === "review" && card.report && card.reviewPolicy === "human") return "Human acceptance was explicitly requested";
+  if (role === "review" && card.report) return undefined;
   if (role === "review" && opsVerificationContractIssues(card).length) return "Verification contract is incomplete";
   if (role === "review" && opsReviewVerdict(card)?.status === "changes_requested") return "Reviewer requested changes";
   if (role === "review" && ["failed", "canceled", "interrupted"].includes(card.verificationRun?.status ?? "")) return "Verification needs to be rerun";
@@ -95,6 +100,15 @@ export function opsExecutionLane(
 }
 
 export function opsVerificationProgress(card: OpsCard, hasFileConflict: boolean) {
+  if (card.report) {
+    const checks = [
+      { label: "Worker report", passed: true },
+      { label: "Self-check evidence", passed: card.report.checks.length > 0 },
+      { label: "No file conflicts", passed: !hasFileConflict },
+      { label: "Reconciled", passed: card.reconciliation?.status === "integrated" },
+    ];
+    return { passed: checks.filter((check) => check.passed).length, total: checks.length, checks };
+  }
   const checks = [
     { label: "Definition of done", passed: Boolean(card.definitionOfDone?.trim()) },
     { label: "Verification command", passed: Boolean(card.verificationCommand?.trim()) },
@@ -152,9 +166,9 @@ export function opsReviewLabel(
   reviewerName?: string,
 ): string {
   if (!card.reviewerId) {
-    if (card.reviewPolicy === "human") return "Human approval · Required";
-    if (card.reviewPolicy === "either") return "Agent or human · Either";
-    return "Agent · Automatic";
+    if (card.reviewPolicy === "human") return "Human acceptance · Required";
+    if (card.reviewPolicy === "either") return "Automatic or human";
+    return "Reconciler · Automatic";
   }
 
   const verdict = opsReviewVerdict(card);
@@ -388,6 +402,7 @@ export function opsAutomaticApprovalCandidates(
   return state.cards.flatMap((card) => {
     if (
       !reviewColumnIds.has(card.columnId)
+      || Boolean(card.report)
       || !["agent", "either"].includes(card.reviewPolicy ?? "agent")
       || opsReviewVerdict(card)?.status !== "approved"
       || card.verificationRun?.status !== "passed"
@@ -523,6 +538,7 @@ export function opsWaitingRelationships(cards: OpsCard[], doneColumnIds: Readonl
   const byId = new Map(cards.map((card) => [card.id, card]));
   return cards.flatMap((card) => {
     const waitingOnCardIds = (card.dependencyIds ?? []).filter((id) => {
+      if (card.dependencyKinds?.[id] === "soft") return false;
       const dependency = byId.get(id);
       return dependency && !doneColumnIds.has(dependency.columnId);
     });
@@ -555,7 +571,7 @@ export function opsDispatchableDecompositionKeys(
   const selectedAgents = new Set<string>();
   const selectedFiles = new Set<string>();
   return tasks.flatMap((task) => {
-    if (!task.agentId || !readyAgentIds.has(task.agentId) || task.dependencyKeys.length || selectedAgents.has(task.agentId)) return [];
+    if (!task.agentId || !readyAgentIds.has(task.agentId) || selectedAgents.has(task.agentId)) return [];
     const files = task.expectedFiles.map((file) => file.trim().replaceAll("\\", "/").toLowerCase()).filter(Boolean);
     if (files.some((file) => selectedFiles.has(file))) return [];
     selectedAgents.add(task.agentId);

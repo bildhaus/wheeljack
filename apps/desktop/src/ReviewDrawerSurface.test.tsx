@@ -2,8 +2,8 @@ import { render, screen } from "@testing-library/react";
 import { ReviewDrawerSurface } from "./ParitySurfaces";
 import type { OpsCard } from "./types";
 
-test("keeps a long requested-changes verdict inside the review footer", () => {
-  const feedback = `REVIEW VERDICT: REQUEST CHANGES\n${"Add concrete verification evidence before approval. ".repeat(80)}`;
+test("shows worker evidence and exposes a repair action only for an intervention", () => {
+  const evidence = "Tests passed and the implementation was committed.";
   const reviewCard: OpsCard = {
     id: "review-long-feedback",
     columnId: "review",
@@ -15,8 +15,8 @@ test("keeps a long requested-changes verdict inside the review footer", () => {
     agentStatuses: {},
     expectedFiles: [],
     lastNote: "",
-    reviewerId: "reviewer",
-    events: [{ id: "review-verdict", kind: "handoff", timestamp: "2026-08-23T10:00:00Z", message: feedback }],
+    report: { status: "reported", summary: "Implementation complete", evidence, checks: ["bun run test"], risks: [], reportedAt: "2026-08-23T10:00:00Z" },
+    reconciliation: { status: "needs_human", attempts: 3, message: "Integration conflict needs intervention.", updatedAt: "2026-08-23T10:01:00Z" },
   };
 
   render(<ReviewDrawerSurface
@@ -35,13 +35,9 @@ test("keeps a long requested-changes verdict inside the review footer", () => {
     onUpdateContract={() => undefined}
   />);
 
-  const editor = screen.getByRole("textbox", { name: "Review feedback" }) as HTMLTextAreaElement;
-  const footer = document.querySelector(".wj-review-recommendation");
-  expect(editor.value).toBe(feedback);
-  expect(editor.classList.contains("max-h-40")).toBe(true);
-  expect(editor.classList.contains("overflow-y-auto")).toBe(true);
-  expect(footer?.classList.contains("max-h-[min(440px,58vh)]")).toBe(true);
-  expect(footer?.classList.contains("overflow-y-auto")).toBe(true);
-  expect(screen.queryByText(feedback)).toBeNull();
-  expect(screen.getByRole("button", { name: "Start fresh worker" })).toBeTruthy();
+  expect(screen.getByText(evidence)).toBeTruthy();
+  expect(screen.getByText("Integration conflict needs intervention.")).toBeTruthy();
+  expect(screen.getByRole("textbox", { name: "Task feedback" })).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Send repair task" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.queryByRole("button", { name: "Accept and reconcile" })).toBeNull();
 });

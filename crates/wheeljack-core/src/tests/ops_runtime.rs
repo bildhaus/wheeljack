@@ -218,3 +218,49 @@ fn ops_scheduler_releases_pending_leases_for_deleted_tasks() {
         .unwrap();
     assert_eq!(deleted_lease_state, "released");
 }
+
+#[test]
+fn ops_scheduler_blocks_only_hard_dependencies_and_future_retries() {
+    let db = ops_db();
+    let state = json!({
+        "columns": [
+            { "id": "queued", "role": "queued" },
+            { "id": "done", "role": "done" }
+        ],
+        "cards": [
+            { "id": "upstream", "columnId": "queued", "assigneeIds": [] },
+            {
+                "id": "soft-dependent",
+                "columnId": "queued",
+                "assigneeIds": [],
+                "dependencyIds": ["upstream"],
+                "dependencyKinds": { "upstream": "soft" }
+            },
+            {
+                "id": "hard-dependent",
+                "columnId": "queued",
+                "assigneeIds": [],
+                "dependencyIds": ["upstream"],
+                "dependencyKinds": { "upstream": "hard" }
+            },
+            {
+                "id": "backing-off",
+                "columnId": "queued",
+                "assigneeIds": [],
+                "retryAt": "2999-01-01T00:00:00Z"
+            }
+        ]
+    });
+    save_ops_state(&db, "canvas-1", "project-1", &state, None).unwrap();
+    configure_ops_scheduler(&db, "project-1", "canvas-1", true, false, 4, None).unwrap();
+
+    let leases = tick_ops_scheduler(&db).unwrap();
+    let task_ids = leases
+        .into_iter()
+        .map(|lease| lease.task_id)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        task_ids,
+        HashSet::from(["upstream".to_string(), "soft-dependent".to_string()])
+    );
+}

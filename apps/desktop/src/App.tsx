@@ -143,7 +143,7 @@ import { ProviderMark } from "./ProviderMark";
 import { DotMatrixLoader } from "./DotMatrixLoader";
 import { createDiagnosticsReport } from "./diagnostics";
 import type { UsageSessionRow } from "./usage";
-import { opsActiveFileConflicts, opsAutomaticApprovalCandidates, opsAutomaticApprovalRetryDelay, opsAutomaticFileConflictInstructions, opsCanCompleteWithOverride, opsCardParticipantIds, opsCurrentCardForAgent, opsDecompositionHasCycle, opsDispatchableDecompositionKeys, opsFileConflictDirectiveIsCurrent, opsNextAutomaticApprovalCandidate, opsResolveFileConflict, opsStatusAttentionReason, opsVerificationApproval, opsVerificationCompletion, opsVerificationContractIssues } from "./opsPresence";
+import { opsActiveFileConflicts, opsAutomaticFileConflictInstructions, opsCanCompleteWithOverride, opsCardParticipantIds, opsCurrentCardForAgent, opsDecompositionHasCycle, opsDispatchableDecompositionKeys, opsFileConflictDirectiveIsCurrent, opsResolveFileConflict, opsStatusAttentionReason, opsVerificationApproval, opsVerificationCompletion, opsVerificationContractIssues } from "./opsPresence";
 import { taskWorktreeCleanupPrompt } from "./taskWorktrees";
 import { createStickerLensScene, StickerLensBackground, type StickerLensScene } from "./StickerLensBackground";
 import {
@@ -220,6 +220,7 @@ import type {
   GitDiff,
   GitStatus,
   GitWorktreeCreateResult,
+  GitWorktreeIntegrate,
   GitWorktreeReview,
   JsonObject,
   LayoutMode,
@@ -471,7 +472,7 @@ export function App() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [planActive, setPlanActive] = useState(false);
   const [autonomousPickup, setAutonomousPickup] = useState(false);
-  const [autonomousConcurrency, setAutonomousConcurrency] = useState(1);
+  const [autonomousConcurrency, setAutonomousConcurrency] = useState(4);
   const [agentAutonomyPolicy, setAgentAutonomyPolicy] = useState<AgentAutonomyPolicy>(defaultAgentAutonomyPolicy());
   const [agentControlAudit, setAgentControlAudit] = useState<AgentControlAudit[]>([]);
   const stickerLensSceneRef = useRef<StickerLensScene>(createStickerLensScene());
@@ -506,7 +507,8 @@ export function App() {
   const [reviewEvidenceMessage, setReviewEvidenceMessage] = useState("");
   const [reviewEvidence, setReviewEvidence] = useState<OpsReviewEvidence>();
   const [verificationBusyCardId, setVerificationBusyCardId] = useState<string>();
-  const [automaticApprovalVersion, setAutomaticApprovalVersion] = useState(0);
+  const [cleanupRetryVersion, setCleanupRetryVersion] = useState(0);
+  const [reconciliationRetryVersion, setReconciliationRetryVersion] = useState(0);
   const [removeProject, setRemoveProject] = useState<Project>();
   const [customizeProject, setCustomizeProject] = useState<Project>();
   const [confirmation, setConfirmation] = useState<ConfirmationRequest>();
@@ -594,11 +596,8 @@ export function App() {
   const verificationHandledExitIdsRef = useRef(new Set<string>());
   const verificationSessionIdsRef = useRef(new Set<string>());
   const verificationSpawnCountRef = useRef(0);
-  const automaticVerificationKeysRef = useRef(new Map<string, string>());
-  const automaticReviewerCardIdsRef = useRef(new Set<string>());
-  const automaticApprovalPendingRef = useRef(false);
-  const automaticApprovalRetriesRef = useRef(new Map<string, { attempts: number; retryAt: number }>());
-  const automaticApprovalTimerRef = useRef<number | undefined>(undefined);
+  const reconciliationCardIdsRef = useRef(new Set<string>());
+  const reconciliationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const automaticAdapterVerificationRef = useRef(new Map<string, { key: string; attempts: number; pending: boolean }>());
   const pendingVerificationExitsRef = useRef(new Map<string, number | undefined>());
   const verificationOutputTimerRef = useRef<number | undefined>(undefined);
@@ -1361,7 +1360,7 @@ export function App() {
       : schedulerConfig;
     opsRevisionRef.current = canonicalOps?.revision ?? 0;
     setAutonomousPickup(Boolean(activeSchedulerConfig?.enabled && !activeSchedulerConfig.paused));
-    setAutonomousConcurrency(activeSchedulerConfig?.concurrencyLimit ?? 1);
+    setAutonomousConcurrency(activeSchedulerConfig?.concurrencyLimit ?? 4);
     const storedOps = parseOpsState(canonicalOps ? canonicalOps.state as unknown as JsonObject : opsNode?.data);
     const documents = projectDocumentsRef.current;
     const mergedOps = !canonicalOps && documents && documents.projectPath === projectRef.current?.path
@@ -4081,12 +4080,18 @@ export function App() {
       const taskId = stringValue(candidate.data, "taskId");
       const card = opsState.cards.find((item) => item.id === taskId);
       const columnRole = opsState.columns.find((column) => column.id === card?.columnId)?.role;
+      const reconciliationPending = Boolean(
+        card?.report
+        && card.reviewPolicy !== "human"
+        && !["integrated", "needs_human"].includes(card.reconciliation?.status ?? "queued"),
+      );
       const steeringBlocksClose = card?.steeringDirective
         && ["queued", "delivering", "failed"].includes(card.steeringDirective.status);
       return Boolean(
         taskId
         && !steeringBlocksClose
         && !autoCloseTaskAgentIdsRef.current.has(candidate.id)
+        && !reconciliationPending
         && shouldAutoCloseTaskAgent(
           candidate.data.autoCloseTaskAgent === true,
           runtimes[candidate.id]?.status,
@@ -5001,6 +5006,7 @@ export function App() {
             expectedFiles: task.expectedFiles,
             lastNote: "Ready after decomposition",
             dependencyIds: task.dependencyKeys.flatMap((key) => ids.get(key) ?? []),
+            dependencyKinds: Object.fromEntries(task.dependencyKeys.flatMap((key) => ids.get(key) ? [[ids.get(key)!, "soft"]] : [])),
             definitionOfDone: task.definitionOfDone,
             constraints: task.constraints,
             verificationCommand: task.verificationCommand,
@@ -5161,8 +5167,10 @@ export function App() {
 
   const setTaskLaneCleanupStatus = async (
     cardId: string,
-    status: "resolving" | "blocked",
+    status: "queued" | "resolving" | "blocked",
     detail?: string,
+    retryAt?: string,
+    attempts?: number,
   ) => {
     await persistOpsImmediately((current) => ({
       ...current,
@@ -5171,12 +5179,24 @@ export function App() {
             ...card,
             taskLane: {
               ...card.taskLane,
-              cleanup: { ...card.taskLane.cleanup, status, message: detail },
+              cleanup: { ...card.taskLane.cleanup, status, message: detail, retryAt, attempts: attempts ?? card.taskLane.cleanup.attempts },
             },
             lastNote: detail ?? card.lastNote,
           }
         : card),
     }));
+  };
+
+  const retryTaskLaneCleanup = async (cardId: string, detail: string) => {
+    const cleanup = opsStateRef.current.cards.find((card) => card.id === cardId)?.taskLane?.cleanup;
+    if (!cleanup) return;
+    const attempts = (cleanup.attempts ?? 0) + 1;
+    if (attempts >= 6) {
+      await setTaskLaneCleanupStatus(cardId, "blocked", `${detail} Automatic cleanup stopped after ${attempts} attempts.`, undefined, attempts);
+      return;
+    }
+    const retryAt = new Date(Date.now() + Math.min(60_000, 1_000 * 2 ** Math.max(0, attempts - 1))).toISOString();
+    await setTaskLaneCleanupStatus(cardId, "queued", detail, retryAt, attempts);
   };
 
   const finalizeTaskLaneCleanup = async (card: OpsCard, registered: boolean) => {
@@ -5227,8 +5247,33 @@ export function App() {
   };
 
   useEffect(() => {
+    const doneColumnIds = new Set(opsState.columns.filter((column) => column.role === "done").map((column) => column.id));
+    const candidate = opsState.cards.find((card) =>
+      doneColumnIds.has(card.columnId)
+      && card.reconciliation?.status === "integrated"
+      && Boolean(card.taskLane && !card.taskLane.closedAt && !card.taskLane.cleanup));
+    if (!candidate) return;
+    void queueOpsTaskLaneCleanup(candidate, "remove").catch((cause) => setError(`Could not queue automatic workspace cleanup: ${message(cause)}`));
+    // Reconciled tasks own no long-lived worker workspace.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opsState.cards, opsState.columns]);
+
+  useEffect(() => {
+    const retryAt = opsState.cards.flatMap((card) => card.taskLane?.cleanup?.status === "queued" && card.taskLane.cleanup.retryAt
+      ? [Date.parse(card.taskLane.cleanup.retryAt)]
+      : []).filter(Number.isFinite).sort((left, right) => left - right)[0];
+    if (retryAt === undefined) return;
+    const timer = window.setTimeout(() => setCleanupRetryVersion((current) => current + 1), Math.max(0, retryAt - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [cleanupRetryVersion, opsState.cards]);
+
+  useEffect(() => {
     const activeProject = projectRef.current;
-    const candidates = opsState.cards.filter((card) => card.taskLane?.cleanup && !card.taskLane.closedAt && card.taskLane.cleanup.status !== "blocked");
+    const now = new Date().toISOString();
+    const candidates = opsState.cards.filter((card) => card.taskLane?.cleanup
+      && !card.taskLane.closedAt
+      && card.taskLane.cleanup.status !== "blocked"
+      && (!card.taskLane.cleanup.retryAt || card.taskLane.cleanup.retryAt <= now));
     if (!activeProject || !candidates.length) return;
     const runtimeValues = Object.values(runtimes);
     const participantRuntimes = (card: OpsCard) => opsCardParticipantIds(card, runtimeValues)
@@ -5267,37 +5312,197 @@ export function App() {
         await setTaskLaneCleanupStatus(latest.id, "resolving");
         const resolvingCard = opsStateRef.current.cards.find((card) => card.id === latest.id) ?? latest;
         const started = await startAgentForOpsTask(resolvingCard, taskWorktreeCleanupPrompt(resolvingCard), "worker", undefined, undefined, true);
-        if (!started) await setTaskLaneCleanupStatus(latest.id, "blocked", "No task agent was available to resolve this dirty worktree.");
+        if (!started) await retryTaskLaneCleanup(latest.id, "No task agent was available to resolve this dirty worktree.");
         return;
       }
       if (latest.taskLane.cleanup.status === "resolving" && participants.length === 0 && registered?.dirty) {
-        await setTaskLaneCleanupStatus(latest.id, "blocked", "The cleanup agent finished, but the task worktree still has local changes. Retry to let an agent inspect the remaining work.");
+        await retryTaskLaneCleanup(latest.id, "The cleanup agent finished, but the task worktree still has local changes.");
       }
     })().catch((cause) => {
-      void setTaskLaneCleanupStatus(candidate.id, "blocked", `Could not resolve task worktree: ${message(cause)}`).catch(() => undefined);
+      void retryTaskLaneCleanup(candidate.id, `Could not resolve task worktree: ${message(cause)}`).catch(() => undefined);
     }).finally(() => taskLaneCleanupIdsRef.current.delete(candidate.id));
     // Cleanup is driven entirely by durable lane intent plus runtime transitions.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autonomousConcurrency, opsState, runtimes]);
+  }, [autonomousConcurrency, cleanupRetryVersion, opsState, runtimes]);
 
-  const startReviewerForOpsTask = (card: OpsCard) => startAgentForOpsTask(card, opsActionPrompt(card, "review"), "reviewer");
-
-  const updateOpsDependencies = (card: OpsCard, dependencyIds: string[]) => {
+  const updateOpsDependencies = (card: OpsCard, dependencyIds: string[], hardDependencyIds: string[]) => {
     const timestamp = new Date().toISOString();
     changeOps((current) => ({
       ...current,
       cards: current.cards.map((item) => item.id === card.id
-        ? appendOpsTaskEvent({ ...item, dependencyIds }, {
+        ? appendOpsTaskEvent({
+            ...item,
+            dependencyIds,
+            dependencyKinds: Object.fromEntries(dependencyIds.map((dependencyId) => [dependencyId, hardDependencyIds.includes(dependencyId) ? "hard" : "soft"])),
+          }, {
             id: `manual:dependencies:${timestamp}`,
             kind: "update",
             timestamp,
             message: dependencyIds.length
-              ? `Dependencies updated: ${dependencyIds.length} upstream ${dependencyIds.length === 1 ? "task" : "tasks"}`
-              : "Dependencies cleared",
+              ? `Task relationships updated: ${dependencyIds.length} upstream ${dependencyIds.length === 1 ? "task" : "tasks"}`
+              : "Task relationships cleared",
           })
         : item),
     }));
   };
+
+  const reconcileReportedTask = async (reportedCard: OpsCard) => {
+    const activeProject = projectRef.current;
+    const card = opsStateRef.current.cards.find((candidate) => candidate.id === reportedCard.id);
+    if (!activeProject || !card?.report || card.reviewPolicy === "human") return;
+    const attempts = (card.reconciliation?.attempts ?? 0) + 1;
+    const runningAt = new Date().toISOString();
+    await persistOpsImmediately((current) => ({
+      ...current,
+      cards: current.cards.map((candidate) => candidate.id === card.id
+        ? { ...candidate, reconciliation: { status: "running", attempts, message: "Integrating worker evidence…", updatedAt: runningAt } }
+        : candidate),
+    }));
+    const complete = async (messageText: string, targetHead?: string) => {
+      await persistOpsImmediately((current) => {
+        const approved = applyOpsOrchestration(current, card.id, "approve");
+        const timestamp = new Date().toISOString();
+        return {
+          ...approved,
+          cards: approved.cards.map((candidate) => candidate.id === card.id
+            ? appendOpsTaskEvent({
+                ...candidate,
+                reconciliation: { status: "integrated", attempts, message: messageText, updatedAt: timestamp, targetHead },
+                attemptCount: 0,
+                retryAt: undefined,
+              }, {
+                id: `reconcile:integrated:${card.id}:${Date.now()}`,
+                kind: "completion",
+                timestamp,
+                message: messageText,
+              })
+            : candidate),
+        };
+      });
+    };
+    if (!card.taskLane || card.taskLane.closedAt) {
+      await complete(card.taskLane?.closedAt
+        ? "Task workspace was already reconciled and closed."
+        : "Shared-checkout worker evidence was accepted without an additional verification agent.");
+      return;
+    }
+    const result = await callCore<GitWorktreeIntegrate>("git_worktree_integrate", {
+      req: {
+        projectPath: activeProject.path,
+        worktreePath: card.taskLane.worktreePath,
+        expectedBranch: card.taskLane.branch,
+        baseCommit: card.taskLane.baseCommit,
+      },
+    });
+    if (result.status === "integrated" || result.status === "empty") {
+      await complete(result.message, result.targetHead);
+      return;
+    }
+    const recordReconciliation = async (status: "retrying" | "needs_human", detail: string) => {
+      const timestamp = new Date().toISOString();
+      await persistOpsImmediately((current) => ({
+        ...current,
+        cards: current.cards.map((candidate) => candidate.id === card.id
+          ? appendOpsTaskEvent({
+              ...candidate,
+              reconciliation: { status, attempts, message: detail, updatedAt: timestamp },
+              lastNote: detail,
+            }, {
+              id: `reconcile:${status}:${card.id}:${Date.now()}`,
+              kind: status === "needs_human" ? "blocker" : "update",
+              timestamp,
+              message: detail,
+            })
+          : candidate),
+      }));
+    };
+    if (result.status === "target_dirty" || attempts >= 3) {
+      await recordReconciliation("needs_human", result.message);
+      return;
+    }
+    await recordReconciliation("retrying", result.message);
+    const repairPrompt = result.status === "source_dirty"
+      ? `Reconciliation found uncommitted task changes. Inspect every staged, unstaged, and untracked file, preserve valuable work in commits on ${card.taskLane.branch}, rerun the relevant checks, and report completed again. Do not discard changes merely to clean the tree.`
+      : `Reconciliation rolled back a Git conflict while integrating ${card.taskLane.branch}. Rebase the task branch onto the current opened project branch, resolve the conflict autonomously, rerun the relevant checks, commit the resolution, and report completed again.`;
+    const runtime = card.assigneeIds.map((id) => currentRuntimes()[id]).find((candidate) => candidate?.structured && candidate.status === "completed");
+    const resumed = runtime ? await sendAgentPrompt(runtime, repairPrompt, repairPrompt) : false;
+    if (!resumed && !await startAgentForOpsTask(card, repairPrompt, "worker")) {
+      throw new Error("The reconciliation repair agent could not be resumed or restarted.");
+    }
+  };
+
+  useEffect(() => {
+    const reviewColumnIds = new Set(opsState.columns.filter((column) => column.role === "review").map((column) => column.id));
+    const now = Date.now();
+    const candidate = opsState.cards.find((card) =>
+      reviewColumnIds.has(card.columnId)
+      && card.reviewPolicy !== "human"
+      && Boolean(card.report)
+      && (card.reconciliation?.status === "queued"
+        || (card.reconciliation?.status === "retrying"
+          && Date.parse(card.reconciliation.updatedAt) + Math.min(30_000, 1_000 * 2 ** Math.max(0, (card.reconciliation.attempts ?? 1) - 1)) <= now))
+      && !reconciliationCardIdsRef.current.has(card.id));
+    if (!candidate) return;
+    reconciliationCardIdsRef.current.add(candidate.id);
+    const queued = reconciliationQueueRef.current.catch(() => undefined).then(() => reconcileReportedTask(candidate));
+    reconciliationQueueRef.current = queued;
+    void queued.catch((cause) => {
+      const detail = message(cause);
+      const attempts = (candidate.reconciliation?.attempts ?? 0) + 1;
+      const exhausted = attempts >= 3;
+      void persistOpsImmediately((current) => ({
+        ...current,
+        cards: current.cards.map((card) => card.id === candidate.id
+          ? { ...card, reconciliation: { status: exhausted ? "needs_human" : "retrying", attempts, message: exhausted ? `Automatic reconciliation exhausted its retries: ${detail}` : detail, updatedAt: new Date().toISOString() } }
+          : card),
+      })).catch(() => undefined);
+      if (exhausted) setError(`Reconciliation needs intervention for “${candidate.title}”: ${detail}`);
+    }).finally(() => reconciliationCardIdsRef.current.delete(candidate.id));
+    // Durable card state selects reconciliation work; refs serialize native Git mutations.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opsState.cards, opsState.columns, reconciliationRetryVersion]);
+
+  useEffect(() => {
+    const retryAt = opsState.cards
+      .filter((card) => card.reconciliation?.status === "retrying")
+      .map((card) => Date.parse(card.reconciliation!.updatedAt) + Math.min(30_000, 1_000 * 2 ** Math.max(0, (card.reconciliation!.attempts ?? 1) - 1)))
+      .filter(Number.isFinite)
+      .sort((left, right) => left - right)[0];
+    if (retryAt === undefined) return;
+    const timer = window.setTimeout(() => setReconciliationRetryVersion((current) => current + 1), Math.max(0, retryAt - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [opsState.cards, reconciliationRetryVersion]);
+
+  useEffect(() => {
+    const doneColumnIds = new Set(opsState.columns.filter((column) => column.role === "done").map((column) => column.id));
+    const reviewColumnId = opsState.columns.find((column) => column.role === "review")?.id;
+    if (!reviewColumnId) return;
+    const parent = opsState.cards.find((candidate) => {
+      if (candidate.report || doneColumnIds.has(candidate.columnId)) return false;
+      const children = opsState.cards.filter((card) => card.parentId === candidate.id);
+      return children.length > 0 && children.every((child) => doneColumnIds.has(child.columnId));
+    });
+    if (!parent) return;
+    const timestamp = new Date().toISOString();
+    void persistOpsImmediately((current) => ({
+      ...current,
+      cards: current.cards.map((card) => card.id === parent.id
+        ? appendOpsTaskEvent({
+            ...card,
+            columnId: reviewColumnId,
+            report: { status: "reported", summary: "All child tasks were reconciled.", evidence: "The objective's decomposed work completed and is ready for final reconciliation.", checks: [], risks: [], reportedAt: timestamp },
+            reconciliation: { status: card.reviewPolicy === "human" ? "needs_human" : "queued", attempts: 0, message: "Child results are ready for objective reconciliation.", updatedAt: timestamp },
+          }, {
+            id: `reconcile:children:${parent.id}:${timestamp}`,
+            kind: "completion",
+            timestamp,
+            message: "All child tasks reconciled",
+          })
+        : card),
+    }));
+    // Parent objectives advance from durable child outcomes without a manual card move.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opsState.cards, opsState.columns]);
 
   const fetchOpsTaskReview = (card: OpsCard) => {
     const activeProject = projectRef.current;
@@ -5452,7 +5657,7 @@ export function App() {
   };
   verificationExitHandlerRef.current = finishOpsVerification;
 
-  const runOpsVerification = async (card: OpsCard) => {
+  const _runOpsVerification = async (card: OpsCard) => {
     if (verificationBusyCardId === card.id) return;
     const currentCard = opsStateRef.current.cards.find((candidate) => candidate.id === card.id);
     if (!currentCard) return;
@@ -5546,53 +5751,7 @@ export function App() {
     }
   };
 
-  useEffect(() => {
-    const reviewColumnIds = new Set(opsState.columns.filter((column) => column.role === "review").map((column) => column.id));
-    for (const cardId of automaticVerificationKeysRef.current.keys()) {
-      if (!opsState.cards.some((card) => card.id === cardId && reviewColumnIds.has(card.columnId))) {
-        automaticVerificationKeysRef.current.delete(cardId);
-      }
-    }
-    if (verificationBusyCardId || opsState.cards.some((card) => card.verificationRun?.status === "running")) return;
-    const candidate = opsState.cards.find((card) =>
-      reviewColumnIds.has(card.columnId)
-      && Boolean(card.taskLane && !card.taskLane.closedAt)
-      && !card.verificationRun
-      && opsVerificationContractIssues(card).length === 0);
-    if (!candidate) return;
-    const key = `${candidate.definitionOfDone}\n${candidate.constraints ?? ""}\n${candidate.verificationCommand}`;
-    if (automaticVerificationKeysRef.current.get(candidate.id) === key) return;
-    automaticVerificationKeysRef.current.set(candidate.id, key);
-    void runOpsVerification(candidate);
-    // The task state is the durable trigger; the callback intentionally runs once per contract revision.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opsState.cards, opsState.columns, verificationBusyCardId]);
-
-  useEffect(() => {
-    const reviewColumnIds = new Set(opsState.columns.filter((column) => column.role === "review").map((column) => column.id));
-    for (const cardId of automaticReviewerCardIdsRef.current) {
-      if (!opsState.cards.some((card) => card.id === cardId && reviewColumnIds.has(card.columnId))) {
-        automaticReviewerCardIdsRef.current.delete(cardId);
-      }
-    }
-    const profile = agentProfiles.find((candidate) => candidate.adapterId === selectedAdapterId);
-    if (!isAdapterReady(adapters.find((adapter) => adapter.id === selectedAdapterId), agentLaunchArgs(profile))) return;
-    const candidate = opsState.cards.find((card) =>
-      reviewColumnIds.has(card.columnId)
-      && card.reviewPolicy === "agent"
-      && !card.reviewerId
-      && card.verificationRun?.status === "passed"
-      && Boolean(card.taskLane && !card.taskLane.closedAt)
-      && opsVerificationContractIssues(card).length === 0
-      && !automaticReviewerCardIdsRef.current.has(card.id));
-    if (!candidate) return;
-    automaticReviewerCardIdsRef.current.add(candidate.id);
-    void startReviewerForOpsTask(candidate);
-    // Adapter readiness and task state are the durable triggers; avoid restarting the same reviewer.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [adapters, agentProfiles, opsState.cards, opsState.columns, selectedAdapterId]);
-
-  const cancelOpsVerification = async (card: OpsCard) => {
+  const _cancelOpsVerification = async (card: OpsCard) => {
     const run = opsStateRef.current.cards.find((candidate) => candidate.id === card.id)?.verificationRun;
     if (!run || run.status !== "running") return;
     setVerificationBusyCardId(card.id);
@@ -5626,7 +5785,7 @@ export function App() {
     }
   };
 
-  const viewOpsVerificationOutput = async (card: OpsCard) => {
+  const _viewOpsVerificationOutput = async (card: OpsCard) => {
     const run = card.verificationRun;
     if (!run) return;
     try {
@@ -5699,6 +5858,31 @@ export function App() {
     if (!reviewCard) return;
     if (!approved) return;
     const currentCard = opsStateRef.current.cards.find((candidate) => candidate.id === reviewCard.id);
+    if (currentCard?.report) {
+      const timestamp = new Date().toISOString();
+      await persistOpsImmediately((current) => ({
+        ...current,
+        cards: current.cards.map((card) => card.id === currentCard.id
+          ? appendOpsTaskEvent({
+              ...card,
+              reviewPolicy: "either",
+              reconciliation: {
+                status: "queued",
+                attempts: card.reconciliation?.attempts ?? 0,
+                message: "Human acceptance recorded; automatic reconciliation resumed.",
+                updatedAt: timestamp,
+              },
+            }, {
+              id: `manual:accept:${timestamp}`,
+              kind: "review",
+              timestamp,
+              message: "Human acceptance recorded",
+            })
+          : card),
+      }));
+      setReviewCard(undefined);
+      return;
+    }
     if (!currentCard?.taskLane || currentCard.taskLane.closedAt) return;
     setReviewEvidenceReady(false);
     setReviewEvidenceMessage("Revalidating task snapshot before approval...");
@@ -5751,103 +5935,6 @@ export function App() {
       setReviewEvidenceReady(false);
     }
   };
-
-  useEffect(() => () => window.clearTimeout(automaticApprovalTimerRef.current), []);
-
-  useEffect(() => {
-    const candidates = opsAutomaticApprovalCandidates(opsState);
-    const candidateKeys = new Set(candidates.map((candidate) => candidate.key));
-    for (const key of automaticApprovalRetriesRef.current.keys()) {
-      if (!candidateKeys.has(key)) automaticApprovalRetriesRef.current.delete(key);
-    }
-    if (automaticApprovalPendingRef.current) return;
-    const now = Date.now();
-    const retryAtByKey = new Map([...automaticApprovalRetriesRef.current].map(([key, retry]) => [key, retry.retryAt]));
-    const scheduled = opsNextAutomaticApprovalCandidate(candidates, retryAtByKey, now);
-    window.clearTimeout(automaticApprovalTimerRef.current);
-    automaticApprovalTimerRef.current = undefined;
-    if (!scheduled.candidate) {
-      if (scheduled.nextRetryAt !== undefined) {
-        automaticApprovalTimerRef.current = window.setTimeout(
-          () => setAutomaticApprovalVersion((current) => current + 1),
-          Math.max(0, scheduled.nextRetryAt - now),
-        );
-      }
-      return;
-    }
-    const { card: candidate, key } = scheduled.candidate;
-    const activeCanvasId = canvasRef.current?.id;
-    const activeProjectId = projectRef.current?.id;
-    if (!activeCanvasId || !activeProjectId) return;
-    automaticApprovalPendingRef.current = true;
-    const priorAttempts = automaticApprovalRetriesRef.current.get(key)?.attempts ?? 0;
-    const recordAttempt = async (status: NonNullable<OpsCard["approvalAttempt"]>["status"], detail: string) => {
-      const latestCandidate = opsAutomaticApprovalCandidates(opsStateRef.current).find((item) => item.key === key);
-      if (!latestCandidate) return false;
-      const existing = latestCandidate.card.approvalAttempt;
-      if (existing?.status === status && existing.message === detail) return false;
-      const attemptedAt = new Date().toISOString();
-      await persistOpsImmediately((current) => {
-        if (!opsAutomaticApprovalCandidates(current).some((item) => item.key === key)) return current;
-        return {
-          ...current,
-          cards: current.cards.map((card) => card.id === candidate.id
-            ? { ...card, approvalAttempt: { status, message: detail, attemptedAt } }
-            : card),
-        };
-      });
-      return true;
-    };
-    void (async () => {
-      try {
-        const result = await fetchOpsTaskReview(candidate);
-        if (canvasRef.current?.id !== activeCanvasId || projectRef.current?.id !== activeProjectId) return;
-        const latestCandidate = opsAutomaticApprovalCandidates(opsStateRef.current).find((item) => item.key === key);
-        if (!latestCandidate) {
-          automaticApprovalRetriesRef.current.delete(key);
-          return;
-        }
-        const approval = opsVerificationApproval(latestCandidate.card, latestCandidate.hasFileConflict, result.snapshotId, "agent");
-        if (!approval.ready) {
-          const detail = approval.reason ?? "Approval requirements changed";
-          automaticApprovalRetriesRef.current.set(key, { attempts: priorAttempts + 1, retryAt: Date.now() + 30_000 });
-          const changed = await recordAttempt("blocked", detail);
-          if (changed) setError(`Automatic approval blocked for “${candidate.title}”: ${detail}.`);
-          if (reviewCardRef.current?.id === candidate.id) {
-            setReviewCard(opsStateRef.current.cards.find((card) => card.id === candidate.id));
-            setReviewEvidenceMessage(`Automatic approval blocked: ${detail}.`);
-          }
-          return;
-        }
-        automaticApprovalRetriesRef.current.delete(key);
-        await persistOpsImmediately((current) => {
-          if (!opsAutomaticApprovalCandidates(current).some((item) => item.key === key)) return current;
-          return applyOpsOrchestration(current, candidate.id, "approve");
-        });
-        if (reviewCardRef.current?.id === candidate.id) setReviewCard(undefined);
-      } catch (cause) {
-        if (canvasRef.current?.id !== activeCanvasId || projectRef.current?.id !== activeProjectId) return;
-        const attempts = priorAttempts + 1;
-        const detail = message(cause);
-        automaticApprovalRetriesRef.current.set(key, {
-          attempts,
-          retryAt: Date.now() + opsAutomaticApprovalRetryDelay(attempts),
-        });
-        const changed = await recordAttempt("retrying", detail).catch(() => false);
-        if (changed) {
-          setError(`Automatic approval will retry for “${candidate.title}”: ${detail}`);
-          if (reviewCardRef.current?.id === candidate.id) {
-            setReviewCard(opsStateRef.current.cards.find((card) => card.id === candidate.id));
-          }
-        }
-      } finally {
-        automaticApprovalPendingRef.current = false;
-        setAutomaticApprovalVersion((current) => current + 1);
-      }
-    })();
-    // Durable card state and the retry clock drive the serialized approval queue.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [automaticApprovalVersion, opsState.cards, opsState.columns]);
 
   const requestReviewChanges = async (card: OpsCard, feedback: string) => {
     const started = await startAgentForOpsTask(
@@ -6005,6 +6092,49 @@ export function App() {
         setError(`Could not update autonomous concurrency: ${message(cause)}`);
       });
   };
+  const scheduleAutonomousTaskRetry = async (cardId: string | undefined, detail: string) => {
+    if (!cardId) return;
+    await persistOpsImmediately((current) => {
+      const card = current.cards.find((candidate) => candidate.id === cardId);
+      if (!card) return current;
+      const attempts = (card.attemptCount ?? 0) + 1;
+      const exhausted = attempts >= 5;
+      const retryAt = exhausted
+        ? undefined
+        : new Date(Date.now() + Math.min(30_000, 1_000 * 2 ** Math.max(0, attempts - 1))).toISOString();
+      const released = applyOpsOrchestration(current, cardId, "release");
+      return {
+        ...released,
+        cards: released.cards.map((candidate) => candidate.id === cardId
+          ? appendOpsTaskEvent({
+              ...candidate,
+              attemptCount: attempts,
+              retryAt,
+              paused: exhausted,
+              reconciliation: exhausted ? {
+                status: "needs_human",
+                attempts,
+                message: `Autonomous recovery stopped after ${attempts} attempts: ${detail}`,
+                updatedAt: new Date().toISOString(),
+              } : {
+                status: "retrying",
+                attempts,
+                message: detail,
+                updatedAt: new Date().toISOString(),
+              },
+              lastNote: exhausted
+                ? `Autonomous recovery exhausted after ${attempts} attempts.`
+                : `Retrying autonomously after attempt ${attempts}.`,
+            }, {
+              id: `scheduler:retry:${cardId}:${attempts}:${Date.now()}`,
+              kind: exhausted ? "blocker" : "update",
+              timestamp: new Date().toISOString(),
+              message: exhausted ? "Autonomous recovery exhausted" : `Autonomous retry ${attempts} scheduled`,
+            })
+          : candidate),
+      };
+    });
+  };
   const claimScheduledTask = async () => {
     const activeProject = projectRef.current;
     if (!activeProject || !autonomousPickup || schedulerClaimPendingRef.current) return;
@@ -6038,6 +6168,7 @@ export function App() {
         ownerId: schedulerOwnerIdRef.current,
       });
     } catch (cause) {
+      const detail = message(cause);
       if (lease) {
         await callCore("ops_scheduler_finish", {
           leaseId: lease.id,
@@ -6045,23 +6176,12 @@ export function App() {
           state: "released",
         }).catch(() => undefined);
         schedulerFinalizedLeaseIdsRef.current.add(lease.id);
+        await scheduleAutonomousTaskRetry(lease.taskId, detail).catch(() => undefined);
       }
-      const activeCanvas = canvasRef.current;
-      if (activeCanvas) {
-        await callCore("ops_scheduler_configure", {
-          projectId: activeProject.id,
-          canvasId: activeCanvas.id,
-          enabled: true,
-          paused: true,
-          concurrencyLimit: autonomousConcurrency,
-          adapterId: lease?.adapterId ?? selectedAdapterId,
-        }).catch(() => undefined);
-      }
-      setAutonomousPickup(false);
-      setError(`Autonomous pickup paused on an error: ${message(cause)}`);
+      setError(`A task could not start and will recover independently: ${detail}`);
     } finally {
       schedulerClaimPendingRef.current = false;
-      if (started) queueMicrotask(() => schedulerLeaseHandlerRef.current?.());
+      if (autonomousPickup) queueMicrotask(() => schedulerLeaseHandlerRef.current?.());
     }
   };
   schedulerLeaseHandlerRef.current = () => void claimScheduledTask();
@@ -6099,27 +6219,17 @@ export function App() {
             ownerId: schedulerOwnerIdRef.current,
             state: "failed",
           });
-          const activeProject = projectRef.current;
-          const activeCanvas = canvasRef.current;
-          if (activeProject && activeCanvas) {
-            await callCore("ops_scheduler_configure", {
-              projectId: activeProject.id,
-              canvasId: activeCanvas.id,
-              enabled: true,
-              paused: true,
-              concurrencyLimit: autonomousConcurrency,
-              adapterId: stringValue(node.data, "adapterId") || selectedAdapterId,
-            });
-          }
-          setAutonomousPickup(false);
-          setError(`Autonomous pickup paused because ${node.title} ${runtime.status}.`);
+          await scheduleAutonomousTaskRetry(stringValue(node.data, "taskId"), `${node.title} ${runtime.status}.`);
+          setError(`${node.title} ${runtime.status}; its task will recover independently.`);
         } catch (cause) {
           schedulerFinalizedLeaseIdsRef.current.delete(leaseId);
           setError(`Could not finalize the failed autonomous task: ${message(cause)}`);
         }
       })();
     }
-  }, [autonomousConcurrency, nodes, runtimes, selectedAdapterId, setError]);
+  // scheduleAutonomousTaskRetry is intentionally recreated with the latest durable state.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, runtimes, setError]);
   const onboardingActive = onboardingVersion === 0;
   const onboardingVisible = surface === "home" && startupReady && onboardingActive;
   const onboardingStep = desktopOnboardingStep(project, selectedAdapterReady);
@@ -7381,19 +7491,12 @@ export function App() {
         reviewEvidenceReady={reviewEvidenceReady}
         reviewEvidenceMessage={reviewEvidenceMessage}
         evidence={reviewEvidence}
-        hasFileConflict={reviewCard ? opsCardHasFileConflict(reviewCard) : false}
-        verificationBusy={verificationBusyCardId === reviewCard?.id}
         onClose={() => {
           setReviewCard(undefined);
           setReviewEvidence(undefined);
         }}
         onReviewAction={reviewOpsTask}
-        onStartReviewer={startReviewerForOpsTask}
-        onRunVerification={runOpsVerification}
-        onCancelVerification={cancelOpsVerification}
-        onViewVerificationOutput={viewOpsVerificationOutput}
         onRequestChanges={requestReviewChanges}
-        onUpdateContract={updateOpsTask}
       />
       {specialistDialog && <Suspense fallback={null}>
         <SpecialistProposalDialog
@@ -7818,8 +7921,8 @@ function opsTaskAgentPrompt(
     role === "reviewer"
       ? "- Before your final response, append completed with a handoff whose first line is exactly REVIEW VERDICT: APPROVE or REVIEW VERDICT: REQUEST CHANGES, followed by concise evidence."
       : missingContract
-        ? `- Before your final response, derive the missing contract, run its verification command, then append completed with a handoff whose first line is exactly the directive below (replace placeholders); put concise evidence on following lines:\n${contractProposal}`
-        : "- Before your final response, append completed with concise evidence and handoff. wheeljack will then close this task pane; transcript history remains available.",
+        ? `- Before your final response, derive the missing contract, run its verification command, commit valuable task changes when working in Git, then append completed with a handoff whose first line is exactly the directive below (replace placeholders); put concise evidence on following lines:\n${contractProposal}`
+        : "- Before your final response, run the relevant checks, commit valuable task changes when working in Git, then append completed with concise evidence and any known risks. wheeljack will reconcile and integrate the report automatically; do not request a separate reviewer unless risk requires one.",
     "",
     "Task instruction:",
     prompt.trim(),
@@ -8107,6 +8210,22 @@ export function applyCoordinationEvents(
       else if (event.status === "done" && statuses.every((status) => status === "done")) columnId = columnIdForRole(current, "review");
       else if (event.status === "running" || event.status === "in_progress") columnId = columnIdForRole(current, "active");
       const kind = coordinationEventKind({ ...event, callsign }, card);
+      const reported = ["completed", "done"].includes(event.status);
+      const report = reported ? {
+        status: "reported" as const,
+        summary: (visibleHandoff || event.note || "Worker completed the task.").split(/\r?\n/)[0].slice(0, 500),
+        evidence: visibleHandoff || event.note || "Worker reported completion.",
+        checks: card.verificationCommand?.trim() ? [card.verificationCommand.trim()] : [],
+        risks: [],
+        reportedAt: event.timestamp,
+        agentId: callsign,
+      } : card.report;
+      const reconciliation = reported ? {
+        status: card.reviewPolicy === "human" ? "needs_human" as const : "queued" as const,
+        attempts: card.reconciliation?.attempts ?? 0,
+        message: card.reviewPolicy === "human" ? "This task explicitly requires human acceptance." : "Worker evidence is ready for automatic reconciliation.",
+        updatedAt: event.timestamp,
+      } : card.reconciliation;
       return appendOpsTaskEvent({
         ...card,
         columnId,
@@ -8120,6 +8239,8 @@ export function applyCoordinationEvents(
         verificationRun: contractApplies ? undefined : card.verificationRun,
         runProgress: event.progress ?? card.runProgress,
         approvalAttempt: undefined,
+        report,
+        reconciliation,
         startedAt: card.startedAt || (["running", "in_progress"].includes(event.status) ? event.timestamp : undefined),
         completedAt: columnId === columnIdForRole(current, "done")
           ? event.timestamp
@@ -8209,8 +8330,8 @@ export function shouldReloadStickerLens(surface: ShellSurface, hasProject: boole
 function coordinationEventKind(event: CoordinationEvents["events"][number], card: OpsCard): OpsTaskEvent["kind"] {
   if (event.handoff) return "handoff";
   if (["blocked", "needs_input", "failed", "disconnected"].includes(event.status)) return "blocker";
-  if (event.status === "review" || event.status === "completed") return "review";
-  if (event.status === "done") return "review";
+  if (event.status === "review") return "review";
+  if (event.status === "completed" || event.status === "done") return "completion";
   if (event.status === "paused") return "pause";
   if (["running", "in_progress"].includes(event.status) && !card.agentStatuses[event.callsign]) return "assignment";
   return "update";
@@ -8292,6 +8413,9 @@ export function applyOpsOrchestration(
           reviewerId: undefined,
           verificationRun: undefined,
           approvalAttempt: undefined,
+          report: undefined,
+          reconciliation: undefined,
+          retryAt: undefined,
           steeringDirective: card.steeringDirective?.kind === "file_conflict" ? undefined : card.steeringDirective,
         }, { ...baseEvent, kind: action === "transfer" ? "handoff" : action === "resume" ? "update" : "assignment", message, callsign: action === "transfer" ? sourceId : undefined });
       }
@@ -8342,7 +8466,7 @@ export function applyOpsOrchestration(
         pausedAt: undefined,
         paused: false,
         approvalAttempt: undefined,
-      }, { ...baseEvent, kind: "completion", message: action === "approve" ? "Verification approved" : "Completed with human override" });
+      }, { ...baseEvent, kind: "completion", message: action === "approve" ? "Reconciled and integrated" : "Completed with human override" });
     }),
   };
 }
