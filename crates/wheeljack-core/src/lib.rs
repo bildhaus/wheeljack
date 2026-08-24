@@ -1796,7 +1796,7 @@ impl Core {
         }
 
         if delete_from_disk {
-            bail!("Wheeljack no longer deletes project folders. Remove the project from Wheeljack, then delete its folder with your operating system if you still want to.");
+            bail!("wheeljack no longer deletes project folders. Remove the project from wheeljack, then delete its folder with your operating system if you still want to.");
         }
 
         db.execute(

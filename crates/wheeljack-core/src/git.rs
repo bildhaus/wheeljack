@@ -719,7 +719,7 @@ pub(crate) fn integrate_git_worktree(
             "target_dirty",
             previous_target_head.clone(),
             Vec::new(),
-            "The opened project checkout has local changes, so Wheeljack preserved the task branch without modifying it.",
+            "The opened project checkout has local changes, so wheeljack preserved the task branch without modifying it.",
         ));
     }
     let source_contains_base = git_command()
@@ -812,7 +812,7 @@ pub(crate) fn integrate_git_worktree(
             "target_dirty",
             current_target_head,
             commits,
-            "The opened project branch changed while reconciliation was preparing. Wheeljack preserved the task branch and will retry against the new target.",
+            "The opened project branch changed while reconciliation was preparing. wheeljack preserved the task branch and will retry against the new target.",
         ));
     }
     let mut command = git_command();

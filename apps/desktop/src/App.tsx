@@ -7356,12 +7356,12 @@ export function App() {
       {customizeProject && <ProjectIdentitySheet project={customizeProject} onOpenChange={(open) => !open && setCustomizeProject(undefined)} onSave={saveProjectIdentity} />}
       <AlertDialog open={Boolean(removeProject)} onOpenChange={(open) => !open && setRemoveProject(undefined)}>
         <AlertDialogContent className="wj-dialog wj-dialog-medium">
-          <AlertDialogHeader><AlertDialogTitle>Remove {removeProject?.name} from Wheeljack?</AlertDialogTitle><AlertDialogDescription>{removeProjectHasActiveSessions
-            ? `${removeProject?.path ?? "This project"} has active sessions. Stop them before removing this project from Wheeljack.`
-            : "Remove it from Wheeljack while keeping the project folder and its saved state on disk."}</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogHeader><AlertDialogTitle>Remove {removeProject?.name} from wheeljack?</AlertDialogTitle><AlertDialogDescription>{removeProjectHasActiveSessions
+            ? `${removeProject?.path ?? "This project"} has active sessions. Stop them before removing this project from wheeljack.`
+            : "Remove it from wheeljack while keeping the project folder and its saved state on disk."}</AlertDialogDescription></AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <Button variant="destructive" disabled={removeProjectHasActiveSessions} onClick={() => void removeSelectedProject()}>Remove from Wheeljack</Button>
+            <Button variant="destructive" disabled={removeProjectHasActiveSessions} onClick={() => void removeSelectedProject()}>Remove from wheeljack</Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

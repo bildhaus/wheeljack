@@ -583,7 +583,7 @@ function cardTimestamp(card: OpsCard): string {
     ?? "";
 }
 
-/** Three-way merge used when another Wheeljack window saved the same Plan. */
+/** Three-way merge used when another wheeljack window saved the same Plan. */
 export function mergeConcurrentOpsState(
   baseline: OpsState,
   local: OpsState,

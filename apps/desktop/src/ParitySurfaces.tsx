@@ -655,7 +655,7 @@ function ProjectMenuItems({
         </>}
       <Item disabled={disabled} onSelect={() => onCustomize(project)}><Swatch />Project settings…</Item>
       <Separator />
-      <Item disabled={disabled} variant="destructive" onSelect={() => onRemove(project)}><Trash2 />Remove from Wheeljack…</Item>
+      <Item disabled={disabled} variant="destructive" onSelect={() => onRemove(project)}><Trash2 />Remove from wheeljack…</Item>
       {context && <DevToolsContextItem />}
     </>
   );
@@ -1799,7 +1799,7 @@ export function OpsSurface({
                   <ProjectEmptyState
                     icon={<LayoutDashboard />}
                     title="Plan your first task"
-                    description="Turn the next outcome into a task contract. Wheeljack stores live task state locally and can export a KANBAN.md snapshot whenever you need one."
+                    description="Turn the next outcome into a task contract. wheeljack stores live task state locally and can export a KANBAN.md snapshot whenever you need one."
                   >
                     <Button onClick={() => setComposerOpen(true)}><Plus />New task</Button>
                   </ProjectEmptyState>

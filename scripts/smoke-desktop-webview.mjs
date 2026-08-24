@@ -693,9 +693,9 @@ await waitFor(`Boolean(document.querySelector('textarea[aria-label="Agent prompt
 await evaluate(`document.querySelector('button.wj-nav-item[aria-label="Home"]:not(:disabled)')?.click()`);
 await waitFor(`Boolean(document.querySelector('button[aria-label^="More actions for"]'))`, "Home after metric navigation");
 await clickElement('button[aria-label^="More actions for"]');
-await waitFor(`[...document.querySelectorAll('[role="menuitem"]')].some(node=>node.textContent?.trim().startsWith("Remove from Wheeljack"))`, "project removal menu item");
-await evaluate(`(()=>{const item=[...document.querySelectorAll('[role="menuitem"]')].find(node=>node.textContent?.trim().startsWith("Remove from Wheeljack"));item?.click();return Boolean(item)})()`);
-await waitFor(`(()=>{const dialog=document.querySelector('[role="alertdialog"]');if(!dialog||!dialog.textContent?.includes("has active sessions"))return false;const remove=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Remove from Wheeljack");const erase=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Delete from disk");return remove?.disabled===true&&!erase})()`, "active-session project removal guard");
+await waitFor(`[...document.querySelectorAll('[role="menuitem"]')].some(node=>node.textContent?.trim().startsWith("Remove from wheeljack"))`, "project removal menu item");
+await evaluate(`(()=>{const item=[...document.querySelectorAll('[role="menuitem"]')].find(node=>node.textContent?.trim().startsWith("Remove from wheeljack"));item?.click();return Boolean(item)})()`);
+await waitFor(`(()=>{const dialog=document.querySelector('[role="alertdialog"]');if(!dialog||!dialog.textContent?.includes("has active sessions"))return false;const remove=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Remove from wheeljack");const erase=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Delete from disk");return remove?.disabled===true&&!erase})()`, "active-session project removal guard");
 await evaluate(`(()=>{const dialog=document.querySelector('[role="alertdialog"]');const cancel=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Cancel");cancel?.click();return Boolean(cancel)})()`);
 await waitFor(`!document.querySelector('[role="alertdialog"]')`, "closed project removal dialog");
 await evaluate(`document.querySelector('button[aria-label$="Open live sessions"]')?.click()`);
