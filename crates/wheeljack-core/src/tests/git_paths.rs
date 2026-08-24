@@ -303,6 +303,22 @@ fn git_worktree_remove_prunes_a_registered_missing_worktree() {
         Arc::new(NullEventSink),
     )
     .unwrap();
+    let wrong_branch = json!({
+        "id": "remove-stale-wrong-branch",
+        "command": "git_worktree_remove",
+        "payload": {
+            "projectPath": repo,
+            "worktreePath": worktree,
+            "expectedBranch": "wheeljack-wrong-stale-worktree"
+        }
+    });
+    let response: Value = serde_json::from_str(&core.call_json(&wrong_branch.to_string())).unwrap();
+    assert_eq!(response["ok"], false, "{response:#}");
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("branch mismatch"));
+
     let remove = json!({
         "id": "remove-stale",
         "command": "git_worktree_remove",

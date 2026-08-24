@@ -104,8 +104,8 @@ use dto::*;
 use git::{
     ensure_safe_branch_name, git_command, hidden_command, integrate_git_worktree, is_git_repo,
     paths_equivalent, read_git_diff, read_git_head, read_git_status, read_worktree_snapshot,
-    read_worktrees, removable_worktree, resolve_git_worktree_context, resolve_new_worktree_path,
-    run_git_worktree_add, run_git_worktree_remove, validate_full_commit,
+    read_worktrees, removable_missing_worktree, removable_worktree, resolve_git_worktree_context,
+    resolve_new_worktree_path, run_git_worktree_add, run_git_worktree_remove, validate_full_commit,
 };
 use intent::{
     build_orchestrator_harness_prompt, detect_local_preview_urls, json_object_without_nulls,
@@ -2092,9 +2092,14 @@ impl Core {
         if let Some(expected_branch) = expected_branch {
             ensure_safe_branch_name(expected_branch)?;
         }
-        let worktrees = read_worktrees(&repo_path);
-        let removable = removable_worktree(&repo_path, &target_path, &worktrees, expected_branch)?;
-        let removed_path = removable.path.clone();
+        let removed_path = if target_path.exists() {
+            let worktrees = read_worktrees(&repo_path);
+            removable_worktree(&repo_path, &target_path, &worktrees, expected_branch)?
+                .path
+                .clone()
+        } else {
+            removable_missing_worktree(&repo_path, &target_path, expected_branch)?
+        };
         run_git_worktree_remove(&repo_path, &target_path)?;
         Ok(serde_json::to_value(GitWorktreeRemoveResult {
             removed_path,

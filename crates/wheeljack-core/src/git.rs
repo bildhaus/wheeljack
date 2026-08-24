@@ -607,52 +607,97 @@ pub(crate) fn removable_worktree<'a>(
     Ok(worktree)
 }
 
-pub(crate) fn run_git_worktree_remove(repo_path: &Path, target_path: &Path) -> Result<()> {
-    if !target_path.exists() {
-        let output = git_command()
-            .arg("-C")
-            .arg(repo_path)
-            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .output()?;
-        if !output.status.success() {
+struct MissingWorktreeRegistration {
+    admin_dir: PathBuf,
+    path: PathBuf,
+    branch: String,
+}
+
+fn find_missing_worktree_registration(
+    repo_path: &Path,
+    target_path: &Path,
+) -> Result<Option<MissingWorktreeRegistration>> {
+    let output = git_command()
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "could not locate Git worktree metadata: {}",
+            command_output_detail(&output)
+        );
+    }
+    let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let registrations = common_dir.join("worktrees");
+    if !registrations.is_dir() {
+        return Ok(None);
+    }
+    for entry in fs::read_dir(&registrations)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let admin_dir = entry.path();
+        let gitdir = fs::read_to_string(admin_dir.join("gitdir")).unwrap_or_default();
+        let registered_git_file = PathBuf::from(gitdir.trim());
+        let registered_path = registered_git_file
+            .parent()
+            .unwrap_or(&registered_git_file)
+            .to_path_buf();
+        if !paths_equivalent(&registered_path, target_path) {
+            continue;
+        }
+        if admin_dir.parent() != Some(registrations.as_path()) {
+            bail!("refusing to remove worktree metadata outside the Git common directory");
+        }
+        let head = fs::read_to_string(admin_dir.join("HEAD")).unwrap_or_default();
+        let branch = head
+            .trim()
+            .strip_prefix("ref: refs/heads/")
+            .unwrap_or("detached")
+            .to_string();
+        return Ok(Some(MissingWorktreeRegistration {
+            admin_dir,
+            path: registered_path,
+            branch,
+        }));
+    }
+    Ok(None)
+}
+
+pub(crate) fn removable_missing_worktree(
+    repo_path: &Path,
+    target_path: &Path,
+    expected_branch: Option<&str>,
+) -> Result<String> {
+    if paths_equivalent(repo_path, target_path) {
+        bail!("wheeljack will not remove the currently opened project worktree.");
+    }
+    let registration = find_missing_worktree_registration(repo_path, target_path)?
+        .ok_or_else(|| anyhow!("Worktree path is not registered with this repository."))?;
+    if let Some(expected_branch) = expected_branch {
+        if registration.branch != expected_branch {
             bail!(
-                "could not locate Git worktree metadata: {}",
-                command_output_detail(&output)
+                "Worktree branch mismatch: expected {expected_branch}, found {}.",
+                registration.branch
             );
         }
-        let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-        let registrations = common_dir.join("worktrees");
-        let mut matched = None;
-        if registrations.is_dir() {
-            for entry in fs::read_dir(&registrations)? {
-                let entry = entry?;
-                if !entry.file_type()?.is_dir() {
-                    continue;
-                }
-                let admin_dir = entry.path();
-                let gitdir = fs::read_to_string(admin_dir.join("gitdir")).unwrap_or_default();
-                let registered_git_file = PathBuf::from(gitdir.trim());
-                let registered_path = registered_git_file.parent().unwrap_or(&registered_git_file);
-                if paths_equivalent(registered_path, target_path) {
-                    if admin_dir.parent() != Some(registrations.as_path()) {
-                        bail!(
-                            "refusing to remove worktree metadata outside the Git common directory"
-                        );
-                    }
-                    matched = Some(admin_dir);
-                    break;
-                }
-            }
-        }
-        let admin_dir =
-            matched.ok_or_else(|| anyhow!("Missing worktree registration was not found."))?;
-        fs::remove_dir_all(&admin_dir).with_context(|| {
-            format!("remove stale worktree registration {}", admin_dir.display())
+    }
+    Ok(registration.path.to_string_lossy().to_string())
+}
+
+pub(crate) fn run_git_worktree_remove(repo_path: &Path, target_path: &Path) -> Result<()> {
+    if !target_path.exists() {
+        let registration = find_missing_worktree_registration(repo_path, target_path)?
+            .ok_or_else(|| anyhow!("Missing worktree registration was not found."))?;
+        fs::remove_dir_all(&registration.admin_dir).with_context(|| {
+            format!(
+                "remove stale worktree registration {}",
+                registration.admin_dir.display()
+            )
         })?;
-        if read_worktrees(repo_path)
-            .iter()
-            .any(|worktree| paths_equivalent(Path::new(&worktree.path), target_path))
-        {
+        if registration.admin_dir.exists() {
             bail!("Git kept the missing worktree registered after its metadata was removed.");
         }
         return Ok(());
