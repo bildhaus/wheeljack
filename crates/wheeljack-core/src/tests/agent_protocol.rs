@@ -1159,6 +1159,25 @@ fn agent_protocol_parse_keeps_codex_activity_transient_and_hides_control_message
         .unwrap()
         .is_empty());
     assert_eq!(completed["payload"]["active"], false);
+
+    let echoed_autonomy_prompt = parse(vec![
+        user.to_string(),
+        json!({
+            "method": "item/completed",
+            "params": { "item": {
+                "type": "agentMessage",
+                "phase": "final_answer",
+                "text": "Useful result.\n\nwheeljack autonomous controls:\n- internal instructions\n- wheeljack.control {\"id\":\"hidden\"}"
+            }}
+        })
+        .to_string(),
+        json!({ "method": "turn/completed", "params": { "turn": { "status": "completed" } } })
+            .to_string(),
+    ]);
+    assert_eq!(
+        echoed_autonomy_prompt["payload"]["messages"][0]["text"],
+        "Useful result."
+    );
 }
 
 #[test]

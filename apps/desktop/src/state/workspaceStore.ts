@@ -71,6 +71,7 @@ function workspaceRef<K extends keyof WorkspaceState>(key: K): StoreRef<K> {
 // Compatibility accessors let the existing async orchestration code read the
 // latest durable workspace snapshot while ownership moves out of App.tsx.
 export const projectRef = workspaceRef("project");
+export const canvasesRef = workspaceRef("canvases");
 export const canvasRef = workspaceRef("canvas");
 export const nodesRef = workspaceRef("nodes");
 export const layoutRef = workspaceRef("layout");

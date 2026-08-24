@@ -206,6 +206,42 @@ fn ops_scheduler_leases_tasks_once_with_pause_and_concurrency() {
 }
 
 #[test]
+fn ops_scheduler_recovers_a_lease_owned_by_a_previous_process() {
+    let db = ops_db();
+    save_project_ops_state(&db, "project-1", &state(), None).unwrap();
+    configure_ops_scheduler(&db, "project-1", "canvas-1", true, false, 1, None).unwrap();
+    let lease = claim_ops_lease(&db, "project-1", "old-process")
+        .unwrap()
+        .unwrap();
+
+    assert!(finish_ops_lease(&db, &lease.id, "new-process", "failed").is_err());
+    let recovered = recover_ops_lease(&db, &lease.id, "failed").unwrap();
+    assert_eq!(recovered.state, "failed");
+    assert!(recover_ops_lease(&db, &lease.id, "failed").is_err());
+}
+
+#[test]
+fn ops_scheduler_never_leases_objective_cards() {
+    let db = ops_db();
+    let objective_state = json!({
+        "columns": [
+            { "id": "queued", "role": "queued" },
+            { "id": "done", "role": "done" }
+        ],
+        "cards": [
+            { "id": "objective", "kind": "objective", "columnId": "queued", "assigneeIds": [] },
+            { "id": "child", "kind": "task", "parentId": "objective", "columnId": "queued", "assigneeIds": [] }
+        ]
+    });
+    save_project_ops_state(&db, "project-1", &objective_state, None).unwrap();
+    configure_ops_scheduler(&db, "project-1", "canvas-1", true, false, 2, None).unwrap();
+
+    let leases = tick_ops_scheduler(&db).unwrap();
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].task_id, "child");
+}
+
+#[test]
 fn ops_scheduler_releases_pending_leases_for_deleted_tasks() {
     let db = ops_db();
     save_ops_state(&db, "canvas-1", "project-1", &state(), None).unwrap();

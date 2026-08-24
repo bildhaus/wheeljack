@@ -18,6 +18,8 @@ const agentMemoryStatePath = options["agent-memory-state"];
 const floorOnly = options["floor-only"] === "true";
 const floorWideScreenshotPath = options["floor-wide-screenshot"];
 const floorNarrowScreenshotPath = options["floor-narrow-screenshot"];
+const taskCompletionPath = laneStatePath ? `${laneStatePath}.task-complete`.replaceAll("\\", "/") : "";
+const taskCompletionPathBase64 = Buffer.from(taskCompletionPath).toString("base64");
 if (!projectPath) throw new Error("--project is required.");
 const normalizePath = (value) => value.replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
 const samePath = (left, right) => normalizePath(left) === normalizePath(right);
@@ -82,12 +84,31 @@ const waitFor = async (expression, description, timeoutMilliseconds = 60_000) =>
   const body = await evaluate("document.body.innerText");
   throw new Error(`Timed out waiting for ${description}.\nVisible text: ${body}`);
 };
+const selectLabeledTab = async (listLabel, label) => {
+  const selector = `[aria-label=${JSON.stringify(listLabel)}] [role="tab"]`;
+  const activated = await evaluate(`(()=>{const tab=[...document.querySelectorAll(${JSON.stringify(selector)})].find(node=>node.textContent?.trim()===${JSON.stringify(label)});if(!tab)return false;tab.dispatchEvent(new MouseEvent("mousedown",{bubbles:true,cancelable:true,button:0,buttons:1}));tab.dispatchEvent(new MouseEvent("mouseup",{bubbles:true,cancelable:true,button:0}));tab.dispatchEvent(new MouseEvent("click",{bubbles:true,cancelable:true,button:0}));return true})()`);
+  if (!activated) throw new Error(`${listLabel} tab ${label} is unavailable.`);
+  await waitFor(`[...document.querySelectorAll(${JSON.stringify(selector)})].some(node=>node.textContent?.trim()===${JSON.stringify(label)}&&node.getAttribute("aria-selected")==="true")`, `selected ${label} tab`);
+};
+const clickElement = async (selector) => {
+  const point = await evaluate(`(()=>{const node=document.querySelector(${JSON.stringify(selector)});if(!node)return null;const rect=node.getBoundingClientRect();return {x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()`);
+  if (!point) throw new Error(`Element is unavailable: ${selector}`);
+  await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", buttons: 1, clickCount: 1 });
+  await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", buttons: 0, clickCount: 1 });
+};
+const clickTextElement = async (selector, label) => {
+  const point = await evaluate(`(()=>{const node=[...document.querySelectorAll(${JSON.stringify(selector)})].find(candidate=>candidate.textContent?.trim().startsWith(${JSON.stringify(label)}));if(!node)return null;const rect=node.getBoundingClientRect();return {x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()`);
+  if (!point) throw new Error(`Element is unavailable: ${label} in ${selector}`);
+  await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", buttons: 1, clickCount: 1 });
+  await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", buttons: 0, clickCount: 1 });
+};
+const selectProjectView = (label) => selectLabeledTab("Project views", label);
 const showRunGraph = async () => {
   await evaluate(`(()=>{if(document.querySelector('.wj-floor-run-graph .wj-run-graph'))return true;const summary=document.querySelector('.wj-floor-run-graph-summary');summary?.click();return Boolean(summary)})()`);
   await waitFor(`Boolean(document.querySelector('.wj-floor-run-graph .wj-run-graph')) && document.querySelector('.wj-run-graph-range button[aria-pressed="true"]')?.textContent?.trim()==="40m"`, "expanded Run Graph at the default range");
 };
 const sendTerminalCommand = async (command) => {
-  const sent = await evaluate(`(()=>{const pane=[...document.querySelectorAll("[data-pane-id]")].find(node=>node.querySelector(".pane-status.running")&&node.querySelector('textarea[aria-label="Terminal input"]'));const input=pane?.querySelector('textarea[aria-label="Terminal input"]');if(!input)return false;const transfer=new DataTransfer();transfer.setData("text/plain",${JSON.stringify(command)});input.focus();input.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:transfer}));input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",code:"Enter",bubbles:true}));return true})()`);
+  const sent = await evaluate(`(()=>{const pane=[...document.querySelectorAll("[data-pane-id]")].find(node=>node.getAttribute("data-runtime-status")==="running"&&node.querySelector('textarea[aria-label="Terminal input"]'));const input=pane?.querySelector('textarea[aria-label="Terminal input"]');if(!input)return false;const transfer=new DataTransfer();transfer.setData("text/plain",${JSON.stringify(command)});input.focus();input.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:transfer}));input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",code:"Enter",bubbles:true}));return true})()`);
   if (!sent) throw new Error(`No running terminal accepted command: ${command}`);
 };
 
@@ -174,12 +195,12 @@ function Write-TaskCards([string]$Prompt) {
     $reviewPolicy = 'agent'
   } else {
     $title = 'WHEELJACK_OPS_PERSISTENCE'
-    $definition = 'The isolated lane is reviewed, verified, approved, and removed safely.'
+    $definition = 'The isolated lane is self-checked, reconciled, integrated, and removed safely.'
     $verificationCommand = 'git diff --check'
     if ($Prompt -match 'VERIFICATION_BASE64:([A-Za-z0-9+/=]+)') {
       $verificationCommand = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Matches[1]))
     }
-    $reviewPolicy = 'human'
+    $reviewPolicy = 'agent'
   }
   $payload = @{
     requestId = $requestId
@@ -222,14 +243,24 @@ if ($a.message.content -match 'WHEELJACK_AGENT_FLOOD') {
 }
 if ($a.message.content -match 'fresh, dedicated worker for wheeljack task|Resume wheeljack task') {
   @{type="assistant";message=@{content=@(@{type="text";text=("fixture:lane:"+$a.message.content)})}} | ConvertTo-Json -Compress -Depth 6
-  [Console]::In.ReadLine() | Out-Null
+  $taskCompletionPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${taskCompletionPathBase64}'))
+  while ($taskCompletionPath -and -not (Test-Path -LiteralPath $taskCompletionPath -PathType Leaf)) { Start-Sleep -Milliseconds 50 }
+  Write-Output '{"type":"result","is_error":false}'
+  while ($true) {
+    $line = [Console]::In.ReadLine()
+    if ($null -eq $line) { break }
+    $request = $line | ConvertFrom-Json
+    @{type="assistant";message=@{content=@(@{type="text";text=("fixture:lane-followup:"+$request.message.content)})}} | ConvertTo-Json -Compress -Depth 6
+    Write-Output '{"type":"result","is_error":false}'
+  }
   exit 0
 }
 if (Write-TaskCards $a.message.content) { exit 0 }
 Write-Output '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","text":"Inspecting the request"}}}'
 $codeFence = [string]([char]96) * 3
 $nl = [Environment]::NewLine
-@{type="assistant";message=@{content=@(@{type="text";text=("fixture:first:"+$a.message.content+$nl+$codeFence+"powershell"+$nl+"Write-Output 'wheeljack'"+$nl+$codeFence)})}} | ConvertTo-Json -Compress -Depth 6
+$visiblePrompt = $a.message.content -replace '(?s)\r?\n\r?\nwheeljack autonomous controls:.*$', ''
+@{type="assistant";message=@{content=@(@{type="text";text=("fixture:first:"+$visiblePrompt+$nl+$codeFence+"powershell"+$nl+"Write-Output 'wheeljack'"+$nl+$codeFence)})}} | ConvertTo-Json -Compress -Depth 6
 Write-Output '{"type":"result","is_error":false}'
 $b = [Console]::In.ReadLine() | ConvertFrom-Json
 @{type="assistant";message=@{content=@(@{type="text";text=("fixture:second:"+$b.message.content)})}} | ConvertTo-Json -Compress -Depth 6
@@ -295,9 +326,10 @@ if (fixtureVerification.verificationStatus !== "verified") {
   throw new Error(`The structured-agent fixture did not verify: ${JSON.stringify(fixtureVerification)}`);
 }
 const exerciseOnboarding = !dataPanesOnly && !sixSessionOnly && !floorOnly;
-if (!exerciseOnboarding) {
-  await coreCall("settings_import", { settings: { desktopOnboardingVersion: 1 } });
-}
+await coreCall("settings_import", { settings: {
+  selectedAgentAdapterId: "wheeljack-ui-fixture",
+  ...(!exerciseOnboarding ? { desktopOnboardingVersion: 1 } : {}),
+} });
 await evaluate("location.reload(); true");
 if (exerciseOnboarding) {
   await waitFor(
@@ -429,7 +461,13 @@ if (floorOnly) {
   await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "0", code: "Digit0", modifiers: 2, windowsVirtualKeyCode: 48 });
   await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "0", code: "Digit0", modifiers: 2, windowsVirtualKeyCode: 48 });
   await cdp("Emulation.clearDeviceMetricsOverride");
-  console.log(JSON.stringify({ floor: true, schedulerIntent: true, agentMatrix: true, dockedInspector: inspectorTarget, wideViewport: "1440x900", wideNoPageScroll: true, graphKeyboard: true, reducedMotion: true, compactViewport: "900x700", breakpointStack: true, zoom200: true }));
+  await selectProjectView("Spec");
+  await waitFor(`[...document.querySelectorAll('[role="tab"]')].some(node=>node.textContent?.trim()==="Technical design")`, "Floor smoke Spec navigation");
+  await selectProjectView("Plan");
+  await waitFor(`Boolean(document.querySelector(".wj-board"))`, "Floor smoke Plan navigation");
+  await selectProjectView("Run");
+  await waitFor(`Boolean(document.querySelector(".wj-floor"))`, "Floor smoke Run navigation");
+  console.log(JSON.stringify({ floor: true, schedulerIntent: true, agentMatrix: true, projectViewNavigation: true, dockedInspector: inspectorTarget, wideViewport: "1440x900", wideNoPageScroll: true, graphKeyboard: true, reducedMotion: true, compactViewport: "900x700", breakpointStack: true, zoom200: true }));
   if (!leaveOpen) await evaluate(`window.dispatchEvent(new CustomEvent("wheeljack:smoke-close")); true`);
   socket.close();
   process.exit(0);
@@ -504,6 +542,8 @@ if (sixSessionOnly) {
   const sortedEchoes = [...echoRoundTrips].sort((left, right) => left - right);
   const echoP95Milliseconds = sortedEchoes[Math.ceil(sortedEchoes.length * 0.95) - 1];
   const accessibility = await cdp("Accessibility.getFullAXTree");
+  await cdp("HeapProfiler.collectGarbage");
+  await Bun.sleep(1_000);
   const summary = await evaluate(`(()=>{const metrics=document.querySelector('[aria-label="Terminal utilities"]');return {
     panes: document.querySelectorAll("[data-pane-id]").length,
     terminals: document.querySelectorAll('[role="application"][aria-label="Terminal session"]').length,
@@ -541,7 +581,9 @@ if (agentFloodOnly) {
   if (agentMemoryStatePath) {
     await writeFile(agentMemoryStatePath, JSON.stringify({ phase: "baseline", run: 0 }));
   }
-  await Bun.sleep(2_000);
+  // Leave enough time for the PowerShell process-tree sampler to collect the
+  // three baseline points its contract requires, even when CIM is slow.
+  await Bun.sleep(5_000);
 }
 await evaluate(`(()=>{const input=document.querySelector("#onboarding-prompt");if(!input)return false;const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set;setter.call(input,${JSON.stringify(structuredInitial)});input.dispatchEvent(new InputEvent("input",{bubbles:true,inputType:"insertText",data:${JSON.stringify(structuredInitial)}}));return true})()`);
 await waitFor(`document.querySelector("#onboarding-prompt")?.value===${JSON.stringify(structuredInitial)}`, "editable first-agent prompt");
@@ -562,7 +604,9 @@ if (agentFloodOnly) {
     if (agentMemoryStatePath) {
       await writeFile(agentMemoryStatePath, JSON.stringify({ phase: "settle", run }));
     }
-    await Bun.sleep(2_500);
+    // The paired Windows harness samples the full process tree through CIM;
+    // give it the same deterministic three-sample window after every run.
+    await Bun.sleep(5_000);
     if (run === 6) break;
     const prompt = `WHEELJACK_AGENT_FLOOD_${run + 1}`;
     await evaluate(`(()=>{const input=document.querySelector('textarea[aria-label="Agent prompt"]');if(!input)return false;const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set;setter.call(input,${JSON.stringify(prompt)});input.dispatchEvent(new InputEvent("input",{bubbles:true,inputType:"insertText",data:${JSON.stringify(prompt)}}));return true})()`);
@@ -648,12 +692,10 @@ await evaluate(`document.querySelector('button[aria-label$="Open live sessions"]
 await waitFor(`Boolean(document.querySelector('textarea[aria-label="Agent prompt"]'))`, "Home live-sessions metric");
 await evaluate(`document.querySelector('button.wj-nav-item[aria-label="Home"]:not(:disabled)')?.click()`);
 await waitFor(`Boolean(document.querySelector('button[aria-label^="More actions for"]'))`, "Home after metric navigation");
-await evaluate(`(()=>{const button=document.querySelector('button[aria-label^="More actions for"]');button?.focus();return Boolean(button)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-await waitFor(`[...document.querySelectorAll('[role="menuitem"]')].some(node=>node.textContent?.trim().startsWith("Hide project"))`, "project hide menu item");
-await evaluate(`(()=>{const item=[...document.querySelectorAll('[role="menuitem"]')].find(node=>node.textContent?.trim().startsWith("Hide project"));item?.click();return Boolean(item)})()`);
-await waitFor(`(()=>{const dialog=document.querySelector('[role="alertdialog"]');if(!dialog||!dialog.textContent?.includes("has active sessions"))return false;const hide=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Hide from wheeljack");const erase=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Delete from disk");return hide?.disabled===true&&erase?.disabled===true})()`, "active-session project hide guard");
+await clickElement('button[aria-label^="More actions for"]');
+await waitFor(`[...document.querySelectorAll('[role="menuitem"]')].some(node=>node.textContent?.trim().startsWith("Remove from Wheeljack"))`, "project removal menu item");
+await evaluate(`(()=>{const item=[...document.querySelectorAll('[role="menuitem"]')].find(node=>node.textContent?.trim().startsWith("Remove from Wheeljack"));item?.click();return Boolean(item)})()`);
+await waitFor(`(()=>{const dialog=document.querySelector('[role="alertdialog"]');if(!dialog||!dialog.textContent?.includes("has active sessions"))return false;const remove=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Remove from Wheeljack");const erase=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Delete from disk");return remove?.disabled===true&&!erase})()`, "active-session project removal guard");
 await evaluate(`(()=>{const dialog=document.querySelector('[role="alertdialog"]');const cancel=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Cancel");cancel?.click();return Boolean(cancel)})()`);
 await waitFor(`!document.querySelector('[role="alertdialog"]')`, "closed project removal dialog");
 await evaluate(`document.querySelector('button[aria-label$="Open live sessions"]')?.click()`);
@@ -663,7 +705,7 @@ await cdp("Input.insertText", { text: structuredPrompt });
 await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Send" && !node.disabled)`, "enabled structured follow-up");
 await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Send" && !node.disabled);button?.click();return Boolean(button)})()`);
 await waitFor(`[...document.querySelectorAll('.chat [role="log"]')].some(node=>node.textContent?.includes("fixture:second:") && node.textContent?.includes(${JSON.stringify(structuredPrompt)}))`, "structured-agent follow-up output");
-await waitFor(`[...document.querySelectorAll(".chat .chat-marker[data-state='pending']")].some(node=>node.textContent?.includes("Bash") && node.textContent?.includes("cargo test"))`, "structured-agent scoped approval request");
+await waitFor(`[...document.querySelectorAll(".chat .wj-action-card[data-variant='decision']")].some(node=>node.textContent?.includes("cargo test") && [...node.querySelectorAll("button")].some(button=>button.textContent?.trim()==="Approve"))`, "structured-agent scoped approval request");
 if (chatScreenshotPath) {
   await cdp("Page.enable");
   await cdp("Page.bringToFront");
@@ -672,17 +714,17 @@ if (chatScreenshotPath) {
   socket.close();
   process.exit(0);
 }
-await evaluate(`(()=>{const button=[...document.querySelectorAll(".chat .approval-actions button")].find(node=>node.textContent?.trim()==="Approve");button?.click();return Boolean(button)})()`);
+await evaluate(`(()=>{const button=[...document.querySelectorAll(".chat .wj-action-card-actions button")].find(node=>node.textContent?.trim()==="Approve");button?.click();return Boolean(button)})()`);
 await waitFor(`[...document.querySelectorAll('.chat [role="log"]')].some(node=>node.textContent?.includes("fixture:approval:allow"))`, "structured-agent approval response");
-await waitFor(`[...document.querySelectorAll(".chat .chat-marker[data-state='approved']")].some(node=>node.textContent?.includes("approved"))`, "durable approval outcome");
-await waitFor(`[...document.querySelectorAll(".chat .chat-marker[data-state='pending']")].some(node=>node.textContent?.includes("Which workspace should continue?"))`, "structured-agent question request");
+await waitFor(`Boolean(document.querySelector('.chat .wj-action-card [aria-label="Approved"]'))`, "durable approval outcome");
+await waitFor(`[...document.querySelectorAll(".chat .wj-action-card[data-variant='decision']")].some(node=>node.textContent?.includes("Which workspace should continue?") && Boolean(node.querySelector('textarea[aria-label="Answer the agent question"]')))`, "structured-agent question request");
 await evaluate(`document.querySelector('button[aria-label^="Inbox,"]')?.click()`);
 await waitFor(`(()=>{const panel=document.querySelector("#utility-panel");const labels=[...panel.querySelectorAll("button")].map(node=>node.textContent?.trim());return labels.includes("Answer in chat")&&!labels.includes("Approve")&&!labels.includes("Deny")})()`, "question-only inbox action");
 await evaluate(`(()=>{const button=[...document.querySelectorAll("#utility-panel button")].find(node=>node.textContent?.trim()==="Answer in chat");button?.click();return Boolean(button)})()`);
 await waitFor(`Boolean(document.querySelector('textarea[aria-label="Answer the agent question"]'))`, "question answer composer");
 await evaluate(`document.querySelector('textarea[aria-label="Answer the agent question"]')?.focus()`);
 await cdp("Input.insertText", { text: "Primary" });
-await evaluate(`(()=>{const button=[...document.querySelectorAll(".chat .approval-actions button")].find(node=>node.textContent?.trim()==="Send answer");button?.click();return Boolean(button)})()`);
+await evaluate(`(()=>{const button=[...document.querySelectorAll(".chat .wj-action-card-actions button")].find(node=>node.textContent?.trim()==="Send answer");button?.click();return Boolean(button)})()`);
 await waitFor(`[...document.querySelectorAll('.chat [role="log"]')].some(node=>node.textContent?.includes("fixture:question:allow"))`, "structured-agent question answer");
 await waitFor(`Boolean(document.querySelector('[data-agent-status="completed"] textarea[aria-label="Agent prompt"]'))`, "composer after question");
 const cancelPrompt = "WHEELJACK_CANCEL_PROMPT";
@@ -704,8 +746,8 @@ if (chatOnly) {
   await waitFor(`Boolean(document.querySelector('[data-agent-status="completed"]'))`, "completed recovered agent turn");
   const summary = await evaluate(`(()=>(
     {
-      approved: Boolean(document.querySelector('.chat-marker[data-state="approved"]')),
-      answered: Boolean(document.querySelector('.chat-marker[data-state="answered"]')),
+      approved: Boolean(document.querySelector('.wj-action-card [aria-label="Approved"]')),
+      answered: Boolean(document.querySelector('.wj-action-card [aria-label="Answered"]')),
       recoveredDraftCleared: document.querySelector('textarea[aria-label="Agent prompt"]')?.value==="",
       recovered: [...document.querySelectorAll('.chat [role="log"]')].some(node=>node.textContent?.includes("fixture:recovered:"))
     }
@@ -760,17 +802,11 @@ await waitFor(`(()=>{const scroll=document.querySelector('.wj-run-graph-scroll')
 await cdp("Emulation.setDeviceMetricsOverride", { width: 760, height: 700, deviceScaleFactor: 1, mobile: false });
 await waitFor(`(()=>{const needs=document.querySelector('.wj-floor-needs');const agents=document.querySelector('.wj-floor-live');const ready=document.querySelector('.wj-floor-ready');const activity=document.querySelector('.wj-floor-activity');const floor=document.querySelector('.wj-floor');if(!needs||!agents||!ready||!activity||!floor)return false;const tops=[needs,agents,ready,activity].map(node=>node.getBoundingClientRect().top);return tops.every((top,index)=>index===0||top>tops[index-1])&&getComputedStyle(floor).overflowY!=="hidden"})()`, "below-820 container stack ordering");
 await cdp("Emulation.clearDeviceMetricsOverride");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Spec");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
+await selectProjectView("Spec");
 await waitFor(`[...document.querySelectorAll('[role="tab"]')].some(node=>node.textContent?.trim()==="Technical design")`, "combined Spec surface");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Technical design");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
+await selectLabeledTab("Specification documents", "Technical design");
 await waitFor(`[...document.querySelectorAll("h1")].some(node=>node.textContent?.trim()==="Technical design")`, "technical design document surface");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Board");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
+await selectProjectView("Plan");
 await waitFor(`Boolean(document.querySelector(".wj-board"))`, "Ops Board");
 if (await evaluate(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Create KANBAN.md")`)) {
   await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Create KANBAN.md");button?.click();return Boolean(button)})()`);
@@ -783,12 +819,10 @@ await evaluate(`document.querySelector(".wj-new-task-action")?.click()`);
 await waitFor(`Boolean(document.querySelector("#task-brief"))`, "open task composer");
 const opsTaskTitle = "WHEELJACK_OPS_PERSISTENCE";
 const editedOpsTaskTitle = `${opsTaskTitle}_EDITED`;
-const opsTaskDefinition = "The isolated lane is reviewed, verified, approved, and removed safely.";
-const verificationReleasePath = `${laneStatePath}.verification-release`.replaceAll("\\", "/");
-await rm(verificationReleasePath, { force: true });
-const verificationReleasePathBase64 = Buffer.from(verificationReleasePath).toString("base64");
-const opsVerificationCommand = `bun -e "const p=Buffer.from('${verificationReleasePathBase64}','base64').toString();while(!require('node:fs').existsSync(p))await Bun.sleep(50)" && git diff --check`;
-const opsTaskBrief = `${opsTaskTitle}: create a complete isolated task-lane persistence contract. VERIFICATION_BASE64:${Buffer.from(opsVerificationCommand).toString("base64")}`;
+const opsTaskDefinition = "The isolated lane is self-checked, reconciled, integrated, and removed safely.";
+const opsVerificationCommand = "git diff --check";
+const opsTaskBrief = `${opsTaskTitle}: create a complete isolated task-lane persistence contract.`;
+await rm(taskCompletionPath, { force: true });
 await evaluate(`(()=>{const input=document.querySelector("#task-brief");if(!input)return false;const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value").set;setter.call(input,${JSON.stringify(opsTaskBrief)});input.dispatchEvent(new InputEvent("input",{bubbles:true,inputType:"insertText",data:${JSON.stringify(opsTaskBrief)}}));return true})()`);
 await waitFor(`document.querySelector("#task-brief")?.value===${JSON.stringify(opsTaskBrief)}`, "controlled general task brief");
 await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Create tasks" && !node.disabled);button?.click();return Boolean(button)})()`);
@@ -824,7 +858,7 @@ const waitForTaskLane = async (title) => {
     const canvases = await coreCall("canvas_list_project", { projectId: openedProject.id });
     for (const canvas of canvases) {
       const stored = await coreCall("canvas_get", { canvasId: canvas.id });
-      const ops = await coreCall("ops_state_get", { canvasId: canvas.id });
+      const ops = await coreCall("ops_project_state_get", { projectId: openedProject.id });
       const card = ops?.state?.cards?.find((candidate) => candidate.title === title);
       const taskNodeId = card?.assigneeIds?.[0];
       const taskNode = stored.nodes?.find((node) => node.id === taskNodeId);
@@ -845,7 +879,7 @@ const waitForPersistedCard = async (cardId, predicate, description, timeoutMilli
   while (Date.now() < deadline) {
     const [stored, ops] = await Promise.all([
       coreCall("canvas_get", { canvasId: laneFixture.canvas.id }),
-      coreCall("ops_state_get", { canvasId: laneFixture.canvas.id }),
+      coreCall("ops_project_state_get", { projectId: openedProject.id }),
     ]);
     const card = ops?.state?.cards?.find((candidate) => candidate.id === cardId);
     lastCard = card;
@@ -904,7 +938,7 @@ if (
 
 const laneProofPath = join(taskLane.cwd, "lane-proof.txt");
 const primaryProofPath = join(openedProject.path, "primary-proof.txt");
-const laneProofBaseline = await Bun.file(laneProofPath).arrayBuffer();
+const primaryProofBaseline = await Bun.file(primaryProofPath).arrayBuffer();
 await Bun.write(laneProofPath, `${await Bun.file(laneProofPath).text()}WHEELJACK_LANE_ONLY\n`);
 await Bun.write(primaryProofPath, `${await Bun.file(primaryProofPath).text()}WHEELJACK_PRIMARY_ONLY\n`);
 const isolatedReview = await coreCall("git_worktree_review", {
@@ -927,74 +961,14 @@ if (
   throw new Error(`Task review crossed checkout boundaries: ${JSON.stringify(isolatedReview)}`);
 }
 
-await evaluate(`document.querySelector(".wj-plan-mode-trigger")?.click()`);
-await waitFor(`Boolean(document.querySelector('[aria-labelledby="ops-surface-heading"]'))`, "Plan after isolated task launch");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Board");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await waitFor(`Boolean(document.querySelector(${JSON.stringify(`button[aria-label="Task actions: ${editedOpsTaskTitle}"]:not(:disabled)`)}))`, "task action after returning from agent");
-await evaluate(`(()=>{const button=document.querySelector(${JSON.stringify(`button[aria-label="Task actions: ${editedOpsTaskTitle}"]:not(:disabled)`)});button?.focus();return Boolean(button)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-await waitFor(`[...document.querySelectorAll('[role="menuitem"]')].some(node=>node.textContent?.trim().startsWith("Request verification"))`, "task verification action");
-await evaluate(`(()=>{const item=[...document.querySelectorAll('[role="menuitem"]')].find(node=>node.textContent?.trim().startsWith("Request verification"));item?.click();return Boolean(item)})()`);
-await waitFor(`(()=>{const card=[...document.querySelectorAll(".wj-task-card")].find(node=>node.textContent?.includes(${JSON.stringify(editedOpsTaskTitle)}));return [...card?.querySelectorAll("button")??[]].some(node=>node.textContent?.trim()==="Review evidence")})()`, "task ready for evidence review");
-await evaluate(`(()=>{const card=[...document.querySelectorAll(".wj-task-card")].find(node=>node.textContent?.includes(${JSON.stringify(editedOpsTaskTitle)}));const button=[...card?.querySelectorAll("button")??[]].find(node=>node.textContent?.trim()==="Review evidence");button?.click();return Boolean(button)})()`);
-await waitFor(`document.querySelector(".wj-diff")?.textContent?.includes("WHEELJACK_LANE_ONLY")`, "isolated review drawer evidence");
-const reviewDrawerScope = await evaluate(`(()=>{const diff=document.querySelector(".wj-diff")?.textContent??"";const drawer=document.querySelector(".wj-drawer")?.textContent??"";return {lane:diff.includes("WHEELJACK_LANE_ONLY"),primary:diff.includes("WHEELJACK_PRIMARY_ONLY"),taskWorktree:drawer.includes("Task worktree"),branch:drawer.includes(${JSON.stringify(taskLane.branch)})}})()`);
-if (!reviewDrawerScope.lane || reviewDrawerScope.primary || !reviewDrawerScope.taskWorktree || !reviewDrawerScope.branch) {
-  throw new Error(`The review drawer did not preserve task-lane scope: ${JSON.stringify(reviewDrawerScope)}`);
+await Bun.write(primaryProofPath, primaryProofBaseline);
+for (const args of [
+  ["add", "--", "lane-proof.txt"],
+  ["commit", "--quiet", "-m", "Complete isolated task-lane smoke"],
+]) {
+  const result = Bun.spawnSync(["git", "-C", taskLane.cwd, ...args]);
+  if (result.exitCode !== 0) throw new Error(`Could not commit the task-lane fixture: ${result.stderr.toString()}`);
 }
-const reviewSelectionPolicy = await evaluate(`(()=>{const value=(selector)=>{const node=document.querySelector(selector);return node?getComputedStyle(node).userSelect:null};return {title:value('.wj-drawer-review [data-slot="card-title"]'),content:value('.wj-drawer-review [data-slot="card-content"]'),diff:value(".wj-diff"),action:value('.wj-drawer-review [data-slot="button"]')}})()`);
-if (reviewSelectionPolicy.title !== "none" || reviewSelectionPolicy.action !== "none" || reviewSelectionPolicy.content !== "text" || reviewSelectionPolicy.diff !== "text") {
-  throw new Error(`Review text-selection policy failed: ${JSON.stringify(reviewSelectionPolicy)}`);
-}
-const runningVerificationState = await waitForPersistedCard(
-  laneCard.id,
-  (card) => card.verificationRun?.status === "running",
-  "automatically started task verification",
-);
-await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Cancel verification" && !node.disabled) && [...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Approve verification" && node.disabled)`, "automatic verification gate and cancellation action");
-const canceledVerification = await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Cancel verification" && !node.disabled);button?.click();return Boolean(button)})()`);
-if (!canceledVerification) throw new Error("The deterministic verification did not expose Cancel verification.");
-const canceledVerificationState = await waitForPersistedCard(
-  laneCard.id,
-  (card) => card.verificationRun?.status === "canceled",
-  "canceled task verification",
-);
-if (
-  canceledVerificationState.card.verificationRun?.sessionId !== runningVerificationState.card.verificationRun?.sessionId ||
-  canceledVerificationState.card.verificationRun?.command !== opsVerificationCommand ||
-  !canceledVerificationState.card.verificationRun?.endedAt
-) {
-  throw new Error(`The canceled verification metadata was incomplete: ${JSON.stringify(canceledVerificationState.card.verificationRun)}`);
-}
-await Bun.write(verificationReleasePath, "release\n");
-await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Run verification" && !node.disabled)`, "verification rerun after cancellation");
-const startedVerification = await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Run verification" && !node.disabled);button?.click();return Boolean(button)})()`);
-if (!startedVerification) throw new Error("The task review did not rerun real verification after cancellation.");
-const firstVerificationState = await waitForPersistedCard(
-  laneCard.id,
-  (card) => card.verificationRun?.status === "passed",
-  "passing task verification",
-);
-const firstVerification = firstVerificationState.card.verificationRun;
-if (
-  !firstVerification?.sessionId ||
-  firstVerification.command !== opsVerificationCommand ||
-  !firstVerification.cwd ||
-  !samePath(firstVerification.cwd, taskLane.cwd) ||
-  !firstVerification.worktreePath ||
-  !samePath(firstVerification.worktreePath, taskLane.worktreePath) ||
-  firstVerification.baseCommit !== taskLane.baseCommit ||
-  firstVerification.exitCode !== 0 ||
-  firstVerification.snapshotId !== isolatedReview.snapshotId ||
-  !firstVerification.startedAt ||
-  !firstVerification.endedAt
-) {
-  throw new Error(`The passing verification metadata was incomplete: ${JSON.stringify(firstVerification)}`);
-}
-await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Approve verification" && node.disabled)`, "approval blocked without handoff evidence");
 const evidenceBoard = await coreCall("coordination_board_sync", {
   cwd: openedProject.path,
   callsigns: [laneTaskNode.title],
@@ -1002,7 +976,7 @@ const evidenceBoard = await coreCall("coordination_board_sync", {
     id: laneCard.id,
     title: editedOpsTaskTitle,
     detail: laneCard.detail ?? "",
-    status: "review",
+    status: "completed",
     assignees: [laneTaskNode.title],
     priority: laneCard.priority,
   }],
@@ -1013,120 +987,40 @@ await coreCall("coordination_board_ensure", {
   callsigns: [laneTaskNode.title],
   agentEvent: {
     callsign: laneTaskNode.title,
+    runId: `smoke-run-${laneCard.id}`,
     taskId: laneCard.id,
     task: editedOpsTaskTitle,
-    status: "review",
+    status: "completed",
     expectedFiles: ["lane-proof.txt"],
-    note: "Packaged task review completed.",
-    handoff: "Implementation and verification evidence are ready for approval.",
+    note: "Packaged task implementation and self-check completed.",
+    handoff: 'wheeljack.report {"summary":"Completed isolated task-lane smoke","checks":["git diff --check — passed"],"risks":[]}\nCommitted implementation evidence is ready for reconciliation.',
   },
 });
-await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Approve verification" && !node.disabled)`, "approval enabled by task handoff evidence");
-await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="View verification output" && !node.disabled)`, "verification output action");
-await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="View verification output" && !node.disabled);button?.click();return Boolean(button)})()`);
-await waitFor(`document.querySelector(".wj-transcript-drawer")?.textContent?.includes(${JSON.stringify(firstVerification.sessionId)})`, "durable verification transcript");
-const transcriptSelectionPolicy = await evaluate(`(()=>{const value=(selector)=>{const node=document.querySelector(selector);return node?getComputedStyle(node).userSelect:null};return {title:value('.wj-transcript-drawer [data-slot="sheet-title"]'),content:value(".wj-transcript-content")}})()`);
-if (transcriptSelectionPolicy.title !== "none" || transcriptSelectionPolicy.content !== "text") {
-  throw new Error(`Transcript text-selection policy failed: ${JSON.stringify(transcriptSelectionPolicy)}`);
-}
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
-await waitFor(`!document.querySelector(".wj-transcript-drawer") && Boolean(document.querySelector(".wj-diff"))`, "task review after verification output");
-
-await Bun.write(laneProofPath, `${await Bun.file(laneProofPath).text()}WHEELJACK_STALE_AFTER_VERIFICATION\n`);
-const attemptedStaleApproval = await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Approve verification" && !node.disabled);button?.click();return Boolean(button)})()`);
-if (!attemptedStaleApproval) throw new Error("The passing verification did not enable approval.");
-await waitFor(`document.querySelector(".wj-drawer")?.textContent?.includes("Verification stale")`, "stale verification rejection");
-await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Run verification" && !node.disabled)`, "verification rerun after stale rejection");
-await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Run verification" && !node.disabled);button?.click();return Boolean(button)})()`);
-const secondVerificationState = await waitForPersistedCard(
-  laneCard.id,
-  (card) => card.verificationRun?.status === "passed" && card.verificationRun.snapshotId !== firstVerification.snapshotId,
-  "passing verification rerun for the changed snapshot",
-);
-const secondVerification = secondVerificationState.card.verificationRun;
-if (
-  !secondVerification?.sessionId ||
-  secondVerification.sessionId === firstVerification.sessionId ||
-  secondVerification.command !== opsVerificationCommand ||
-  !secondVerification.cwd ||
-  !samePath(secondVerification.cwd, taskLane.cwd) ||
-  !secondVerification.worktreePath ||
-  !samePath(secondVerification.worktreePath, taskLane.worktreePath) ||
-  secondVerification.baseCommit !== taskLane.baseCommit ||
-  secondVerification.exitCode !== 0 ||
-  !secondVerification.snapshotId ||
-  !secondVerification.startedAt ||
-  !secondVerification.endedAt
-) {
-  throw new Error(`The verification rerun metadata was incomplete: ${JSON.stringify(secondVerification)}`);
-}
-await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Approve verification" && !node.disabled)`, "approval for the verified snapshot");
-await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Approve verification" && !node.disabled);button?.click();return Boolean(button)})()`);
+await Bun.write(taskCompletionPath, "complete\n");
 const approvedTaskState = await waitForPersistedCard(
   laneCard.id,
-  (card, state) => Boolean(card.completedAt) && state.columns?.some((column) => column.id === card.columnId && column.role === "done"),
-  "approved task completion",
+  (card, state) => card.reconciliation?.status === "integrated" && Boolean(card.completedAt) && state.columns?.some((column) => column.id === card.columnId && column.role === "done"),
+  "automatic task reconciliation",
+  60_000,
 );
-await waitFor(`!document.querySelector(".wj-diff")`, "closed approved task review");
-const approvedReview = await coreCall("git_worktree_review", {
-  req: {
-    projectPath: openedProject.path,
-    worktreePath: taskLane.worktreePath,
-    expectedBranch: taskLane.branch,
-    baseCommit: taskLane.baseCommit,
-  },
-});
-if (
-  approvedReview.snapshotId !== secondVerification.snapshotId ||
-  !approvedReview.changedFiles.includes("lane-proof.txt") ||
-  !approvedReview.text.includes("WHEELJACK_STALE_AFTER_VERIFICATION")
-) {
-  throw new Error(`Approval changed or delivered the task worktree: ${JSON.stringify(approvedReview)}`);
+const integratedLaneProof = await Bun.file(join(openedProject.path, "lane-proof.txt")).text();
+const restoredPrimaryProof = await Bun.file(primaryProofPath).text();
+if (!integratedLaneProof.includes("WHEELJACK_LANE_ONLY") || restoredPrimaryProof.includes("WHEELJACK_PRIMARY_ONLY")) {
+  throw new Error("Automatic reconciliation did not integrate only the isolated task commit.");
 }
-
-await Bun.write(laneProofPath, laneProofBaseline);
+const removedTaskState = await waitForPersistedCard(
+  laneCard.id,
+  (card) => Boolean(card.taskLane?.closedAt),
+  "automatic task worktree cleanup",
+  60_000,
+);
 await evaluate(`document.querySelector(${JSON.stringify(`button[aria-label="${openedProject.name}"]`)})?.click()`);
-await waitFor(`Boolean(document.querySelector('textarea[aria-label="Agent prompt"]'))`, "Work surface after approved task cleanup");
-await waitFor(`!document.querySelector(${JSON.stringify(`[data-pane-id="${laneTaskNode.id}"]`)})`, "automatically removed approved task agent pane");
+await waitFor(`Boolean(document.querySelector('textarea[aria-label="Agent prompt"]'))`, "Work surface after reconciled task cleanup");
+await waitFor(`!document.querySelector(${JSON.stringify(`[data-pane-id="${laneTaskNode.id}"]`)})`, "automatically removed reconciled task agent pane");
 const archivedTaskTranscript = await coreCall("session_transcript", { sessionId: laneSession.id });
 if (!archivedTaskTranscript.text.includes(`fresh, dedicated worker for wheeljack task ${laneCard.id}`)) {
   throw new Error("The automatically removed task pane did not preserve its transcript history.");
 }
-await evaluate(`document.querySelector(".wj-plan-mode-trigger")?.click()`);
-await waitFor(`Boolean(document.querySelector('[aria-labelledby="ops-surface-heading"]'))`, "Plan after task agent cleanup");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Floor");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await waitFor(`Boolean(document.querySelector(".wj-floor"))`, "Ops Floor after task agent cleanup");
-await evaluate(`(()=>{const summary=document.querySelector('.wj-floor-run-graph > summary');summary?.focus();return Boolean(summary)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await waitFor(`Boolean(document.querySelector('.wj-floor-run-graph[open]'))`, "expanded recorded Run Graph");
-await waitFor(`[...document.querySelectorAll('.wj-run-graph-node')].some(node=>node.getAttribute('aria-label')?.includes(${JSON.stringify(editedOpsTaskTitle)}))`, "recorded Run Graph node");
-await evaluate(`(()=>{const node=[...document.querySelectorAll('.wj-run-graph-node')].find(candidate=>candidate.getAttribute('aria-label')?.includes(${JSON.stringify(editedOpsTaskTitle)}));node?.focus();return Boolean(node)})()`);
-await waitFor(`document.activeElement?.classList.contains('wj-run-graph-node')`, "focused recorded Run Graph node");
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await waitFor(`Boolean(document.querySelector('.wj-run-graph-node[aria-pressed="true"]')) && Boolean(document.querySelector(${JSON.stringify(`[data-card-id="${laneCard.id}"][data-run-graph-selected="true"]`)}))`, "Run Graph node selects matching Floor row");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Board");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await waitFor(`Boolean(document.querySelector(".wj-board"))`, "Ops board after task agent cleanup");
-await waitFor(`Boolean(document.querySelector(${JSON.stringify(`button[aria-label="Task actions: ${editedOpsTaskTitle}"]:not(:disabled)`)}))`, "approved task actions");
-await evaluate(`(()=>{const button=document.querySelector(${JSON.stringify(`button[aria-label="Task actions: ${editedOpsTaskTitle}"]:not(:disabled)`)});button?.focus();return Boolean(button)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-await waitFor(`[...document.querySelectorAll('[role="menuitem"]')].some(node=>node.textContent?.trim().startsWith("Remove worktree")&&node.getAttribute("aria-disabled")!=="true"&&!node.hasAttribute("data-disabled"))`, "safe worktree removal action");
-await evaluate(`(()=>{const item=[...document.querySelectorAll('[role="menuitem"]')].find(node=>node.textContent?.trim().startsWith("Remove worktree")&&node.getAttribute("aria-disabled")!=="true"&&!node.hasAttribute("data-disabled"));item?.click();return Boolean(item)})()`);
-await waitFor(`document.querySelector('[role="alertdialog"]')?.textContent?.includes(${JSON.stringify(taskLane.branch)})`, "worktree removal confirmation");
-await evaluate(`(()=>{const button=[...document.querySelectorAll('[role="alertdialog"] button')].find(node=>node.textContent?.trim()==="Confirm");button?.click();return Boolean(button)})()`);
-const removedTaskState = await waitForPersistedCard(
-  laneCard.id,
-  (card) => Boolean(card.taskLane?.closedAt),
-  "removed task worktree metadata",
-);
-await waitFor(`(()=>{const card=[...document.querySelectorAll(".wj-task-card")].find(node=>node.textContent?.includes(${JSON.stringify(editedOpsTaskTitle)}));return card?.textContent?.includes("Lane removed")})()`, "removed task lane badge");
 const removedWorktreeStatus = await coreCall("git_status", {
   path: openedProject.path,
   includeWorktrees: true,
@@ -1137,15 +1031,22 @@ if (
   removedWorktreeStatus.worktrees.some((worktree) => samePath(worktree.path, taskLane.worktreePath)) ||
   await Bun.file(laneProofPath).exists()
 ) {
-  throw new Error(`The approved task lane was not removed safely: ${JSON.stringify({ card: removedTaskState.card, worktrees: removedWorktreeStatus.worktrees })}`);
+  throw new Error(`The reconciled task lane was not removed safely: ${JSON.stringify({ card: removedTaskState.card, worktrees: removedWorktreeStatus.worktrees })}`);
 }
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Spec");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
+await evaluate(`document.querySelector(".wj-plan-mode-trigger")?.click()`);
+await waitFor(`Boolean(document.querySelector('[aria-labelledby="ops-surface-heading"]'))`, "Plan after task agent cleanup");
+await selectProjectView("Run");
+await waitFor(`Boolean(document.querySelector(".wj-floor"))`, "Ops Floor after task agent cleanup");
+await showRunGraph();
+await waitFor(`[...document.querySelectorAll('.wj-run-graph-node')].some(node=>node.getAttribute('aria-label')?.includes(${JSON.stringify(editedOpsTaskTitle)}))`, "recorded Run Graph node");
+await evaluate(`(()=>{const node=[...document.querySelectorAll('.wj-run-graph-node')].find(candidate=>candidate.getAttribute('aria-label')?.includes(${JSON.stringify(editedOpsTaskTitle)}));node?.click();return Boolean(node)})()`);
+await waitFor(`Boolean(document.querySelector('.wj-run-graph-node[aria-pressed="true"]')) && Boolean(document.querySelector(${JSON.stringify(`.wj-floor-docked-inspector[data-card-id="${laneCard.id}"]`)}))`, "Run Graph node opens matching task evidence");
+await selectProjectView("Plan");
+await waitFor(`Boolean(document.querySelector(".wj-board"))`, "Ops board after task agent cleanup");
+await waitFor(`(()=>{const card=[...document.querySelectorAll(".wj-task-card")].find(node=>node.textContent?.includes(${JSON.stringify(editedOpsTaskTitle)}));return card?.textContent?.includes("Lane removed")})()`, "removed task lane badge");
+await selectProjectView("Spec");
 await waitFor(`[...document.querySelectorAll('[role="tab"]')].some(node=>node.textContent?.trim()==="Requirements")`, "Spec requirements tab");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Requirements");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: " ", code: "Space", windowsVirtualKeyCode: 32 });
+await selectLabeledTab("Specification documents", "Requirements");
 await waitFor(`[...document.querySelectorAll("h1")].some(node=>node.textContent?.trim()==="Product requirements")`, "PRD surface");
 await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>["Create PRD.md","Use template"].includes(node.textContent?.trim()));button?.click();return Boolean(button)})()`);
 await waitFor(`[...document.querySelectorAll('[role="alertdialog"] button')].some(node=>node.textContent?.trim().startsWith("Accept & write"))`, "PRD write preview");
@@ -1153,9 +1054,7 @@ await evaluate(`(()=>{const button=[...document.querySelectorAll('[role="alertdi
 await waitFor(`document.querySelector('textarea[aria-label="PRD document editor"]')?.value.includes("## Acceptance criteria")`, "generated PRD");
 await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Create tasks" && !node.disabled)`, "enabled PRD task creation");
 await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Create tasks" && !node.disabled);button?.click();return Boolean(button)})()`);
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Board");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+await selectProjectView("Plan");
 await waitFor(`document.querySelectorAll(".wj-task-card").length===3`, "PRD-derived Ops tasks");
 await waitFor(`Boolean([...document.querySelectorAll('button[aria-label^="Task actions:"]:not(:disabled)')].find(node=>node.getAttribute("aria-label")!==${JSON.stringify(`Task actions: ${editedOpsTaskTitle}`)}))`, "enabled derived-task actions");
 await evaluate(`(()=>{const button=[...document.querySelectorAll('button[aria-label^="Task actions:"]:not(:disabled)')].find(node=>node.getAttribute("aria-label")!==${JSON.stringify(`Task actions: ${editedOpsTaskTitle}`)});button?.focus();return Boolean(button)})()`);
@@ -1172,7 +1071,7 @@ let opsDiagnostic;
 while (Date.now() < opsDeadline) {
   const canvases = await coreCall("canvas_list_project", { projectId: openedProject.id });
   const stored = canvases[0]
-    ? await coreCall("ops_state_get", { canvasId: canvases[0].id })
+    ? await coreCall("ops_project_state_get", { projectId: openedProject.id })
     : undefined;
   opsDiagnostic = stored;
   opsStored = Boolean(
@@ -1195,9 +1094,12 @@ while (Date.now() < opsDeadline) {
   await Bun.sleep(100);
 }
 if (!coordinationTaskProjection) throw new Error("The Ops board did not sync its shared tasks.md projection.");
-const kanbanText = await Bun.file(join(openedProject.path, "KANBAN.md")).text();
-if (kanbanText.includes(taskLane.worktreePath) || kanbanText.includes(taskLane.cwd)) {
-  throw new Error("KANBAN.md leaked machine-local task-lane paths.");
+const kanbanPath = join(openedProject.path, "KANBAN.md");
+if (await pathExists(kanbanPath)) {
+  const kanbanText = await Bun.file(kanbanPath).text();
+  if (kanbanText.includes(taskLane.worktreePath) || kanbanText.includes(taskLane.cwd)) {
+    throw new Error("KANBAN.md leaked machine-local task-lane paths.");
+  }
 }
 const recoveryTaskTitle = "WHEELJACK_RECOVERY_LANE";
 await evaluate(`document.querySelector(".wj-new-task-action")?.click()`);
@@ -1293,8 +1195,8 @@ await waitFor(`Boolean(document.querySelector('textarea[aria-label="Agent prompt
 const fixtureSessions = await coreCall("session_list", { limit: 100 });
 const fixtureSession = fixtureSessions.find((session) => session.id === toolbarFixtureSession.id);
 if (!fixtureSession) throw new Error("The toolbar structured-agent fixture session was not persisted.");
-await coreCall("session_kill", { sessionId: fixtureSession.id });
-await waitFor(`!document.querySelector(${JSON.stringify(`[data-pane-id="${toolbarFixtureSession.nodeId}"]`)})?.querySelector(".pane-status.running")`, "toolbar structured-agent cancellation");
+await coreCall("session_kill", { sessionId: fixtureSession.id, terminationReason: "canceled" });
+await waitFor(`document.querySelector(${JSON.stringify(`[data-pane-id="${toolbarFixtureSession.nodeId}"]`)})?.getAttribute("data-runtime-status")!=="running"`, "toolbar structured-agent cancellation");
 const originalCanvasName = await evaluate(`document.querySelector('button[role="tab"][aria-selected="true"]')?.textContent?.trim()`);
 await evaluate(`document.querySelector('button[aria-label="New canvas"]')?.click()`);
 await waitFor(`document.querySelector('button[role="tab"][aria-selected="true"]')?.textContent?.trim()!==${JSON.stringify(originalCanvasName)}`, "new canvas");
@@ -1307,7 +1209,16 @@ await evaluate(`document.querySelector('.wj-canvas-tab.active button[aria-label^
 await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Delete canvas" && !node.disabled);button?.click();return Boolean(button)})()`);
 await waitFor(`Boolean(document.querySelector('[role="alertdialog"]'))`, "canvas delete confirmation");
 await evaluate(`(()=>{const button=[...document.querySelectorAll('[role="alertdialog"] button')].find(node=>node.textContent?.trim()==="Confirm");button?.click();return Boolean(button)})()`);
-await waitFor(`document.querySelector('button[role="tab"][aria-selected="true"]')?.textContent?.trim()===${JSON.stringify(originalCanvasName)}`, "deleted canvas");
+const canvasDeleteDeadline = Date.now() + 60_000;
+let remainingCanvases = [];
+while (Date.now() < canvasDeleteDeadline) {
+  remainingCanvases = await coreCall("canvas_list_project", { projectId: openedProject.id });
+  if (remainingCanvases.length > 0 && !remainingCanvases.some((candidate) => candidate.name === "Smoke canvas")) break;
+  await Bun.sleep(100);
+}
+if (remainingCanvases.length === 0 || remainingCanvases.some((candidate) => candidate.name === "Smoke canvas")) {
+  throw new Error(`Canvas deletion did not preserve a usable workspace: ${JSON.stringify(remainingCanvases)}`);
+}
 await evaluate(`document.querySelector('button.wj-nav-item[aria-label="Settings"]')?.click()`);
 await waitFor(`[...document.querySelectorAll("h1")].some(node=>node.textContent?.trim()==="Appearance")`, "appearance settings surface");
 await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Edit copy");button?.click();return Boolean(button)})()`);
@@ -1322,9 +1233,8 @@ await waitFor(`document.querySelector('input[aria-label="canvas hex color"]')?.v
 await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
 await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
 await waitFor(`!document.querySelector('[aria-label="canvas color editor"]') && [...document.querySelectorAll("h1")].some(node=>node.textContent?.trim()==="Appearance")`, "color popover dismissal without closing Settings");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Workspace");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+await waitFor(`[...document.querySelectorAll(".wj-settings-tabs button")].some(node=>node.textContent?.trim()==="Workspace")`, "Workspace settings tab");
+await clickTextElement(".wj-settings-tabs button", "Workspace");
 await waitFor(`[...document.querySelectorAll("h1")].some(node=>node.textContent?.trim()==="Workspace") && ["Pane header actions","Project paths","Live agent rail","Recent activity"].every(label=>document.querySelector('[aria-label="'+label+'"]'))`, "accessible workspace settings");
 await evaluate(`document.querySelector('[role="switch"][aria-label="Live agent rail"]')?.click();document.querySelector('[role="switch"][aria-label="Recent activity"]')?.click();true`);
 await waitFor(`document.querySelector('[role="switch"][aria-label="Live agent rail"]')?.getAttribute("aria-checked")==="false" && document.querySelector('[role="switch"][aria-label="Recent activity"]')?.getAttribute("aria-checked")==="false"`, "disabled optional Home rails");
@@ -1335,13 +1245,11 @@ await evaluate(`document.querySelector('button.wj-nav-item[aria-label="Settings"
 await waitFor(`Boolean(document.querySelector('[role="switch"][aria-label="Live agent rail"]'))`, "restored workspace settings");
 await evaluate(`document.querySelector('[role="switch"][aria-label="Live agent rail"]')?.click();document.querySelector('[role="switch"][aria-label="Recent activity"]')?.click();true`);
 await waitFor(`document.querySelector('[role="switch"][aria-label="Live agent rail"]')?.getAttribute("aria-checked")==="true" && document.querySelector('[role="switch"][aria-label="Recent activity"]')?.getAttribute("aria-checked")==="true"`, "restored optional Home rails");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Agents");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+await waitFor(`[...document.querySelectorAll(".wj-settings-tabs button")].some(node=>node.textContent?.trim()==="Agents")`, "Agents settings tab");
+await clickTextElement(".wj-settings-tabs button", "Agents");
 await waitFor(`[...document.querySelectorAll("h1")].some(node=>node.textContent?.trim()==="Agents") && Boolean(document.querySelector('[aria-label="Coding agent"]'))`, "agent settings");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Application");tab?.focus();return Boolean(tab)})()`);
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+await waitFor(`[...document.querySelectorAll(".wj-settings-tabs button")].some(node=>node.textContent?.trim().startsWith("Application"))`, "Application settings tab");
+await clickTextElement(".wj-settings-tabs button", "Application");
 await waitFor(`[...document.querySelectorAll("h1")].some(node=>node.textContent?.trim()==="Application") && ["Export backup","Copy diagnostics","Reset all"].every(label=>[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==label))`, "application settings");
 await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Back");button?.click();return Boolean(button)})()`);
 await evaluate(`document.querySelector('button[aria-label$="Open live sessions"]')?.click()`);
@@ -1366,12 +1274,22 @@ try {
   }))()`);
   throw new Error(`${error.message}: ${JSON.stringify(diagnostic)}`);
 }
-await waitFor(
-  `Boolean([...document.querySelectorAll("[data-pane-id]")].find(node=>node.querySelector(".pane-status.running")&&node.querySelector('textarea[aria-label="Terminal input"]')))`,
-  "spawned shell readiness after optimistic insertion",
-);
+try {
+  await waitFor(
+    `Boolean([...document.querySelectorAll("[data-pane-id]")].find(node=>node.getAttribute("data-runtime-status")==="running"&&node.querySelector('textarea[aria-label="Terminal input"]')))`,
+    "spawned shell readiness after optimistic insertion",
+    15_000,
+  );
+} catch (error) {
+  const [diagnostic, diagnosticCanvases, diagnosticSessions] = await Promise.all([
+    evaluate(`(() => ({panes:[...document.querySelectorAll("[data-pane-id]")].map(node=>({id:node.getAttribute("data-pane-id"),text:node.textContent?.trim().slice(0,240),status:[...node.querySelectorAll(".pane-status")].map(status=>status.className)})),errors:[...document.querySelectorAll(".wj-error-toast")].map(node=>node.textContent?.trim())}))()`),
+    coreCall("canvas_list_project", { projectId: openedProject.id }),
+    coreCall("session_list", { limit: 20 }),
+  ]);
+  throw new Error(`${error.message}\nPane diagnostic: ${JSON.stringify(diagnostic)}\nCanvases: ${JSON.stringify(diagnosticCanvases)}\nSessions: ${JSON.stringify(diagnosticSessions)}`);
+}
 const marker = "WHEELJACK_TAURI_RUNTIME_OK";
-const sent = await evaluate(`(()=>{const pane=[...document.querySelectorAll("[data-pane-id]")].find(node=>node.querySelector(".pane-status.running")&&node.querySelector('textarea[aria-label="Terminal input"]'));const input=pane?.querySelector('textarea[aria-label="Terminal input"]');if(!input)return false;input.focus();input.value=${JSON.stringify(`echo ${marker}`)};input.dispatchEvent(new InputEvent("input",{bubbles:true,inputType:"insertText",data:input.value}));input.value="";input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",code:"Enter",bubbles:true}));return true})()`);
+const sent = await evaluate(`(()=>{const pane=[...document.querySelectorAll("[data-pane-id]")].find(node=>node.getAttribute("data-runtime-status")==="running"&&node.querySelector('textarea[aria-label="Terminal input"]'));const input=pane?.querySelector('textarea[aria-label="Terminal input"]');if(!input)return false;input.focus();input.value=${JSON.stringify(`echo ${marker}`)};input.dispatchEvent(new InputEvent("input",{bubbles:true,inputType:"insertText",data:input.value}));input.value="";input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",code:"Enter",bubbles:true}));return true})()`);
 if (!sent) throw new Error("The spawned shell did not expose terminal input.");
 await waitFor(`[...document.querySelectorAll(".sr-only")].some(node=>node.textContent?.includes(${JSON.stringify(marker)}))`, "terminal echo");
 
@@ -1393,7 +1311,7 @@ await waitFor(
   `[...document.querySelectorAll('[role="application"][aria-label="Terminal session"]')].some(node=>node.querySelector('[aria-label="Terminal output"]')?.textContent?.includes(${JSON.stringify(scrollMarker)}) && Number(node.dataset.scrollbackLines)>0)`,
   "terminal scrollback",
 );
-const terminalBox = await evaluate(`(()=>{const pane=[...document.querySelectorAll("[data-pane-id]")].find(node=>node.querySelector(".pane-status.running")&&node.querySelector('[role="application"][aria-label="Terminal session"]'));const terminal=pane?.querySelector('[role="application"][aria-label="Terminal session"]')??document.querySelector('[role="application"][aria-label="Terminal session"]');const rect=terminal?.getBoundingClientRect();return rect?{x:rect.x,y:rect.y,width:rect.width,height:rect.height}:null})()`);
+const terminalBox = await evaluate(`(()=>{const pane=[...document.querySelectorAll("[data-pane-id]")].find(node=>node.getAttribute("data-runtime-status")==="running"&&node.querySelector('[role="application"][aria-label="Terminal session"]'));const terminal=pane?.querySelector('[role="application"][aria-label="Terminal session"]')??document.querySelector('[role="application"][aria-label="Terminal session"]');const rect=terminal?.getBoundingClientRect();return rect?{x:rect.x,y:rect.y,width:rect.width,height:rect.height}:null})()`);
 if (!terminalBox) throw new Error("The terminal surface has no pointer target.");
 await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x: terminalBox.x + 20, y: terminalBox.y + 28, button: "left", buttons: 1, clickCount: 1 });
 await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x: terminalBox.x + Math.min(180, terminalBox.width - 20), y: terminalBox.y + 28, button: "left", buttons: 1 });
@@ -1418,7 +1336,7 @@ await waitFor(`Number(document.querySelector('[aria-label="Terminal utilities"]'
 await waitFor(`[...document.querySelectorAll('[role="application"][aria-label="Terminal session"]')].every(node=>node.dataset.alternateScreen!=="true")`, "alternate screen exit");
 
 const panesBeforeCloseCancel = await evaluate("document.querySelectorAll('[data-pane-id]').length");
-const openedRunningConfirmation = await evaluate(`(()=>{const pane=[...document.querySelectorAll("[data-pane-id]")].find(node=>node.querySelector(".pane-status.running")&&node.querySelector('textarea[aria-label="Terminal input"]'));const button=pane?.querySelector('button[aria-label^="Close pane "]');button?.click();return Boolean(button)})()`);
+const openedRunningConfirmation = await evaluate(`(()=>{const pane=[...document.querySelectorAll("[data-pane-id]")].find(node=>node.getAttribute("data-runtime-status")==="running"&&node.querySelector('textarea[aria-label="Terminal input"]'));const button=pane?.querySelector('button[aria-label^="Close pane "]');button?.click();return Boolean(button)})()`);
 if (!openedRunningConfirmation) throw new Error("No running pane exposed a close action.");
 await waitFor(
   `document.querySelector('[role="alertdialog"]')?.textContent?.includes("This session is still running") && document.activeElement?.textContent?.trim()==="Cancel"`,

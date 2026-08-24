@@ -18,6 +18,7 @@ import {
   kanbanVerificationContractIssues,
   mergeAgentProjectDocumentProposal,
   mergeAgentMessages,
+  mergeConcurrentOpsState,
   mergeProjectDocuments,
   nodeTranscript,
   nodeHistorySessionId,
@@ -1514,4 +1515,16 @@ test("uses the completed session id only for transcript recovery", () => {
   expect(nodeHistorySessionId({ sessionId: "running", lastSessionId: "prior" })).toBe("running");
   expect(nodeHistorySessionId({ lastSessionId: "completed" })).toBe("completed");
   expect(nodeHistorySessionId({})).toBe("");
+});
+
+test("three-way merges concurrent Plan edits without dropping either task", () => {
+  const baseline = parseOpsState({
+    version: 2,
+    cards: [{ id: "base", columnId: "queued", title: "Base", detail: "", assignee: "Unassigned", priority: "normal", assigneeIds: [], agentStatuses: {}, expectedFiles: [], lastNote: "" }],
+  });
+  const local = { ...baseline, cards: [...baseline.cards, { ...baseline.cards[0], id: "local", title: "Local" }] };
+  const remote = { ...baseline, cards: [...baseline.cards, { ...baseline.cards[0], id: "remote", title: "Remote" }] };
+
+  const merged = mergeConcurrentOpsState(baseline, local, remote);
+  expect(merged.cards.map((card) => card.id)).toEqual(["base", "local", "remote"]);
 });

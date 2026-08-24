@@ -138,7 +138,10 @@ export function deriveOpsFloorModel({
     };
   };
 
-  const taskRows = state.cards.map(floorTask);
+  const objectiveIds = new Set(state.cards.flatMap((card) => card.parentId ?? []));
+  const taskRows = state.cards
+    .filter((card) => card.kind !== "objective" && !objectiveIds.has(card.id))
+    .map(floorTask);
   const attentionById = new Map<string, OpsFloorAttention>();
   for (const item of attentionItems) {
     if (item.sources.every((source) => source === "activity")) continue;

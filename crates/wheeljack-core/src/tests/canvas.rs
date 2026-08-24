@@ -216,7 +216,7 @@ fn terminal_pending_prompt_survives_core_restart() {
 }
 
 #[test]
-fn project_archive_reopens_in_place_and_hard_delete_removes_only_the_registered_root() {
+fn project_archive_reopens_in_place_and_filesystem_deletion_is_refused() {
     let parent = temp_dir("project-remove-parent");
     let preserved = parent.join("preserved");
     let deleted = parent.join("deleted");
@@ -369,9 +369,12 @@ fn project_archive_reopens_in_place_and_hard_delete_removes_only_the_registered_
         ),
     )
     .unwrap();
-    assert_eq!(remove_deleted["ok"], true);
-    assert_eq!(remove_deleted["payload"]["archived"], false);
-    assert!(!deleted.exists());
+    assert_eq!(remove_deleted["ok"], false);
+    assert!(remove_deleted["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("no longer deletes project folders"));
+    assert!(deleted.exists());
     assert!(parent.exists());
     let deleted_count: i64 = core
         .lock_db()
@@ -382,11 +385,12 @@ fn project_archive_reopens_in_place_and_hard_delete_removes_only_the_registered_
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(deleted_count, 0);
+    assert_eq!(deleted_count, 1);
 
     let list: Value =
         serde_json::from_str(&core.call_json(r#"{"id":"list","command":"project_list"}"#)).unwrap();
-    assert_eq!(list["payload"].as_array().unwrap().len(), 0);
+    assert_eq!(list["payload"].as_array().unwrap().len(), 1);
+    assert_eq!(list["payload"][0]["id"], deleted_project["payload"]["id"]);
 }
 
 #[test]
@@ -1126,6 +1130,21 @@ fn canvas_reset_project_recreates_blank_main_workspace() {
         assert_eq!(response["ok"], true);
     }
 
+    let configure = json!({
+        "id": "configure-scheduler-before-reset",
+        "command": "ops_scheduler_configure",
+        "payload": {
+            "projectId": "project_reset",
+            "canvasId": "canvas_two",
+            "enabled": true,
+            "paused": false,
+            "concurrencyLimit": 3,
+            "adapterId": "codex-cli"
+        }
+    });
+    let response: Value = serde_json::from_str(&core.call_json(&configure.to_string())).unwrap();
+    assert_eq!(response["ok"], true);
+
     let reset = json!({
         "id": "reset",
         "command": "canvas_reset_project",
@@ -1137,6 +1156,17 @@ fn canvas_reset_project_recreates_blank_main_workspace() {
     assert_eq!(response["payload"]["themeId"], "mono-dark");
     assert_eq!(response["payload"]["nodes"], json!([]));
     assert_eq!(response["payload"]["camera"]["scale"], 0.86);
+    let reset_canvas_id = response["payload"]["id"].as_str().unwrap().to_string();
+
+    let scheduler = json!({
+        "id": "scheduler-after-reset",
+        "command": "ops_scheduler_status",
+        "payload": { "projectId": "project_reset" }
+    });
+    let response: Value = serde_json::from_str(&core.call_json(&scheduler.to_string())).unwrap();
+    assert_eq!(response["payload"]["canvasId"], reset_canvas_id);
+    assert_eq!(response["payload"]["enabled"], true);
+    assert_eq!(response["payload"]["concurrencyLimit"], 3);
 
     let list = json!({
         "id": "list",
@@ -1258,6 +1288,20 @@ fn canvas_create_rename_delete_roundtrip() {
     assert_eq!(renamed["ok"], true);
     assert_eq!(renamed["payload"]["name"], "Backend agents");
 
+    let configure = json!({
+        "id": "configure-before-delete",
+        "command": "ops_scheduler_configure",
+        "payload": {
+            "projectId": project_id,
+            "canvasId": canvas_id,
+            "enabled": true,
+            "paused": false,
+            "concurrencyLimit": 2
+        }
+    });
+    let configured: Value = serde_json::from_str(&core.call_json(&configure.to_string())).unwrap();
+    assert_eq!(configured["ok"], true);
+
     let delete = json!({
         "id": "delete",
         "command": "canvas_delete",
@@ -1266,6 +1310,19 @@ fn canvas_create_rename_delete_roundtrip() {
     let deleted: Value = serde_json::from_str(&core.call_json(&delete.to_string())).unwrap();
     assert_eq!(deleted["ok"], true);
     assert_eq!(deleted["payload"], true);
+    let scheduler: Value = serde_json::from_str(
+        &core.call_json(
+            &json!({
+                "id": "scheduler-after-delete",
+                "command": "ops_scheduler_status",
+                "payload": { "projectId": project_id }
+            })
+            .to_string(),
+        ),
+    )
+    .unwrap();
+    assert_ne!(scheduler["payload"]["canvasId"], canvas_id);
+    assert_eq!(scheduler["payload"]["enabled"], true);
 
     let list = json!({
         "id": "list",

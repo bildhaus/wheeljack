@@ -1078,9 +1078,14 @@ fn append_coordination_agent_event(
         .map(|file| file.trim().to_string())
         .filter(|file| !file.is_empty())
         .collect::<Vec<_>>();
+    let run_id = event
+        .run_id
+        .map(|value| truncate_utf8_bytes(value.trim(), 160))
+        .filter(|value| !value.is_empty());
     let payload = json!({
         "source": "wheeljack",
         "callsign": callsign,
+        "runId": run_id,
         "status": status,
         "task": task,
         "taskId": trimmed_optional(event.task_id),

@@ -70,6 +70,7 @@ export {
 import { currentRuntimes, setRuntimes, useRuntimes } from "./state/runtimesStore";
 import {
   canvasRef,
+  canvasesRef,
   focusedPaneIdRef,
   layoutModeRef,
   layoutRef,
@@ -99,6 +100,8 @@ import {
   hasProjectPlanDocuments,
   kanbanVerificationContractIssues,
   mergeProjectDocuments,
+  mergeConcurrentOpsState,
+  mergeProjectSpecificationDocuments,
   parseOpsState,
   recoverOpsVerificationRuns,
   renderKanban,
@@ -114,6 +117,8 @@ export {
   hasProjectPlanDocuments,
   kanbanVerificationContractIssues,
   mergeProjectDocuments,
+  mergeConcurrentOpsState,
+  mergeProjectSpecificationDocuments,
   parseOpsRunProgress,
   parseOpsState,
   parseOpsSteeringDirective,
@@ -143,7 +148,7 @@ import { ProviderMark } from "./ProviderMark";
 import { DotMatrixLoader } from "./DotMatrixLoader";
 import { createDiagnosticsReport } from "./diagnostics";
 import type { UsageSessionRow } from "./usage";
-import { opsActiveFileConflicts, opsAutomaticFileConflictInstructions, opsCanCompleteWithOverride, opsCardParticipantIds, opsCurrentCardForAgent, opsDecompositionHasCycle, opsDispatchableDecompositionKeys, opsFileConflictDirectiveIsCurrent, opsResolveFileConflict, opsStatusAttentionReason, opsVerificationApproval, opsVerificationCompletion, opsVerificationContractIssues } from "./opsPresence";
+import { opsActiveFileConflicts, opsAutomaticFileConflictInstructions, opsCanCompleteWithOverride, opsCardParticipantIds, opsCurrentCardForAgent, opsDecompositionHasCycle, opsDispatchableDecompositionKeys, opsFileConflictDirectiveIsCurrent, opsResolveFileConflict, opsStatusAttentionReason, opsVerificationApproval, opsVerificationContractIssues } from "./opsPresence";
 import { taskWorktreeCleanupPrompt } from "./taskWorktrees";
 import { createStickerLensScene, StickerLensBackground, type StickerLensScene } from "./StickerLensBackground";
 import {
@@ -450,6 +455,11 @@ export function App() {
   } = useWorkspace();
   const runtimes = useRuntimes();
   const [zoomedPaneId, setZoomedPaneId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!canvas) return;
+    setCanvases((current) => current.map((candidate) =>
+      candidate.id === canvas.id ? { ...candidate, nodes } : candidate));
+  }, [canvas, nodes]);
   const [agentPlacement, setAgentPlacement] = useState<PanePlacement>("auto");
   const [adapters, setAdapters] = useState<Adapter[]>([]);
   const [agentProfiles, setAgentProfiles] = useState<AgentProfile[]>(defaultAgentProfiles);
@@ -506,7 +516,6 @@ export function App() {
   const [reviewEvidenceReady, setReviewEvidenceReady] = useState(false);
   const [reviewEvidenceMessage, setReviewEvidenceMessage] = useState("");
   const [reviewEvidence, setReviewEvidence] = useState<OpsReviewEvidence>();
-  const [verificationBusyCardId, setVerificationBusyCardId] = useState<string>();
   const [cleanupRetryVersion, setCleanupRetryVersion] = useState(0);
   const [reconciliationRetryVersion, setReconciliationRetryVersion] = useState(0);
   const [removeProject, setRemoveProject] = useState<Project>();
@@ -545,6 +554,7 @@ export function App() {
   const settingsTimerRef = useRef<number | undefined>(undefined);
   const opsNodeRef = useRef<CanvasNode | undefined>(undefined);
   const opsRevisionByProjectRef = useRef(new Map<string, number>());
+  const opsBaseByProjectRef = useRef(new Map<string, OpsState>());
   const projectDocumentsRef = useRef<ProjectDocuments | undefined>(undefined);
   const documentWritePendingRef = useRef(false);
   const documentWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -591,15 +601,9 @@ export function App() {
   const sessionSearchVersionRef = useRef(0);
   const historyTranscriptRef = useRef<HistoryTranscript | undefined>(undefined);
   const reviewCardRef = useRef<OpsCard | undefined>(undefined);
-  const verificationExitHandlerRef = useRef<((sessionId: string, exitCode?: number) => boolean) | undefined>(undefined);
-  const verificationCancelingRef = useRef(new Set<string>());
-  const verificationHandledExitIdsRef = useRef(new Set<string>());
-  const verificationSessionIdsRef = useRef(new Set<string>());
-  const verificationSpawnCountRef = useRef(0);
   const reconciliationCardIdsRef = useRef(new Set<string>());
   const reconciliationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const automaticAdapterVerificationRef = useRef(new Map<string, { key: string; attempts: number; pending: boolean }>());
-  const pendingVerificationExitsRef = useRef(new Map<string, number | undefined>());
   const verificationOutputTimerRef = useRef<number | undefined>(undefined);
   const opsPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
   const opsProjectionQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -752,7 +756,7 @@ export function App() {
       await completeUiSmoke(false, detail).catch(() => undefined);
       await getCurrentWindow().close();
     });
-  }, [connection]);
+  }, [connection, setError]);
   useEffect(() => {
     if (!updateSmokeMode || updateSmokeBusyRef.current) return;
     updateSmokeBusyRef.current = true;
@@ -766,7 +770,7 @@ export function App() {
       .then((installed) => {
         if (!installed) setError(`The ${updateSmokeMode} updater smoke could not install its staged update.`);
       });
-  }, [updateSmokeMode, updater]);
+  }, [setError, updateSmokeMode, updater]);
   useEffect(() => {
     const root = document.documentElement;
     const theme = resolvedTheme(preferences, systemUsesLight);
@@ -781,7 +785,7 @@ export function App() {
   }, [preferences, systemUsesLight]);
   useEffect(() => {
     if (isTauri()) void getCurrentWebview().setZoom(preferences.uiScale).catch((cause) => setError(`Could not apply UI scale: ${message(cause)}`));
-  }, [preferences.uiScale]);
+  }, [preferences.uiScale, setError]);
   const saveDesktopOnboardingVersion = useCallback(async (version: number) => {
     await callCore("settings_import", { settings: { desktopOnboardingVersion: version } });
     desktopOnboardingVersionRef.current = version;
@@ -867,7 +871,7 @@ export function App() {
       void callCore("canvas_upsert_node", { canvasId: activeCanvas.id, node: updated })
         .catch((cause) => setError(`Could not persist ${node.title}: ${message(cause)}`));
     },
-    [],
+    [setError],
   );
   const applyStructuredParse = useCallback(async (runtime: PaneRuntime, parsed: AgentParseResult) => {
     const controlSessionId = runtime.sessionId || runtime.historySessionId || runtime.nodeId;
@@ -894,13 +898,14 @@ export function App() {
         });
       }
     }
-    const latest = parsed.events.at(-1);
     const failure = [...parsed.events].reverse().find((event) => event.type === "error");
     const messages = parsed.messages.map((item) => ({
       ...item,
       tool: item.kind === "tool" ? item.title ?? "Tool" : undefined,
       status: ["status", "approval", "question", "error"].includes(item.kind) ? item.kind : undefined,
     }));
+    const latestVisibleAgentText = [...messages].reverse().find((item) =>
+      item.role === "assistant" && item.text.trim())?.text.trim().slice(0, 500);
     const liveRuntime = currentRuntimes()[runtime.nodeId] ?? runtime;
     const runtimeMessages = reconcileParsedAgentMessages(liveRuntime.messages, messages, runtime.nodeId);
     const status = agentParseStatus(parsed, runtimeMessages, liveRuntime.status, liveRuntime.turnStartLine);
@@ -928,7 +933,7 @@ export function App() {
         sessionId: eventSessionId,
         kind: "agent_protocol",
         status,
-        message: failure?.text ?? latest?.text
+        message: failure?.text ?? latestVisibleAgentText
           ?? (status === "completed"
             ? "Agent turn completed."
             : status === "canceled" ? "Agent turn canceled." : `Agent is ${status}.`),
@@ -942,7 +947,7 @@ export function App() {
         setError(`The first agent finished, but onboarding could not be saved: ${message(cause)}`);
       }
     }
-  }, [persistAgentNodeState, saveDesktopOnboardingVersion]);
+  }, [persistAgentNodeState, saveDesktopOnboardingVersion, setError]);
   const scheduleStructuredParse = useCallback(
     (runtime: PaneRuntime, lines: string[]) => {
       const sessionId = runtime.sessionId;
@@ -971,7 +976,7 @@ export function App() {
         }
       }, 50);
     },
-    [applyStructuredParse],
+    [applyStructuredParse, setError],
   );
 
   const handleCoreEvent = useCallback(
@@ -1063,6 +1068,8 @@ export function App() {
       } else if (envelope.event === "ops:scheduler-lease") {
         const projectId = stringValue(envelope.payload, "projectId");
         if (projectId && projectRef.current?.id === projectId) schedulerLeaseHandlerRef.current?.();
+      } else if (envelope.event === "ops:scheduler-error") {
+        setError(`Autonomous scheduler paused for recovery: ${stringValue(envelope.payload, "message") ?? "unknown native error"}`);
       } else if (envelope.event === "activity:event") {
         const live = envelope.payload as unknown as ActivityEvent;
         setActivity((current) => dedupeActivity([live, ...current]));
@@ -1108,18 +1115,17 @@ export function App() {
             }));
           }
         } else {
-          const verificationCanceled = verificationCancelingRef.current.has(sessionId ?? "");
           const endedAt = new Date().toISOString();
           setSessions((current) =>
             current.map((session) =>
               session.id === sessionId
-                ? { ...session, status: verificationCanceled ? "canceled" : agentExitStatus(undefined, exitCode, incompleteTurn, terminationReason), endedAt }
+                ? { ...session, status: agentExitStatus(undefined, exitCode, incompleteTurn, terminationReason), endedAt }
                 : session,
             ),
           );
           setHistoryTranscript((current) => {
             if (!current || current.sessionId !== sessionId) return current;
-            return { ...current, status: verificationCanceled ? "canceled" : agentExitStatus(undefined, exitCode, incompleteTurn, terminationReason) };
+            return { ...current, status: agentExitStatus(undefined, exitCode, incompleteTurn, terminationReason) };
           });
           setRuntimes((current) => {
             const runtime = Object.values(current).find(
@@ -1156,23 +1162,18 @@ export function App() {
               },
             };
           });
-          if (envelope.event === "pty:exit" && sessionId) {
-            if (verificationSessionIdsRef.current.has(sessionId) || verificationSpawnCountRef.current > 0) {
-              pendingVerificationExitsRef.current.set(sessionId, exitCode);
-              verificationExitHandlerRef.current?.(sessionId, exitCode);
-            }
-          }
         }
       }
       if (metrics.events === 1 || metrics.events % 30 === 0) {
         setMetricVersion((value) => value + 1);
       }
     },
-    [applyStructuredParse, updater.onProgress],
+    [applyStructuredParse, setError, updater],
   );
 
   useEffect(() => {
     let cancelled = false;
+    const parseTimers = parseTimersRef.current;
     const startupNavigation = navigationVersionRef.current;
     void connectCore(handleCoreEvent)
       .then(async (connected) => {
@@ -1258,7 +1259,7 @@ export function App() {
       });
     return () => {
       cancelled = true;
-      for (const timer of Object.values(parseTimersRef.current)) window.clearTimeout(timer);
+      for (const timer of Object.values(parseTimers)) window.clearTimeout(timer);
       window.clearTimeout(layoutTimerRef.current);
       window.clearTimeout(opsTimerRef.current);
       window.clearTimeout(settingsTimerRef.current);
@@ -1272,9 +1273,7 @@ export function App() {
     if (!connection) return;
     setBotsLoading(true);
     try {
-      setBots(await callCore<BotProfile[]>("bot_list", {
-        ...(project?.id ? { projectId: project.id } : {}),
-      }));
+      setBots(await callCore<BotProfile[]>("bot_list", project?.id ? { projectId: project.id } : {}));
     } catch (cause) {
       setError(`Could not load bots: ${message(cause)}`);
     } finally {
@@ -1349,10 +1348,13 @@ export function App() {
     }).catch(() => canvasSummary);
     setCanvases((current) => current.map((item) => item.id === nextCanvas.id ? nextCanvas : item));
     const visibleNodes = nextCanvas.nodes.filter((node) => node.kind !== "ops_state");
+    const projectAgentNodes = canvasesRef.current
+      .flatMap((candidate) => candidate.id === nextCanvas.id ? nextCanvas.nodes : candidate.nodes)
+      .filter((node) => node.kind === "agent_terminal");
     const opsNode = nextCanvas.nodes.find((node) => node.kind === "ops_state");
     const [canonicalOps, schedulerConfig] = await Promise.all([
-      callCore<ProjectOpsStateRecord | null>("ops_project_state_get", { projectId: nextCanvas.projectId }).catch(() => null),
-      callCore<OpsSchedulerConfig | null>("ops_scheduler_status", { projectId: nextCanvas.projectId }).catch(() => null),
+      callCore<ProjectOpsStateRecord | null>("ops_project_state_get", { projectId: nextCanvas.projectId }),
+      callCore<OpsSchedulerConfig | null>("ops_scheduler_status", { projectId: nextCanvas.projectId }),
     ]);
     const activeSchedulerConfig = schedulerConfig?.enabled && schedulerConfig.canvasId !== nextCanvas.id
       ? await callCore<OpsSchedulerConfig>("ops_scheduler_configure", {
@@ -1379,24 +1381,19 @@ export function App() {
     setPlanActive(nextPlanActive);
     const normalizedOps = normalizeOpsAgentIdentities(
       mergedOps,
-      opsAgentAliases(visibleNodes.filter((node) => node.kind === "agent_terminal")),
+      opsAgentAliases(projectAgentNodes),
     );
-    const verificationSessionIds = nextPlanActive
-      ? normalizedOps.cards.flatMap((card) =>
-          card.verificationRun?.status === "running" ? [card.verificationRun.sessionId] : [])
-      : [];
-    const [savedLayout, sessions, verificationStatuses] = await Promise.all([
+    opsBaseByProjectRef.current.set(nextCanvas.projectId, normalizedOps);
+    const [savedLayout, sessions] = await Promise.all([
       callCore<{ mode?: LayoutMode; root?: unknown } | null>("canvas_layout_get", {
         canvasId: nextCanvas.id,
       }).catch(() => null),
       callCore<Session[]>("session_list", { limit: 100 }).catch(() => []),
-      nextPlanActive
-        ? callCore<Record<string, { status: string; exitCode?: number }>>("session_statuses", {
-            sessionIds: verificationSessionIds,
-          })
-        : Promise.resolve<Record<string, { status: string; exitCode?: number }>>({}),
     ]);
-    const hydrated = await hydrateRuntimes(visibleNodes, sessions);
+    const runtimeNodes = [...new Map(
+      [...visibleNodes, ...projectAgentNodes].map((node) => [node.id, node]),
+    ).values()];
+    const hydrated = await hydrateRuntimes(runtimeNodes, sessions);
     const reconciledRoot = reconcileLayout(savedLayout?.root, visibleNodes.map((node) => node.id));
     const nextLayoutMode: LayoutMode = savedLayout ? savedLayout.mode === "auto" ? "auto" : "manual" : "auto";
     const nextViewport = readLayoutViewport(stageRef.current, layoutViewportRef.current);
@@ -1404,25 +1401,14 @@ export function App() {
     const root = nextLayoutMode === "auto"
       ? buildSmartLayout(leaves(reconciledRoot), nextViewport)
       : reconciledRoot;
-    const runningVerificationSessionIds = new Set<string>();
-    for (const sessionId of verificationSessionIds) {
-      const status = verificationStatuses[sessionId];
-      if (status?.status === "running") {
-        runningVerificationSessionIds.add(sessionId);
-      } else if (status && !["disconnected", "interrupted"].includes(status.status)) {
-        pendingVerificationExitsRef.current.set(
-          sessionId,
-          typeof status.exitCode === "number" ? status.exitCode : undefined,
-        );
-      }
-    }
     const nextOps = recoverOpsVerificationRuns(
       normalizedOps,
-      runningVerificationSessionIds,
-      new Set(pendingVerificationExitsRef.current.keys()),
+      new Set(),
+      new Set(),
     );
     const recoveredVerification = nextOps.cards.some((card, index) => card !== normalizedOps.cards[index]);
-    if (recoveredVerification) {
+    const importedInitialPlan = !canonicalOps && hasMeaningfulPlanState(nextOps);
+    if (recoveredVerification || importedInitialPlan) {
       const activeProject = projectRef.current;
       if (!activeProject || activeProject.id !== nextCanvas.projectId) {
         throw new Error("Could not persist interrupted verification for an inactive project.");
@@ -1439,12 +1425,6 @@ export function App() {
       });
     }
     opsNodeRef.current = canonicalOps ? undefined : opsNode;
-    for (const card of nextOps.cards) {
-      const run = card.verificationRun;
-      if (!run) continue;
-      if (run.status === "running") verificationSessionIdsRef.current.add(run.sessionId);
-      else verificationSessionIdsRef.current.delete(run.sessionId);
-    }
     setOpsState(nextOps);
     setSessions(sessions);
     setNodes(visibleNodes);
@@ -1465,19 +1445,6 @@ export function App() {
         .catch((cause) => setError(`Could not refresh task projections: ${message(cause)}`));
     }
     queueMicrotask(() => {
-      for (const card of nextOps.cards) {
-        const run = card.verificationRun;
-        if (!run || !pendingVerificationExitsRef.current.has(run.sessionId)) continue;
-        if (run.status === "running") {
-          verificationExitHandlerRef.current?.(
-            run.sessionId,
-            pendingVerificationExitsRef.current.get(run.sessionId),
-          );
-        } else {
-          pendingVerificationExitsRef.current.delete(run.sessionId);
-          verificationSessionIdsRef.current.delete(run.sessionId);
-        }
-      }
       if (activeSchedulerConfig?.enabled && !activeSchedulerConfig.paused) schedulerLeaseHandlerRef.current?.();
     });
   };
@@ -1527,7 +1494,7 @@ export function App() {
     if (
       !force &&
       current?.projectPath === next.projectPath &&
-      projectDocumentWrites(opsStateRef.current, current).length > 0
+      projectSpecificationDocumentWrites(opsStateRef.current, current).length > 0
     ) {
       setDocumentConflict(next);
       setDocumentSaveStatus("conflict");
@@ -1537,7 +1504,7 @@ export function App() {
     setProjectDocuments(next);
     setDocumentConflict(undefined);
     setDocumentSaveStatus("saved");
-    const merged = mergeProjectDocuments(opsStateRef.current, next);
+    const merged = mergeProjectSpecificationDocuments(opsStateRef.current, next);
     setOpsState(merged);
   };
 
@@ -1691,7 +1658,7 @@ export function App() {
     layoutTimerRef.current = window.setTimeout(() => {
       void persistLayout(root, activeCanvas, mode).catch((cause) => setError(message(cause)));
     }, 120);
-  }, [persistLayout]);
+  }, [persistLayout, setError]);
 
   const applyLayout = (
     root: SplitNode | null,
@@ -1765,29 +1732,32 @@ export function App() {
     targetPaneId = focusedPaneIdRef.current,
     initialCommand?: string,
   ): Promise<boolean> => {
-    if (!canvas || !project) return false;
+    const activeCanvas = canvasRef.current;
+    const activeProject = projectRef.current;
+    if (!activeCanvas || !activeProject) return false;
     setBusy(true);
     setError("");
     const nodeId = `node_${crypto.randomUUID().replaceAll("-", "")}`;
     const timestamp = new Date().toISOString();
-    const title = `Shell ${nodes.length + 1}`;
+    const nodeCount = nodesRef.current.length;
+    const title = `Shell ${nodeCount + 1}`;
     const previousZoomedPaneId = zoomedPaneId;
     const optimisticNode: CanvasNode = {
       id: nodeId,
-      canvasId: canvas.id,
+      canvasId: activeCanvas.id,
       kind: "shell_terminal",
       title,
       x: 0,
       y: 0,
       width: 600,
       height: 360,
-      zIndex: nodes.length + 1,
+      zIndex: nodeCount + 1,
       data: {
         adapterId: "generic-shell",
         adapterName: "Shell",
         sessionId: `pending:${nodeId}`,
         status: "starting",
-        cwd: project.path,
+        cwd: activeProject.path,
         transport: "pty",
       },
       createdAt: timestamp,
@@ -1818,7 +1788,7 @@ export function App() {
     applyLayout(optimisticLayout.root, nodeId, optimisticLayout.mode);
     if (zoomedPaneId) setZoomedPaneId(nodeId);
     try {
-      const created = await createShell(canvas, project, nodes.length + 1, nodeId);
+      const created = await createShell(activeCanvas, activeProject, nodeCount + 1, nodeId);
       setNodes((current) => current.map((candidate) => candidate.id === nodeId ? created.node : candidate));
       setRuntimes((current) => ({ ...current, [nodeId]: created.runtime }));
       setSessions((current) => [created.session, ...current]);
@@ -1968,7 +1938,7 @@ export function App() {
     }
     if (!await requestConfirmation(
       `Delete ${activeCanvas.name}?`,
-      "All panes and Ops state on this canvas will be permanently removed. Session transcripts remain in History.",
+      "All panes and layout on this canvas will be removed. Project Plan tasks and session transcripts are preserved.",
     )) return;
     setBusy(true);
     setError("");
@@ -1979,6 +1949,10 @@ export function App() {
       const remaining = canvases.filter((item) => item.id !== activeCanvas.id);
       setCanvases(remaining);
       setCanvasMenuId(undefined);
+      // Never leave the workspace store pointing at a deleted canvas while the
+      // surviving canvas hydrates. Otherwise a failed/late save or pane launch
+      // can target the removed foreign key.
+      setCanvas(remaining[0]);
       await activateCanvas(remaining[0]);
     } catch (cause) {
       setError(`Could not delete ${activeCanvas.name}: ${message(cause)}`);
@@ -2099,9 +2073,10 @@ export function App() {
         cards: current.cards.map((card) => card.id === optimisticOpsCard.id
           ? appendOpsTaskEvent({
               ...card,
-              assignee: nodeTitle,
-              assigneeIds: [...new Set([...card.assigneeIds, nodeId])],
-              agentStatuses: { ...card.agentStatuses, [nodeId]: "assigned" },
+              taskLane: card.taskLane?.cleanup ? {
+                ...card.taskLane,
+                cleanup: { ...card.taskLane.cleanup, agentId: nodeId },
+              } : card.taskLane,
             }, {
               id: optimisticOpsEventId!,
               kind: "assignment",
@@ -2493,11 +2468,12 @@ export function App() {
         }));
       }
       if (schedulerLeaseId && !schedulerFinalizedLeaseIdsRef.current.has(schedulerLeaseId)) {
+        const schedulerState = taskIsComplete || runtime?.status === "completed" ? "completed" : "released";
         await callCore("ops_scheduler_finish", {
           leaseId: schedulerLeaseId,
           ownerId: schedulerOwnerIdRef.current,
-          state: taskIsComplete || runtime?.status === "completed" ? "completed" : "released",
-        });
+          state: schedulerState,
+        }).catch(() => callCore("ops_scheduler_recover", { leaseId: schedulerLeaseId, state: schedulerState }));
         schedulerFinalizedLeaseIdsRef.current.add(schedulerLeaseId);
       }
       await callCore("canvas_delete_node", {
@@ -3465,7 +3441,12 @@ export function App() {
     if (compactWindow) setUtilityPanelOpen(false);
   };
 
-  const openRuntime = (runtime: PaneRuntime) => {
+  const openRuntime = async (runtime: PaneRuntime) => {
+    const ownerCanvas = canvasesRef.current.find((candidate) =>
+      candidate.nodes.some((node) => node.id === runtime.nodeId));
+    if (ownerCanvas && ownerCanvas.id !== canvasRef.current?.id) {
+      await activateCanvas(ownerCanvas);
+    }
     setSurface("terminal");
     setFocusedPaneId(runtime.nodeId);
     if (compactWindow) setUtilityPanelOpen(false);
@@ -3714,7 +3695,7 @@ export function App() {
       .then(async () => {
         const documents = projectDocumentsRef.current;
         if (!documents || documents.projectPath !== activeProject.path || documentConflict) return;
-        const writes = projectDocumentWrites(next, documents);
+        const writes = projectSpecificationDocumentWrites(next, documents);
         if (!writes.length) {
           setDocumentSaveStatus("saved");
           return;
@@ -3760,6 +3741,9 @@ export function App() {
     activeRuntimes: Record<string, PaneRuntime>,
     activeNodes: CanvasNode[],
   ) => {
+    // SQLite is the live task authority. Only PRD/TDD text is mirrored to files;
+    // KANBAN.md is imported/exported explicitly so task execution cannot dirty
+    // the integration target checkout.
     await saveProjectDocuments(next, activeProject);
     await callCore("coordination_board_sync", coordinationBoardSyncRequest(
       next,
@@ -3789,7 +3773,7 @@ export function App() {
     _activeRuntimes: Record<string, PaneRuntime>,
     _activeNodes: CanvasNode[],
     _activeOpsNode?: CanvasNode,
-  ) => {
+  ): Promise<OpsState> => {
     try {
       const saved = await callCore<ProjectOpsStateRecord>("ops_project_state_save", {
         projectId: activeProject.id,
@@ -3797,7 +3781,28 @@ export function App() {
         expectedRevision: opsRevisionByProjectRef.current.get(activeProject.id) ?? 0,
       });
       opsRevisionByProjectRef.current.set(activeProject.id, saved.revision);
+      opsBaseByProjectRef.current.set(activeProject.id, next);
+      return next;
     } catch (cause) {
+      if (message(cause).toLowerCase().includes("revision conflict")) {
+        const canonical = await callCore<ProjectOpsStateRecord | null>("ops_project_state_get", {
+          projectId: activeProject.id,
+        });
+        if (canonical) {
+          const remote = parseOpsState(canonical.state as unknown as JsonObject);
+          const baseline = opsBaseByProjectRef.current.get(activeProject.id) ?? remote;
+          const merged = mergeConcurrentOpsState(baseline, next, remote);
+          const saved = await callCore<ProjectOpsStateRecord>("ops_project_state_save", {
+            projectId: activeProject.id,
+            state: merged,
+            expectedRevision: canonical.revision,
+          });
+          opsRevisionByProjectRef.current.set(activeProject.id, saved.revision);
+          opsBaseByProjectRef.current.set(activeProject.id, merged);
+          if (projectRef.current?.id === activeProject.id) setOpsState(merged);
+          return merged;
+        }
+      }
       throw new Error(`Could not save task state: ${message(cause)}`);
     }
   }, []);
@@ -3815,9 +3820,9 @@ export function App() {
     const pending = opsPersistQueueRef.current
       .catch(() => undefined)
       .then(() => persistOps(next, activeCanvas, activeProject, activeRuntimes, activeNodes, activeOpsNode));
-    opsPersistQueueRef.current = pending;
+    opsPersistQueueRef.current = pending.then(() => undefined);
     const projected = pending.then(
-      () => queueOpsProjection(next, activeProject, activeRuntimes, activeNodes),
+      (saved) => queueOpsProjection(saved, activeProject, activeRuntimes, activeNodes),
       () => undefined,
     );
     if (!waitForProjection) {
@@ -3876,7 +3881,7 @@ export function App() {
     return () => {
       void listener.then((unlisten) => unlisten());
     };
-  }, [flushPendingSaves]);
+  }, [flushPendingSaves, setError]);
 
   const changeOps = (change: (current: OpsState) => OpsState) => {
     activatePlan();
@@ -3905,7 +3910,7 @@ export function App() {
       opsNodeRef.current,
       waitForProjection,
     );
-    return next;
+    return projectRef.current?.id === activeProject.id ? opsStateRef.current : next;
   }
 
   async function ensureOpsTaskLane(card: OpsCard): Promise<{ cwd: string; worktreePath?: string; sharedNonGit: boolean }> {
@@ -3992,7 +3997,8 @@ export function App() {
       changeOps((current) => applyCoordinationEvents(
         current,
         response,
-        opsAgentAliases(nodesRef.current.filter((node) => node.kind === "agent_terminal")),
+        opsAgentAliases(canvasesRef.current.flatMap((candidate) => candidate.nodes)
+          .filter((node) => node.kind === "agent_terminal")),
       ));
     } catch (cause) {
       setError(`Could not refresh agent board events: ${message(cause)}`);
@@ -4136,7 +4142,7 @@ export function App() {
           leaseId: schedulerLeaseId,
           ownerId: schedulerOwnerIdRef.current,
           state: "completed",
-        });
+        }).catch(() => callCore("ops_scheduler_recover", { leaseId: schedulerLeaseId, state: "completed" }));
         schedulerFinalizedLeaseIdsRef.current.add(schedulerLeaseId);
       }
       await opsProjectionQueueRef.current.catch(() => undefined);
@@ -4247,9 +4253,6 @@ export function App() {
 
   const generateAgentTaskCards = async (brief: string): Promise<number> => {
     if (!project) throw new Error("Open a project before creating tasks.");
-    if (projectDocumentsRef.current?.documents.kanban.format !== "wheeljack-v1") {
-      throw new Error("Create or normalize KANBAN.md before adding tasks.");
-    }
     const reusableRuntime = Object.values(currentRuntimes()).find((runtime) =>
       runtime.structured
       && runtime.adapterId === selectedAdapterId
@@ -4534,6 +4537,11 @@ export function App() {
       setDocumentSaveStatus("saved");
       const merged = mergeProjectDocuments(opsStateRef.current, saved);
       setOpsState(merged);
+      const activeCanvas = canvasRef.current;
+      const activeProject = projectRef.current;
+      if (activeCanvas && activeProject && activeProject.path === pendingDocumentWrite.projectPath) {
+        await persistOpsQueued(merged, activeCanvas, activeProject, currentRuntimes(), nodesRef.current, opsNodeRef.current);
+      }
       setPendingDocumentWrite(undefined);
     } catch (cause) {
       setError(message(cause));
@@ -4568,10 +4576,11 @@ export function App() {
 
   const normalizeKanban = () => {
     const document = projectDocumentsRef.current?.documents.kanban;
-    if (!document?.exists) return;
-    void reviewProjectDocumentWrites("Convert KANBAN.md to wheeljack format", [{
+    if (!document) return;
+    const importing = document.exists && document.format === "importable";
+    void reviewProjectDocumentWrites(importing ? "Import KANBAN.md into Plan" : "Export Plan snapshot to KANBAN.md", [{
       kind: "kanban",
-      content: document.content,
+      content: importing ? document.content : renderKanban(opsStateRef.current),
       expectedRevision: document.revision,
     }]);
   };
@@ -4608,7 +4617,7 @@ export function App() {
     window.clearTimeout(opsTimerRef.current);
     projectDocumentsRef.current = documentConflict;
     setProjectDocuments(documentConflict);
-    const merged = mergeProjectDocuments(opsStateRef.current, documentConflict);
+    const merged = mergeProjectSpecificationDocuments(opsStateRef.current, documentConflict);
     setOpsState(merged);
     setDocumentConflict(undefined);
     setDocumentSaveStatus("saved");
@@ -4617,7 +4626,7 @@ export function App() {
   const overwriteProjectDocuments = () => {
     if (!documentConflict) return;
     window.clearTimeout(opsTimerRef.current);
-    const writes = projectDocumentWrites(opsStateRef.current, documentConflict, true);
+    const writes = projectSpecificationDocumentWrites(opsStateRef.current, documentConflict, true);
     if (!writes.length) return;
     void reviewProjectDocumentWrites("Overwrite changed project files", writes);
   };
@@ -4990,7 +4999,7 @@ export function App() {
       ...current,
       cards: [
         ...current.cards.map((card) => card.id === parent.id
-          ? appendOpsTaskEvent({ ...card, columnId: columnIdForRole(current, "active") }, {
+          ? appendOpsTaskEvent({ ...card, kind: "objective", columnId: columnIdForRole(current, "active") }, {
               id: `manual:decompose:${timestamp}`,
               kind: "update",
               timestamp,
@@ -5001,6 +5010,7 @@ export function App() {
           const id = ids.get(task.key)!;
           return {
             id,
+            kind: "task",
             parentId: parent.id,
             columnId: columnIdForRole(current, "queued"),
             title: task.title,
@@ -5207,11 +5217,10 @@ export function App() {
     const cleanup = opsStateRef.current.cards.find((card) => card.id === cardId)?.taskLane?.cleanup;
     if (!cleanup) return;
     const attempts = (cleanup.attempts ?? 0) + 1;
-    if (attempts >= 6) {
-      await setTaskLaneCleanupStatus(cardId, "blocked", `${detail} Automatic cleanup stopped after ${attempts} attempts.`, undefined, attempts);
-      return;
-    }
-    const retryAt = new Date(Date.now() + Math.min(60_000, 1_000 * 2 ** Math.max(0, attempts - 1))).toISOString();
+    const retryDelay = attempts < 6
+      ? Math.min(60_000, 1_000 * 2 ** Math.max(0, attempts - 1))
+      : 5 * 60_000;
+    const retryAt = new Date(Date.now() + retryDelay).toISOString();
     await setTaskLaneCleanupStatus(cardId, "queued", detail, retryAt, attempts);
   };
 
@@ -5486,8 +5495,8 @@ export function App() {
       }));
     };
     const reason = result.status === "source_dirty" ? "source_dirty" : result.status === "target_dirty" ? "target_dirty" : "conflict";
-    if (result.status === "target_dirty" || attempts >= 3) {
-      await recordReconciliation("needs_human", result.message, reason);
+    if (result.status === "target_dirty") {
+      await recordReconciliation("retrying", result.message, reason);
       return;
     }
     await recordReconciliation("awaiting_repair", result.message, reason);
@@ -5510,7 +5519,9 @@ export function App() {
       && Boolean(card.report)
       && (card.reconciliation?.status === "queued"
         || (card.reconciliation?.status === "retrying"
-          && Date.parse(card.reconciliation.updatedAt) + Math.min(30_000, 1_000 * 2 ** Math.max(0, (card.reconciliation.attempts ?? 1) - 1)) <= now))
+          && Date.parse(card.reconciliation.updatedAt) + ((card.reconciliation.attempts ?? 0) < 5
+            ? Math.min(30_000, 1_000 * 2 ** Math.max(0, (card.reconciliation.attempts ?? 1) - 1))
+            : 5 * 60_000) <= now))
       && !reconciliationCardIdsRef.current.has(card.id));
     if (!candidate) return;
     const projectId = projectRef.current?.id;
@@ -5522,14 +5533,13 @@ export function App() {
       if (projectRef.current?.id !== projectId) return;
       const detail = message(cause);
       const attempts = (candidate.reconciliation?.attempts ?? 0) + 1;
-      const exhausted = attempts >= 3;
       void persistOpsImmediately((current) => ({
         ...current,
         cards: current.cards.map((card) => card.id === candidate.id
-          ? { ...card, reconciliation: { status: exhausted ? "needs_human" : "retrying", attempts, reason: "error", message: exhausted ? `Automatic reconciliation exhausted its retries: ${detail}` : detail, updatedAt: new Date().toISOString() } }
+          ? { ...card, reconciliation: { status: "retrying", attempts, reason: "error", message: detail, updatedAt: new Date().toISOString() } }
           : card),
       })).catch(() => undefined);
-      if (exhausted) setError(`Reconciliation needs intervention for “${candidate.title}”: ${detail}`);
+      setError(`Reconciliation for “${candidate.title}” will retry automatically: ${detail}`);
     }).finally(() => reconciliationCardIdsRef.current.delete(candidate.id));
     // Durable card state selects reconciliation work; refs serialize native Git mutations.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5538,7 +5548,9 @@ export function App() {
   useEffect(() => {
     const retryAt = opsState.cards
       .filter((card) => card.reconciliation?.status === "retrying")
-      .map((card) => Date.parse(card.reconciliation!.updatedAt) + Math.min(30_000, 1_000 * 2 ** Math.max(0, (card.reconciliation!.attempts ?? 1) - 1)))
+      .map((card) => Date.parse(card.reconciliation!.updatedAt) + ((card.reconciliation!.attempts ?? 0) < 5
+        ? Math.min(30_000, 1_000 * 2 ** Math.max(0, (card.reconciliation!.attempts ?? 1) - 1))
+        : 5 * 60_000))
       .filter(Number.isFinite)
       .sort((left, right) => left - right)[0];
     if (retryAt === undefined) return;
@@ -5618,269 +5630,7 @@ export function App() {
     return opsActiveFileConflicts(state).some((conflict) => conflict.cardIds.includes(card.id));
   };
 
-  const captureVerificationPersistence = () => {
-    const activeCanvas = canvasRef.current;
-    const activeProject = projectRef.current;
-    if (!activeCanvas || !activeProject || activeCanvas.projectId !== activeProject.id) return undefined;
-    return {
-      canvas: activeCanvas,
-      project: activeProject,
-      runtimes: currentRuntimes(),
-      nodes: nodesRef.current,
-      opsNode: opsNodeRef.current,
-    };
-  };
-
-  const updateVerificationRun = async (
-    cardId: string,
-    sessionId: string,
-    change: Partial<NonNullable<OpsCard["verificationRun"]>>,
-    persistence: NonNullable<ReturnType<typeof captureVerificationPersistence>>,
-  ): Promise<boolean> => {
-    if (
-      persistence.canvas.projectId !== persistence.project.id ||
-      canvasRef.current?.id !== persistence.canvas.id ||
-      projectRef.current?.id !== persistence.project.id
-    ) return false;
-    activatePlan(persistence.canvas.id);
-    const current = opsStateRef.current;
-    if (!current.cards.some((card) => card.id === cardId && card.verificationRun?.sessionId === sessionId)) return false;
-    const next = {
-      ...current,
-      cards: current.cards.map((card) => card.id === cardId && card.verificationRun?.sessionId === sessionId
-        ? { ...card, verificationRun: { ...card.verificationRun, ...change } }
-        : card),
-    };
-    window.clearTimeout(opsTimerRef.current);
-    setOpsState(next);
-    setReviewCard((reviewed) => reviewed?.id === cardId && reviewed.verificationRun?.sessionId === sessionId
-      ? { ...reviewed, verificationRun: { ...reviewed.verificationRun, ...change } }
-      : reviewed);
-    try {
-      await persistOpsQueued(
-        next,
-        persistence.canvas,
-        persistence.project,
-        persistence.runtimes,
-        persistence.nodes,
-        persistence.opsNode,
-      );
-      const updatedCard = next.cards.find((card) => card.id === cardId);
-      if (updatedCard && ["failed", "interrupted"].includes(updatedCard.verificationRun?.status ?? "")) {
-        reviewCardRef.current = updatedCard;
-        setReviewCard(updatedCard);
-        setReviewEvidence(undefined);
-        setReviewEvidenceReady(false);
-        setReviewEvidenceMessage(updatedCard.verificationRun?.message ?? "Verification did not pass.");
-      }
-      pendingVerificationExitsRef.current.delete(sessionId);
-      verificationSessionIdsRef.current.delete(sessionId);
-      return true;
-    } catch (cause) {
-      setError(`Could not save verification completion: ${message(cause)}`);
-      return false;
-    }
-  };
-
-  const finishOpsVerification = (sessionId: string, exitCode?: number): boolean => {
-    const card = opsStateRef.current.cards.find((candidate) => candidate.verificationRun?.sessionId === sessionId);
-    if (!card) return false;
-    if (card.verificationRun?.status !== "running") {
-      pendingVerificationExitsRef.current.delete(sessionId);
-      verificationSessionIdsRef.current.delete(sessionId);
-      if (card.verificationRun?.status === "canceled") verificationCancelingRef.current.delete(sessionId);
-      return true;
-    }
-    if (verificationHandledExitIdsRef.current.has(sessionId)) return true;
-    const persistence = captureVerificationPersistence();
-    if (!persistence) return false;
-    verificationHandledExitIdsRef.current.add(sessionId);
-    const canceled = verificationCancelingRef.current.delete(sessionId);
-    const endedAt = new Date().toISOString();
-    if (canceled || exitCode !== 0) {
-      void updateVerificationRun(
-        card.id,
-        sessionId,
-        opsVerificationCompletion(canceled, exitCode, undefined, endedAt),
-        persistence,
-      ).finally(() => verificationHandledExitIdsRef.current.delete(sessionId));
-      return true;
-    }
-    setVerificationBusyCardId(card.id);
-    void fetchOpsTaskReview(card).then(async (result) => {
-      const saved = await updateVerificationRun(
-        card.id,
-        sessionId,
-        opsVerificationCompletion(false, 0, result.snapshotId, endedAt),
-        persistence,
-      );
-      if (saved && canvasRef.current?.id === persistence.canvas.id && reviewCardRef.current?.id === card.id) {
-        showTaskReviewEvidence(card, result);
-      }
-    }).catch(async (cause) => {
-      await updateVerificationRun(card.id, sessionId, {
-        ...opsVerificationCompletion(false, 0, undefined, endedAt),
-        message: `Verification failed because its Git snapshot could not be captured: ${message(cause)}`,
-      }, persistence);
-    }).finally(() => {
-      verificationHandledExitIdsRef.current.delete(sessionId);
-      setVerificationBusyCardId((current) => current === card.id ? undefined : current);
-    });
-    return true;
-  };
-  verificationExitHandlerRef.current = finishOpsVerification;
-
-  const _runOpsVerification = async (card: OpsCard) => {
-    if (verificationBusyCardId === card.id) return;
-    const currentCard = opsStateRef.current.cards.find((candidate) => candidate.id === card.id);
-    if (!currentCard) return;
-    if (!currentCard.taskLane || currentCard.taskLane.closedAt) {
-      setReviewEvidenceMessage("Verification requires a registered, open task worktree.");
-      return;
-    }
-    if (currentCard.verificationRun?.status === "running") return;
-    const command = currentCard.verificationCommand ?? "";
-    if (!command.trim()) {
-      setReviewEvidenceMessage("Verification requires a nonempty command.");
-      return;
-    }
-    setVerificationBusyCardId(card.id);
-    verificationSpawnCountRef.current++;
-    let spawned: Session | undefined;
-    let runStored = false;
-    const priorRun = currentCard.verificationRun;
-    try {
-      const workspace = await ensureOpsTaskLane(currentCard);
-      if (workspace.sharedNonGit || !workspace.worktreePath) {
-        throw new Error("Verification requires the registered task working directory.");
-      }
-      spawned = await callCore<Session>("pty_spawn", {
-        req: {
-          nodeId: `ops-verification-${card.id}`,
-          nodeTitle: "Verification",
-          adapterId: "generic-shell",
-          shellCommand: command,
-          cwd: workspace.cwd,
-          rows: 24,
-          cols: 100,
-        },
-      });
-      verificationSessionIdsRef.current.add(spawned.id);
-      if (!workspacePathsEqual(spawned.cwd, workspace.cwd)) {
-        throw new Error(`Verification opened an unexpected working directory: ${spawned.cwd}`);
-      }
-      await persistOpsImmediately((current) => ({
-        ...current,
-        cards: current.cards.map((item) => item.id === card.id ? {
-          ...item,
-          verificationRun: {
-            sessionId: spawned!.id,
-            command,
-            worktreePath: workspace.worktreePath!,
-            cwd: spawned!.cwd,
-            baseCommit: currentCard.taskLane!.baseCommit,
-            status: "running",
-            startedAt: spawned!.startedAt,
-          },
-          approvalAttempt: undefined,
-        } : item),
-      }));
-      runStored = true;
-      const pendingExit = pendingVerificationExitsRef.current.get(spawned.id);
-      setSessions((current) => [{
-        ...spawned!,
-        status: pendingVerificationExitsRef.current.has(spawned!.id)
-          ? pendingExit === 0 ? "completed" : "failed"
-          : spawned!.status,
-      }, ...current.filter((session) => session.id !== spawned!.id)]);
-      if (pendingVerificationExitsRef.current.has(spawned.id)) {
-        finishOpsVerification(spawned.id, pendingExit);
-      }
-    } catch (cause) {
-      if (spawned && !runStored) {
-        pendingVerificationExitsRef.current.delete(spawned.id);
-        verificationSessionIdsRef.current.delete(spawned.id);
-        void callCore("session_kill", { sessionId: spawned.id }).catch(() => undefined);
-      }
-      if (!runStored) changeOps((current) => ({
-        ...current,
-        cards: current.cards.map((item) => item.id === card.id ? { ...item, verificationRun: priorRun } : item),
-      }));
-      const detail = `Could not run verification: ${message(cause)}`;
-      const failedCard = opsStateRef.current.cards.find((candidate) => candidate.id === card.id) ?? currentCard;
-      reviewCardRef.current = failedCard;
-      setReviewCard(failedCard);
-      setReviewEvidence(undefined);
-      setReviewEvidenceReady(false);
-      setReviewEvidenceMessage(detail);
-    } finally {
-      verificationSpawnCountRef.current--;
-      if (verificationSpawnCountRef.current === 0) {
-        for (const sessionId of pendingVerificationExitsRef.current.keys()) {
-          if (!verificationSessionIdsRef.current.has(sessionId)) pendingVerificationExitsRef.current.delete(sessionId);
-        }
-      }
-      setVerificationBusyCardId((current) => current === card.id ? undefined : current);
-    }
-  };
-
-  const _cancelOpsVerification = async (card: OpsCard) => {
-    const run = opsStateRef.current.cards.find((candidate) => candidate.id === card.id)?.verificationRun;
-    if (!run || run.status !== "running") return;
-    setVerificationBusyCardId(card.id);
-    verificationCancelingRef.current.add(run.sessionId);
-    let cancellationStored = false;
-    try {
-      await persistOpsImmediately((current) => ({
-        ...current,
-        cards: current.cards.map((item) => item.id === card.id && item.verificationRun?.sessionId === run.sessionId && item.verificationRun.status === "running"
-          ? { ...item, verificationRun: { ...item.verificationRun, status: "canceled", endedAt: new Date().toISOString(), message: "Verification canceled." } }
-          : item),
-      }));
-      cancellationStored = true;
-      const updatedCard = opsStateRef.current.cards.find((candidate) => candidate.id === card.id);
-      if (updatedCard) setReviewCard(updatedCard);
-      await callCore("session_kill", { sessionId: run.sessionId });
-      verificationCancelingRef.current.delete(run.sessionId);
-      verificationSessionIdsRef.current.delete(run.sessionId);
-      pendingVerificationExitsRef.current.delete(run.sessionId);
-    } catch (cause) {
-      verificationCancelingRef.current.delete(run.sessionId);
-      if (cancellationStored) {
-        verificationSessionIdsRef.current.delete(run.sessionId);
-        pendingVerificationExitsRef.current.delete(run.sessionId);
-        setReviewEvidenceMessage(`Verification was canceled, but process cleanup failed: ${message(cause)}`);
-      } else {
-        setReviewEvidenceMessage(`Could not save verification cancellation: ${message(cause)}`);
-      }
-    } finally {
-      setVerificationBusyCardId((current) => current === card.id ? undefined : current);
-    }
-  };
-
-  const _viewOpsVerificationOutput = async (card: OpsCard) => {
-    const run = card.verificationRun;
-    if (!run) return;
-    try {
-      const transcript = await callCore<SessionTranscriptPage>("session_transcript_page", { sessionId: run.sessionId, visible: true, limit: 500 });
-      setHistoryTranscript({
-        title: `${card.title} verification`,
-        sessionId: run.sessionId,
-        adapterId: "generic-shell",
-        cwd: run.cwd,
-        status: run.status,
-        text: transcript.text,
-        chunkCount: transcript.chunkCount,
-        totalChunkCount: transcript.totalChunkCount,
-        beforeSeq: transcript.startSeq,
-        hasMore: transcript.hasMore,
-        visible: true,
-      });
-    } catch (cause) {
-      setReviewEvidenceMessage(`Verification output unavailable: ${message(cause)}`);
-    }
-  };
-
+  // Agents verify their own work; reconciliation consumes their persisted report.
   const inspectOpsTask = (card: OpsCard) => {
     const currentCard = opsStateRef.current.cards.find((candidate) => candidate.id === card.id) ?? card;
     reviewCardRef.current = currentCard;
@@ -6019,10 +5769,10 @@ export function App() {
     return started;
   };
 
-  const removeSelectedProject = async (deleteFromDisk: boolean) => {
+  const removeSelectedProject = async () => {
     if (!removeProject) return;
     try {
-      await callCore("project_remove", { projectId: removeProject.id, deleteFromDisk });
+      await callCore("project_remove", { projectId: removeProject.id, deleteFromDisk: false });
       const remaining = projects.filter((candidate) => candidate.id !== removeProject.id);
       setProjects(remaining);
       if (project?.id === removeProject.id) {
@@ -6041,8 +5791,11 @@ export function App() {
   };
 
   const nodeById = useMemo(
-    () => Object.fromEntries(nodes.map((node) => [node.id, node])),
-    [nodes],
+    () => Object.fromEntries([
+      ...canvases.flatMap((candidate) => candidate.nodes),
+      ...nodes,
+    ].map((node) => [node.id, node])),
+    [canvases, nodes],
   );
   const agentName = (id: string) => resolveAgentLabel(nodeById[id]?.title, opsState.agentLabels?.[id]);
   const botRuntimes = useMemo(() => Object.values(runtimes).map((runtime) => ({
@@ -6172,10 +5925,10 @@ export function App() {
       const card = current.cards.find((candidate) => candidate.id === cardId);
       if (!card) return current;
       const attempts = (card.attemptCount ?? 0) + 1;
-      const exhausted = attempts >= 5;
-      const retryAt = exhausted
-        ? undefined
-        : new Date(Date.now() + Math.min(30_000, 1_000 * 2 ** Math.max(0, attempts - 1))).toISOString();
+      const retryDelay = attempts < 5
+        ? Math.min(30_000, 1_000 * 2 ** Math.max(0, attempts - 1))
+        : 5 * 60_000;
+      const retryAt = new Date(Date.now() + retryDelay).toISOString();
       const released = applyOpsOrchestration(current, cardId, "release");
       return {
         ...released,
@@ -6184,26 +5937,21 @@ export function App() {
               ...candidate,
               attemptCount: attempts,
               retryAt,
-              paused: exhausted,
-              reconciliation: exhausted ? {
-                status: "needs_human",
-                attempts,
-                message: `Autonomous recovery stopped after ${attempts} attempts: ${detail}`,
-                updatedAt: new Date().toISOString(),
-              } : {
+              paused: false,
+              reconciliation: {
                 status: "retrying",
                 attempts,
                 message: detail,
                 updatedAt: new Date().toISOString(),
               },
-              lastNote: exhausted
-                ? `Autonomous recovery exhausted after ${attempts} attempts.`
-                : `Retrying autonomously after attempt ${attempts}.`,
+              lastNote: attempts < 5
+                ? `Retrying autonomously after attempt ${attempts}.`
+                : `Recovery will keep retrying in the background (attempt ${attempts}).`,
             }, {
               id: `scheduler:retry:${cardId}:${attempts}:${Date.now()}`,
-              kind: exhausted ? "blocker" : "update",
+              kind: "update",
               timestamp: new Date().toISOString(),
-              message: exhausted ? "Autonomous recovery exhausted" : `Autonomous retry ${attempts} scheduled`,
+              message: `Autonomous retry ${attempts} scheduled`,
             })
           : candidate),
       };
@@ -6298,11 +6046,7 @@ export function App() {
       schedulerFinalizedLeaseIdsRef.current.add(leaseId);
       void (async () => {
         try {
-          await callCore("ops_scheduler_finish", {
-            leaseId,
-            ownerId: schedulerOwnerIdRef.current,
-            state: "failed",
-          });
+          await callCore("ops_scheduler_recover", { leaseId, state: "failed" });
           await scheduleAutonomousTaskRetry(stringValue(node.data, "taskId"), `${node.title} ${runtime.status}.`);
           setError(`${node.title} ${runtime.status}; its task will recover independently.`);
         } catch (cause) {
@@ -6329,7 +6073,10 @@ export function App() {
     }
   };
   const startOnboardingAgent = async (prompt: string) => {
-    return spawnAgent(prompt);
+    setSurface("terminal");
+    const started = await spawnAgent(prompt);
+    if (!started) setSurface("home");
+    return started;
   };
   const startOnboardingShell = async () => {
     setSurface("terminal");
@@ -7609,13 +7356,12 @@ export function App() {
       {customizeProject && <ProjectIdentitySheet project={customizeProject} onOpenChange={(open) => !open && setCustomizeProject(undefined)} onSave={saveProjectIdentity} />}
       <AlertDialog open={Boolean(removeProject)} onOpenChange={(open) => !open && setRemoveProject(undefined)}>
         <AlertDialogContent className="wj-dialog wj-dialog-medium">
-          <AlertDialogHeader><AlertDialogTitle>Hide {removeProject?.name}?</AlertDialogTitle><AlertDialogDescription>{removeProjectHasActiveSessions
-            ? `${removeProject?.path ?? "This project"} has active sessions. Stop them before hiding or deleting this project.`
-            : "Hide it from wheeljack while keeping its saved state, or also delete the project folder. Deleting from disk cannot be undone."}</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogHeader><AlertDialogTitle>Remove {removeProject?.name} from Wheeljack?</AlertDialogTitle><AlertDialogDescription>{removeProjectHasActiveSessions
+            ? `${removeProject?.path ?? "This project"} has active sessions. Stop them before removing this project from Wheeljack.`
+            : "Remove it from Wheeljack while keeping the project folder and its saved state on disk."}</AlertDialogDescription></AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <Button variant="outline" disabled={removeProjectHasActiveSessions} onClick={() => void removeSelectedProject(false)}>Hide from wheeljack</Button>
-            <Button variant="destructive" disabled={removeProjectHasActiveSessions} onClick={() => void removeSelectedProject(true)}>Delete from disk</Button>
+            <Button variant="destructive" disabled={removeProjectHasActiveSessions} onClick={() => void removeSelectedProject()}>Remove from Wheeljack</Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -7948,13 +7694,14 @@ function coordinationBoardSyncRequest(
   nodes: CanvasNode[],
   extraCallsigns: string[] = [],
 ) {
+  const objectiveIds = new Set(state.cards.filter((card) => card.kind === "objective" || state.cards.some((candidate) => candidate.parentId === card.id)).map((card) => card.id));
   return {
     cwd,
     callsigns: [...new Set([
       ...nodes.flatMap((node) => runtimes[node.id]?.structured ? [node.title] : []),
       ...extraCallsigns,
     ])],
-    tasks: state.cards.map((card) => ({
+    tasks: state.cards.filter((card) => !objectiveIds.has(card.id)).map((card) => ({
       id: card.id,
       title: card.title,
       detail: card.detail,
@@ -7990,8 +7737,8 @@ function opsTaskAgentPrompt(
     role === "reviewer" ? "Review only: inspect the implementation and evidence without modifying project files." : missingContract ? "Implement only this task's objective, then derive its missing verification contract from the finished implementation and repository." : "Implement only this task's contract and verify the result.",
     "",
     "Read before acting:",
-    `- ${projectPath}${projectPath.endsWith("\\") || projectPath.endsWith("/") ? "" : separator}KANBAN.md if it exists`,
-    `- ${board.tasksPath}`,
+    `- ${board.tasksPath} (authoritative live task contract)`,
+    `- ${projectPath}${projectPath.endsWith("\\") || projectPath.endsWith("/") ? "" : separator}KANBAN.md only as optional planning context; it may be a snapshot and is never live task status`,
     `- Relevant peer logs under ${board.agentsPath}`,
     "",
     "Coordination lifecycle:",
@@ -8582,7 +8329,7 @@ export function rollbackOptimisticOpsAgentStart(
         .some((event) => !event.id.startsWith("manual:task-lane:"));
       if (superseded) return card;
       const stillOwnedByOptimisticAgent = preserveTaskState
-        ? card.assigneeIds.includes(nodeId)
+        ? card.taskLane?.cleanup?.agentId === nodeId
         : role === "reviewer"
         ? card.reviewerId === nodeId
         : card.assigneeIds.length === 1 && card.assigneeIds[0] === nodeId;
@@ -8721,6 +8468,14 @@ function projectDocumentWrites(
     if (!force && document.content === content) return [];
     return [{ kind, content, expectedRevision: document.revision }];
   });
+}
+
+function projectSpecificationDocumentWrites(
+  state: OpsState,
+  documents: ProjectDocuments,
+  force = false,
+): ProjectDocumentWrite[] {
+  return projectDocumentWrites(state, documents, force).filter((write) => write.kind !== "kanban");
 }
 
 function projectDocumentName(kind: ProjectDocumentKind): string {

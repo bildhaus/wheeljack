@@ -612,19 +612,48 @@ pub(crate) fn run_git_worktree_remove(repo_path: &Path, target_path: &Path) -> R
         let output = git_command()
             .arg("-C")
             .arg(repo_path)
-            .args(["worktree", "prune", "--expire", "now"])
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .output()?;
         if !output.status.success() {
             bail!(
-                "git worktree prune failed: {}",
+                "could not locate Git worktree metadata: {}",
                 command_output_detail(&output)
             );
         }
+        let common_dir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        let registrations = common_dir.join("worktrees");
+        let mut matched = None;
+        if registrations.is_dir() {
+            for entry in fs::read_dir(&registrations)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let admin_dir = entry.path();
+                let gitdir = fs::read_to_string(admin_dir.join("gitdir")).unwrap_or_default();
+                let registered_git_file = PathBuf::from(gitdir.trim());
+                let registered_path = registered_git_file.parent().unwrap_or(&registered_git_file);
+                if paths_equivalent(registered_path, target_path) {
+                    if admin_dir.parent() != Some(registrations.as_path()) {
+                        bail!(
+                            "refusing to remove worktree metadata outside the Git common directory"
+                        );
+                    }
+                    matched = Some(admin_dir);
+                    break;
+                }
+            }
+        }
+        let admin_dir =
+            matched.ok_or_else(|| anyhow!("Missing worktree registration was not found."))?;
+        fs::remove_dir_all(&admin_dir).with_context(|| {
+            format!("remove stale worktree registration {}", admin_dir.display())
+        })?;
         if read_worktrees(repo_path)
             .iter()
             .any(|worktree| paths_equivalent(Path::new(&worktree.path), target_path))
         {
-            bail!("Git kept the missing worktree registered after pruning it.");
+            bail!("Git kept the missing worktree registered after its metadata was removed.");
         }
         return Ok(());
     }
@@ -775,6 +804,15 @@ pub(crate) fn integrate_git_worktree(
             previous_target_head.clone(),
             commits,
             "Equivalent task commits were already present in the opened project branch.",
+        ));
+    }
+    let current_target_head = read_git_head(target_path)?;
+    if current_target_head != previous_target_head {
+        return Ok(result(
+            "target_dirty",
+            current_target_head,
+            commits,
+            "The opened project branch changed while reconciliation was preparing. Wheeljack preserved the task branch and will retry against the new target.",
         ));
     }
     let mut command = git_command();

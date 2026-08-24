@@ -1016,6 +1016,7 @@ const WHEELJACK_CONTROL_PREFIXES: [&str; 5] = [
     "wheeljack.ops_decomposition ",
     "wheeljack.control ",
 ];
+const WHEELJACK_AUTONOMY_PROMPT_MARKER: &str = "wheeljack autonomous controls:";
 
 fn is_wheeljack_control_message_or_prefix(text: &str) -> bool {
     let text = text.trim_start();
@@ -1059,10 +1060,14 @@ fn capture_completed_controls(
 }
 
 fn visible_wheeljack_text(text: &str) -> String {
-    let mut offset = WHEELJACK_CONTROL_PREFIXES
+    let mut offset = text.find(WHEELJACK_AUTONOMY_PROMPT_MARKER);
+    offset = WHEELJACK_CONTROL_PREFIXES
         .iter()
         .filter_map(|prefix| text.find(prefix))
-        .min();
+        .min()
+        .map_or(offset, |candidate| {
+            Some(offset.map_or(candidate, |current| current.min(candidate)))
+        });
     for (candidate, _) in text.match_indices("wheel") {
         let starts_at_boundary = candidate == 0
             || text[..candidate]

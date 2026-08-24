@@ -368,6 +368,7 @@ export interface RouteExecuteResult {
 
 export interface OpsCard {
   id: string;
+  kind?: "task" | "objective";
   columnId: string;
   title: string;
   detail: string;
@@ -485,6 +486,7 @@ export interface OpsTaskLane {
     attempts?: number;
     retryAt?: string;
     requiresIntegration?: boolean;
+    agentId?: string;
   };
 }
 

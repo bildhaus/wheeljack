@@ -824,6 +824,8 @@ pub struct CoordinationAgentEventDto {
     pub callsign: String,
     pub task: String,
     #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
     pub task_id: Option<String>,
     #[serde(default)]
     pub status: Option<String>,

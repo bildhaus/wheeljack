@@ -328,6 +328,54 @@ fn git_worktree_remove_prunes_a_registered_missing_worktree() {
 }
 
 #[test]
+fn git_worktree_remove_only_drops_the_requested_stale_registration() {
+    let repo = committed_repo("git-two-stale-worktrees");
+    let first = repo.with_file_name(format!(
+        "{}-first",
+        repo.file_name().unwrap().to_string_lossy()
+    ));
+    let second = repo.with_file_name(format!(
+        "{}-second",
+        repo.file_name().unwrap().to_string_lossy()
+    ));
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-b",
+            "wheeljack-stale-first",
+            first.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-b",
+            "wheeljack-stale-second",
+            second.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    fs::remove_dir_all(&first).unwrap();
+    fs::remove_dir_all(&second).unwrap();
+
+    run_git_worktree_remove(&repo, &first).unwrap();
+    let remaining = read_worktrees(&repo);
+    assert!(!remaining
+        .iter()
+        .any(|candidate| paths_equivalent(Path::new(&candidate.path), &first)));
+    assert!(remaining
+        .iter()
+        .any(|candidate| paths_equivalent(Path::new(&candidate.path), &second)));
+
+    run_git_worktree_remove(&repo, &second).unwrap();
+}
+
+#[test]
 fn git_task_worktree_uses_repo_root_nested_cwd_and_source_head() {
     let repo = committed_repo("git-task-nested");
     let nested = repo.join("apps").join("desktop");

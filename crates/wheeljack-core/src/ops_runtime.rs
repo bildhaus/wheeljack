@@ -420,6 +420,32 @@ pub(crate) fn finish_ops_lease(
     Ok(())
 }
 
+/// Releases a lease left behind by a previous application process. This is
+/// deliberately owner-independent: the caller cannot possess the random owner
+/// id from the process that crashed. The UI only invokes this after confirming
+/// that the lease's agent session is no longer live.
+pub(crate) fn recover_ops_lease(
+    db: &Connection,
+    lease_id: &str,
+    state: &str,
+) -> Result<OpsTaskLease> {
+    if !matches!(state, "completed" | "released" | "failed") {
+        bail!("unsupported scheduler lease recovery state");
+    }
+    let recovered_at = now();
+    let changed = db.execute(
+        "UPDATE ops_task_leases
+         SET state = ?1, finished_at = ?2
+         WHERE id = ?3
+           AND state IN ('claimed', 'expired')",
+        params![state, recovered_at, lease_id],
+    )?;
+    if changed != 1 {
+        bail!("expired scheduler lease was not found");
+    }
+    load_ops_lease(db, lease_id)
+}
+
 fn fill_project_leases(db: &Connection, project_id: &str) -> Result<Vec<OpsTaskLease>> {
     let Some(config) = load_ops_scheduler_config(db, project_id)? else {
         return Ok(Vec::new());
@@ -550,15 +576,27 @@ fn eligible_task_ids(state: &Value) -> HashSet<String> {
             .flatten()
             .filter_map(|card| card.get("id").and_then(Value::as_str).map(str::to_string)),
     );
+    let objective_ids = cards
+        .iter()
+        .filter_map(|candidate| {
+            candidate
+                .get("parentId")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<HashSet<_>>();
     cards
         .into_iter()
         .filter_map(|card| {
             let task_id = card.get("id").and_then(Value::as_str)?;
+            let is_objective = card.get("kind").and_then(Value::as_str) == Some("objective")
+                || objective_ids.contains(task_id);
             if !card
                 .get("columnId")
                 .and_then(Value::as_str)
                 .is_some_and(|column| queued.contains(column))
                 || card.get("paused").and_then(Value::as_bool) == Some(true)
+                || is_objective
                 || card
                     .get("assigneeIds")
                     .and_then(Value::as_array)

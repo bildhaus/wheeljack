@@ -170,7 +170,7 @@ test("gates the accessible three-step guide until desktop startup has hydrated",
   expect(paritySource).toContain("Review this repository and tell me what it does, how to run it, and one useful next task. Don’t change files.");
 });
 
-test("starts onboarding agents in the background but still reveals onboarding shells immediately", () => {
+test("reveals onboarding agents and shells in Work immediately", () => {
   const onboardingActions = appSource.slice(
     appSource.indexOf("const startOnboardingAgent"),
     appSource.indexOf("const terminalAgents"),
@@ -178,8 +178,9 @@ test("starts onboarding agents in the background but still reveals onboarding sh
   const agentAction = onboardingActions.slice(0, onboardingActions.indexOf("const startOnboardingShell"));
   const shellAction = onboardingActions.slice(onboardingActions.indexOf("const startOnboardingShell"));
 
-  expect(agentAction).toContain("return spawnAgent(prompt)");
-  expect(agentAction).not.toContain("setSurface(");
+  expect(agentAction.indexOf('setSurface("terminal")'))
+    .toBeLessThan(agentAction.indexOf("await spawnAgent(prompt)"));
+  expect(agentAction).toContain('if (!started) setSurface("home")');
   expect(paritySource).toContain("Agent started in Work.");
   expect(shellAction.indexOf('setSurface("terminal")'))
     .toBeLessThan(shellAction.indexOf("await spawnShell()"));
@@ -626,7 +627,7 @@ test("orders isolated task setup before spawn and keeps review evidence separate
   expect(reviewSource).not.toContain("setGit(");
   expect(reviewSource).not.toContain("setGitDiff(");
   expect(paritySource).toContain("Start fresh task agent");
-  expect(paritySource).toContain("Send fresh reviewer");
+  expect(paritySource).not.toContain("Send fresh reviewer");
   expect(paritySource).toContain("resolveAgentLabel(nodes[id]?.title, state.agentLabels?.[id])");
   expect(paritySource).toContain("reviewerName(card.reviewerId)");
   expect(paritySource).toContain("reviewerName(inspectedCard.reviewerId)");
@@ -1203,7 +1204,9 @@ test("reconciles worker reports and starts repair agents only for integration fa
   );
   expect(reconciliationSource).toContain('callCore<GitWorktreeIntegrate>("git_worktree_integrate"');
   expect(reconciliationSource).toContain('result.status === "integrated" || result.status === "empty"');
-  expect(reconciliationSource).toContain('result.status === "target_dirty" || attempts >= 3');
+  expect(reconciliationSource).toContain('if (result.status === "target_dirty")');
+  expect(reconciliationSource).toContain('recordReconciliation("retrying"');
+  expect(reconciliationSource).not.toContain("Automatic reconciliation exhausted");
   expect(reconciliationSource).toContain('result.status === "source_dirty"');
   expect(reconciliationSource).toContain("Reconciliation rolled back a Git conflict");
   expect(reconciliationSource).toContain('startAgentForOpsTask(card, repairPrompt, "worker")');
@@ -1213,7 +1216,7 @@ test("reconciles worker reports and starts repair agents only for integration fa
   expect(paritySource).toContain("Send repair task");
 });
 
-test("preserves live verification across canvases and interrupts missing sessions after restart", () => {
+test("migrates legacy verification state without starting redundant verification jobs", () => {
   const state = parseOpsState({
     version: 2,
     cards: [{
@@ -1301,11 +1304,11 @@ test("preserves live verification across canvases and interrupts missing session
     appSource.indexOf("const activateCanvas"),
     appSource.indexOf("const refreshProjectData"),
   );
-  expect(activationSource).toContain('callCore<Record<string, { status: string; exitCode?: number }>>("session_statuses"');
+  expect(activationSource).not.toContain('"session_statuses"');
   expect(activationSource).toContain("const recoveredVerification =");
   expect(activationSource).toContain("await persistOpsQueued(nextOps, nextCanvas");
-  expect(activationSource).toContain("pendingVerificationExitsRef.current.delete(run.sessionId)");
-  expect(activationSource).toContain("verificationExitHandlerRef.current?.(");
+  expect(activationSource).toContain("recoverOpsVerificationRuns(");
+  expect(appSource).not.toContain("const _runOpsVerification");
 
   const merged = mergeProjectDocuments(state, {
     projectPath: "C:\\repo",

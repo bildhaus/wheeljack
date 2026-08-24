@@ -234,6 +234,20 @@ describe("ops presence", () => {
     expect(opsNextAutonomousTask({ ...state, cards: [blocked, { ...foundation, columnId: "done" }] })?.id).toBe("blocked");
   });
 
+  it("never schedules an objective parent as executable work", () => {
+    const objective = { ...card("objective", "queued", []), kind: "objective" as const };
+    const child = { ...card("child", "queued", []), parentId: objective.id };
+    const state = {
+      columns: [
+        { id: "queued", title: "Ready", role: "queued" as const },
+        { id: "done", title: "Done", role: "done" as const },
+      ],
+      cards: [objective, child],
+    };
+
+    expect(opsNextAutonomousTask(state)?.id).toBe("child");
+  });
+
   it("lets soft relationships coordinate without serializing scheduler pickup", () => {
     const upstream = card("upstream", "active", []);
     const soft = { ...card("soft", "queued", []), dependencyIds: ["upstream"], dependencyKinds: { upstream: "soft" as const } };

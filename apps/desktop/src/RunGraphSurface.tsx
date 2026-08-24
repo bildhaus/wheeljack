@@ -87,7 +87,7 @@ export function OpsRunGraph({
       return;
     }
     onSelectionChange(next);
-    setAnnouncement(`${label} selected. Matching Floor work highlighted.`);
+    setAnnouncement(`${label} selected. Matching work opened.`);
   };
   const changeRange = (range: OpsRunGraphRange) => {
     onRangeChange(range);

@@ -297,6 +297,7 @@ function parseOpsCards(value: unknown): OpsCard[] {
     if (typeof item.id !== "string" || typeof item.title !== "string") return [];
     return [{
       id: item.id,
+      kind: item.kind === "objective" ? "objective" : "task",
       columnId: typeof item.columnId === "string" ? item.columnId : "queued",
       title: item.title,
       detail: typeof item.detail === "string" ? item.detail : "",
@@ -479,6 +480,7 @@ export function renderKanban(state: OpsState): string {
       output += `\n- [${column.role === "done" ? "x" : " "}] ${card.title.trim()}\n`;
       output += `  <!-- wheeljack:task ${JSON.stringify({
         id: card.id,
+        kind: card.kind ?? "task",
         priority: card.priority,
         assignee: card.assignee,
         parentId: card.parentId,
@@ -514,6 +516,7 @@ export function mergeProjectDocuments(current: OpsState, documents: ProjectDocum
             : card.columnId;
           return {
             ...card,
+            kind: currentCard?.kind ?? "task",
             columnId,
             assigneeIds: currentCard?.assigneeIds ?? [],
             agentStatuses: currentCard?.agentStatuses ?? {},
@@ -553,5 +556,79 @@ export function mergeProjectDocuments(current: OpsState, documents: ProjectDocum
     ...board,
     prd: documents.documents.prd.exists ? documents.documents.prd.content : current.prd,
     tdd: documents.documents.tdd.exists ? documents.documents.tdd.content : current.tdd,
+  };
+}
+
+/** Merge editable specifications without treating KANBAN.md as live task state. */
+export function mergeProjectSpecificationDocuments(
+  current: OpsState,
+  documents: ProjectDocuments,
+): OpsState {
+  return {
+    ...current,
+    prd: documents.documents.prd.exists ? documents.documents.prd.content : current.prd,
+    tdd: documents.documents.tdd.exists ? documents.documents.tdd.content : current.tdd,
+  };
+}
+
+function unchanged<T>(value: T, baseline: T | undefined): boolean {
+  return JSON.stringify(value) === JSON.stringify(baseline);
+}
+
+function cardTimestamp(card: OpsCard): string {
+  return card.events?.at(-1)?.timestamp
+    ?? card.reconciliation?.updatedAt
+    ?? card.completedAt
+    ?? card.startedAt
+    ?? "";
+}
+
+/** Three-way merge used when another Wheeljack window saved the same Plan. */
+export function mergeConcurrentOpsState(
+  baseline: OpsState,
+  local: OpsState,
+  remote: OpsState,
+): OpsState {
+  const baseCards = new Map(baseline.cards.map((card) => [card.id, card]));
+  const localCards = new Map(local.cards.map((card) => [card.id, card]));
+  const remoteCards = new Map(remote.cards.map((card) => [card.id, card]));
+  const cardIds = new Set([...baseCards.keys(), ...localCards.keys(), ...remoteCards.keys()]);
+  const cards = [...cardIds].flatMap((id): OpsCard[] => {
+    const base = baseCards.get(id);
+    const ours = localCards.get(id);
+    const theirs = remoteCards.get(id);
+    if (!ours && !theirs) return [];
+    if (!ours) return base && unchanged(theirs, base) ? [] : [theirs!];
+    if (!theirs) return base && unchanged(ours, base) ? [] : [ours];
+    if (unchanged(ours, base)) return [theirs];
+    if (unchanged(theirs, base)) return [ours];
+    const newer = cardTimestamp(ours) >= cardTimestamp(theirs) ? ours : theirs;
+    const older = newer === ours ? theirs : ours;
+    const events = [...(older.events ?? []), ...(newer.events ?? [])]
+      .filter((event, index, all) => all.findIndex((candidate) => candidate.id === event.id) === index)
+      .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
+    return [{
+      ...older,
+      ...newer,
+      assigneeIds: [...new Set([...(older.assigneeIds ?? []), ...(newer.assigneeIds ?? [])])],
+      agentStatuses: { ...older.agentStatuses, ...newer.agentStatuses },
+      agentFiles: { ...older.agentFiles, ...newer.agentFiles },
+      events,
+    }];
+  });
+  const choose = <T,>(ours: T, theirs: T, base: T): T =>
+    unchanged(ours, base) ? theirs : ours;
+  return {
+    ...remote,
+    ...local,
+    columns: choose(local.columns, remote.columns, baseline.columns),
+    cards,
+    archivedCards: [
+      ...(remote.archivedCards ?? []),
+      ...(local.archivedCards ?? []),
+    ].filter((card, index, all) => all.findIndex((candidate) => candidate.id === card.id) === index),
+    prd: choose(local.prd, remote.prd, baseline.prd),
+    tdd: choose(local.tdd, remote.tdd, baseline.tdd),
+    agentLabels: { ...remote.agentLabels, ...local.agentLabels },
   };
 }

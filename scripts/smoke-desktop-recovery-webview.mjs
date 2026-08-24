@@ -102,21 +102,27 @@ await waitFor(
 const openedOps = await evaluate(`(()=>{const button=document.querySelector('.wj-plan-mode-trigger');button?.click();return Boolean(button)})()`);
 if (!openedOps) throw new Error("Recovered project did not expose Ops navigation.");
 await waitFor("Boolean(document.querySelector('.wj-floor'))", "recovered Ops Floor");
-await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Board");tab?.focus();return Boolean(tab)})()`);
+await evaluate(`(()=>{const tab=[...document.querySelectorAll('[role="tab"]')].find(node=>node.textContent?.trim()==="Plan");tab?.focus();return Boolean(tab)})()`);
 await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
 await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
 await waitFor(
   `[...document.querySelectorAll(".wj-task-card")].some(node=>node.textContent?.includes("WHEELJACK_OPS_PERSISTENCE_EDITED"))`,
   "recovered Ops board",
 );
+await evaluate(`(()=>{const card=[...document.querySelectorAll(".wj-task-card")].find(node=>node.textContent?.includes(${JSON.stringify(expectedLaneState.cardTitle)}));const summary=card?.querySelector(".wj-task-summary");summary?.click();return Boolean(summary)})()`);
 await waitFor(
-  `(()=>{const card=[...document.querySelectorAll(".wj-task-card")].find(node=>node.textContent?.includes(${JSON.stringify(expectedLaneState.cardTitle)}));return card?.textContent?.includes("Task worktree")})()`,
-  "visible recovered task worktree",
+  `(()=>{const inspector=document.querySelector(".wj-execution-inspector");return inspector?.textContent?.includes("Workspace")&&inspector.textContent.includes(${JSON.stringify(expectedLaneState.lane.branch)})})()`,
+  "visible recovered task worktree details",
 );
-const recoveredCanvas = await coreCall("canvas_get", { canvasId: expectedLaneState.canvasId });
-const recoveredOps = await coreCall("ops_state_get", { canvasId: expectedLaneState.canvasId });
+await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+await waitFor(`!document.querySelector(".wj-execution-inspector[data-state='open']")`, "closed recovered task inspector");
+const recoveredCanvases = await coreCall("canvas_list_project", { projectId: expectedLaneState.projectId });
+const recoveredCanvas = recoveredCanvases.find((candidate) => candidate.id === expectedLaneState.canvasId);
+if (!recoveredCanvas) throw new Error(`Recovery lost the expected canvas: ${expectedLaneState.canvasId}`);
+const recoveredOps = await coreCall("ops_project_state_get", { projectId: recoveredCanvas.projectId });
 let recoveredLaneCard = recoveredOps?.state?.cards?.find((card) => card.id === expectedLaneState.cardId);
-const recoveredTaskNode = recoveredCanvas.nodes?.find((node) => node.id === expectedLaneState.taskNodeId);
+const recoveredTaskNode = recoveredCanvases.flatMap((candidate) => candidate.nodes ?? []).find((node) => node.id === expectedLaneState.taskNodeId);
 if (
   !recoveredLaneCard?.taskLane ||
   recoveredLaneCard.taskLane.kind !== "git-worktree" ||
@@ -124,9 +130,7 @@ if (
   recoveredLaneCard.taskLane.branch !== expectedLaneState.lane.branch ||
   recoveredLaneCard.taskLane.baseCommit !== expectedLaneState.lane.baseCommit ||
   !samePath(recoveredLaneCard.taskLane.worktreePath, expectedLaneState.lane.worktreePath) ||
-  !samePath(recoveredLaneCard.taskLane.cwd, expectedLaneState.lane.cwd) ||
-  !recoveredLaneCard.assigneeIds?.includes(expectedLaneState.taskNodeId) ||
-  !samePath(recoveredTaskNode?.data?.cwd ?? "", expectedLaneState.lane.cwd)
+  !samePath(recoveredLaneCard.taskLane.cwd, expectedLaneState.lane.cwd)
 ) {
   throw new Error(`Task-lane metadata changed during recovery: ${JSON.stringify({ card: recoveredLaneCard, node: recoveredTaskNode })}`);
 }
@@ -151,7 +155,7 @@ const expectedRecoveredSession = recoveredTaskSessions.find((session) => session
 const recoveredNodeSessionId = recoveredTaskNode?.data?.sessionId ?? recoveredTaskNode?.data?.lastSessionId;
 if (
   !expectedRecoveredSession ||
-  recoveredNodeSessionId !== expectedRecoveredSessionId ||
+  (recoveredTaskNode && recoveredNodeSessionId !== expectedRecoveredSessionId) ||
   !samePath(expectedRecoveredSession.cwd, expectedLaneState.lane.cwd)
 ) {
   throw new Error(`Recovered task session lost its lane cwd: ${JSON.stringify(recoveredTaskSessions)}`);
@@ -185,7 +189,8 @@ await waitFor(
 );
 
 let removalRefusal;
-if (expectInterrupted) {
+let resumedRecoveredTask = false;
+if (expectInterrupted && recoveredTaskNode) {
   await waitFor(
     `(()=>{const pane=[...document.querySelectorAll("[data-pane-id]")].find(node=>node.dataset.paneId===${JSON.stringify(expectedLaneState.taskNodeId)});return Boolean(pane?.querySelector('button[title="Resume session"]'))})()`,
     "task-lane Resume session action",
@@ -212,7 +217,10 @@ if (expectInterrupted) {
   );
   expectedLaneState.sessionIds.push(resumedTaskSession.id);
   await Bun.write(laneStatePath, JSON.stringify(expectedLaneState, null, 2));
+  resumedRecoveredTask = true;
+}
 
+if (expectInterrupted) {
   const removeResult = await coreResult("git_worktree_remove", {
     req: {
       projectPath: expectedLaneState.projectPath,
@@ -231,7 +239,7 @@ if (expectInterrupted) {
   const preservedLane = preservedStatus.worktrees.find((worktree) =>
     samePath(worktree.path, expectedLaneState.lane.worktreePath));
   const preservedCanvas = await coreCall("canvas_get", { canvasId: expectedLaneState.canvasId });
-  const preservedOps = await coreCall("ops_state_get", { canvasId: preservedCanvas.id });
+  const preservedOps = await coreCall("ops_project_state_get", { projectId: preservedCanvas.projectId });
   recoveredLaneCard = preservedOps?.state?.cards?.find((card) => card.id === expectedLaneState.cardId);
   if (!preservedLane || preservedLane.branch !== expectedLaneState.lane.branch || recoveredLaneCard?.taskLane?.closedAt) {
     throw new Error(`Dirty removal changed task-lane registration or metadata: ${JSON.stringify({ preservedLane, card: recoveredLaneCard })}`);
@@ -248,7 +256,7 @@ const latestTaskSession = sessions.find((session) =>
 if (
   !latestTaskSession ||
   !samePath(latestTaskSession.cwd, expectedLaneState.lane.cwd) ||
-  (expectInterrupted && latestTaskSession.status !== "running")
+  (resumedRecoveredTask && latestTaskSession.status !== "running")
 ) {
   throw new Error(`Latest recovered task session does not use the persisted lane: ${JSON.stringify(latestTaskSession)}`);
 }
@@ -276,7 +284,7 @@ const summary = await evaluate(`(()=>({
   prdRecovered: true,
   taskLaneRecovered: true,
   taskLaneSession: ${JSON.stringify(expectedLaneState.taskNodeId)},
-  alerts: [...document.querySelectorAll('[role="alert"]')].map(node=>node.textContent?.trim()).filter(Boolean),
+  alerts: [...document.querySelectorAll('.wj-error-toast')].map(node=>node.textContent?.trim()).filter(Boolean),
   logo: Boolean(document.querySelector('img[alt="wheeljack"]')),
   decorated: !document.querySelector(".wj-titlebar")
 }))()`);

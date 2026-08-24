@@ -125,11 +125,7 @@ import {
   opsDependencyPath,
   opsExecutionLane,
   opsReviewLabel,
-  opsReviewVerdict,
-  opsVerificationContractIssues,
   opsVerificationProgress,
-  opsVerificationApproval,
-  opsVerificationStaleReason,
   opsWaitingRelationships,
   opsWouldCreateDependencyCycle,
 } from "./opsPresence";
@@ -366,12 +362,12 @@ export function projectEmptyTypewriterDelays(title: string): number[] {
 }
 
 export function ProjectEmptyState({ icon, title, description, children }: { icon: React.ReactNode; title: string; description: string; children?: React.ReactNode }) {
-  const characters = Array.from(title);
+  const characters = useMemo(() => Array.from(title), [title]);
   const instantEntry = useRef(window.matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.dataset.projectEmptyInstant === "true").current;
   const [typedCharacterCount, setTypedCharacterCount] = useState(0);
   const typedCharacterCountRef = useRef(0);
   const typewriterTimersRef = useRef<number[]>([]);
-  const typewriterDelays = projectEmptyTypewriterDelays(title);
+  const typewriterDelays = useMemo(() => projectEmptyTypewriterDelays(title), [title]);
   const titleFinish = (typewriterDelays.at(-1) ?? 0) + 16;
   const detailDelay = typewriterDelays[Math.max(0, Math.ceil(characters.length * .85) - 1)] ?? 0;
   useLayoutEffect(() => {
@@ -387,7 +383,7 @@ export function ProjectEmptyState({ icon, title, description, children }: { icon
       setTypedCharacterCount(index + 1);
     }, delay));
     return () => typewriterTimersRef.current.forEach(window.clearTimeout);
-  }, [title]);
+  }, [characters.length, instantEntry, title, typewriterDelays]);
   useEffect(() => {
     const exit = () => {
       typewriterTimersRef.current.forEach(window.clearTimeout);
@@ -658,7 +654,7 @@ function ProjectMenuItems({
         </>}
       <Item disabled={disabled} onSelect={() => onCustomize(project)}><Swatch />Project settings…</Item>
       <Separator />
-      <Item disabled={disabled} variant="destructive" onSelect={() => onRemove(project)}><Trash2 />Hide project…</Item>
+      <Item disabled={disabled} variant="destructive" onSelect={() => onRemove(project)}><Trash2 />Remove from Wheeljack…</Item>
       {context && <DevToolsContextItem />}
     </>
   );
@@ -1382,8 +1378,11 @@ export function OpsSurface({
   const selectedDocument = specKind === "prd" ? documents?.documents.prd : documents?.documents.tdd;
   const documentWarnings = page === "board" ? kanban?.warnings ?? [] : page === "spec" ? selectedDocument?.warnings ?? [] : [];
   const missingDocumentCount = documents ? Object.values(documents.documents).filter((document) => !document.exists).length : 3;
-  const boardWritable = kanban?.format === "wheeljack-v1";
-  const structuredRuntimes = runtimes.filter((runtime) => runtime.structured);
+  // Plan is backed by canonical SQLite state. KANBAN.md is an optional,
+  // explicit import/export snapshot and never gates task operations.
+  const boardWritable = true;
+  const structuredRuntimes = runtimes.filter((runtime) =>
+    runtime.structured && nodes[runtime.nodeId]?.data.preserveTaskState !== true);
   const idleStructuredRuntimes = structuredRuntimes.filter((runtime) =>
     runtime.sessionId && !["running", "in_progress", "starting", "blocked", "needs_input"].includes(runtime.status));
   const activeRuntimes = structuredRuntimes.filter((runtime) => ["running", "in_progress"].includes(runtime.status));
@@ -1680,7 +1679,8 @@ export function OpsSurface({
                   {[1, 2, 3, 4].map((limit) => <DropdownMenuRadioItem key={limit} value={String(limit)}>{limit}</DropdownMenuRadioItem>)}
                 </DropdownMenuRadioGroup>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem disabled={!boardWritable} onSelect={() => onGenerateWithAgent("kanban")}>Generate with agent</DropdownMenuItem>
+                <DropdownMenuItem onSelect={onNormalizeKanban}>{kanban?.exists ? "Export KANBAN.md snapshot" : "Create KANBAN.md snapshot"}</DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onGenerateWithAgent("kanban")}>Regenerate task plan with agent</DropdownMenuItem>
                 {missingDocumentCount === 0 && <DropdownMenuItem onSelect={onBootstrapPlan}>Re-analyze project</DropdownMenuItem>}
               </DropdownMenuContent>
             </DropdownMenu>
@@ -1736,8 +1736,7 @@ export function OpsSurface({
         />
       ) : page === "board" ? (
         <>
-          {!kanban?.exists && state.cards.length > 0 && <div className="wj-inline-notice border-border bg-muted/30"><span>Legacy Plan cards are not file-backed yet.</span><Button onClick={onMigrateLegacy}>Migrate legacy Plan</Button></div>}
-          {kanban?.format === "importable" && <div className="wj-inline-notice border-border bg-muted/30"><span>KANBAN.md was imported read-only. Review its canonical wheeljack conversion before editing.</span><Button onClick={onNormalizeKanban}>Review conversion</Button></div>}
+          {kanban?.format === "importable" && state.cards.length === 0 && <div className="wj-inline-notice border-border bg-muted/30"><span>A KANBAN.md snapshot is available to import. Plan remains editable either way.</span><Button onClick={onNormalizeKanban}>Import snapshot</Button></div>}
           {composerOpen && <form className="wj-task-composer" aria-busy={taskCreationBusy} onSubmit={async (event) => {
             event.preventDefault();
             if (!boardWritable || !taskAgentAvailable || taskCreationBusy || !taskBrief.trim()) return;
@@ -1794,12 +1793,10 @@ export function OpsSurface({
                 {state.cards.length === 0 && (
                   <ProjectEmptyState
                     icon={<LayoutDashboard />}
-                    title={!kanban?.exists ? "Set up Plan" : boardWritable ? "Plan your first task" : "Plan is read-only"}
-                    description={!kanban?.exists ? "Create KANBAN.md to keep project tasks visible, editable, and local to this repository." : boardWritable ? "Turn the next outcome into a task contract, then assign it when the work is ready." : "Review the imported KANBAN.md conversion above before editing tasks."}
+                    title="Plan your first task"
+                    description="Turn the next outcome into a task contract. Wheeljack stores live task state locally and can export a KANBAN.md snapshot whenever you need one."
                   >
-                    {!kanban?.exists
-                      ? <Button onClick={() => onCreateDocument("kanban")}><Plus />Create KANBAN.md</Button>
-                      : boardWritable && <Button onClick={() => setComposerOpen(true)}><Plus />New task</Button>}
+                    <Button onClick={() => setComposerOpen(true)}><Plus />New task</Button>
                   </ProjectEmptyState>
                 )}
                 {state.cards.length > 0 && executionLanes.map((lane) => {
@@ -1991,13 +1988,13 @@ export function OpsSurface({
                                     : ["running", "attention"].includes(lane.id)
                                       ? null
                                     : cardRole === "review"
-                                      ? <Button disabled={!boardWritable} title={!boardWritable ? "Review the KANBAN.md conversion to enable card actions" : undefined} variant="ghost" size="xs" onClick={() => onReview(card)}><Search />Review evidence</Button>
+                                      ? <Button disabled={!boardWritable} variant="ghost" size="xs" onClick={() => onReview(card)}><Search />Review evidence</Button>
                                       : cardRole !== "done"
-                                        ? <Button disabled={!boardWritable || Boolean(card.taskLane?.closedAt)} title={!boardWritable ? "Review the KANBAN.md conversion to enable card actions" : undefined} variant="ghost" size="xs" onClick={() => intervene(card)}><Play />Start fresh task agent</Button>
+                                        ? <Button disabled={!boardWritable || Boolean(card.taskLane?.closedAt)} variant="ghost" size="xs" onClick={() => intervene(card)}><Play />Start fresh task agent</Button>
                                         : <span className="wj-task-complete"><CheckIcon />Complete</span>}
                                   <span className="flex-1" />
                                     {!editing && <DropdownMenu onOpenChange={(open) => { if (!open) setDeleteArmed(undefined); }}>
-                                      <DropdownMenuTrigger asChild><Button disabled={!boardWritable} title={!boardWritable ? "Review the KANBAN.md conversion to enable card actions" : undefined} aria-label={`Task actions: ${card.title}`} variant="ghost" size="icon-xs"><MoreHorizontal /></Button></DropdownMenuTrigger>
+                                      <DropdownMenuTrigger asChild><Button disabled={!boardWritable} aria-label={`Task actions: ${card.title}`} variant="ghost" size="icon-xs"><MoreHorizontal /></Button></DropdownMenuTrigger>
                                       <DropdownMenuContent className="wj-task-action-menu" align="end" sideOffset={6}>
                                         {renderTaskMenuItems(card, cardRole, childProgress)}
                                       </DropdownMenuContent>
@@ -2761,7 +2758,7 @@ export function FloorSurface({
       <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" size="xs">Choose owner<ChevronDownIcon /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{conflict.cardIds.map((cardId) => <DropdownMenuItem key={cardId} onSelect={() => arbitrate(conflict, cardId)}>Keep {cardById.get(cardId)?.title ?? cardId}</DropdownMenuItem>)}</DropdownMenuContent></DropdownMenu>
     </article>;
   };
-  const dockedInspector = dockedCard ? <section className="wj-floor-panel wj-floor-docked-inspector" aria-labelledby="floor-inspector-heading">
+  const dockedInspector = dockedCard ? <section className="wj-floor-panel wj-floor-docked-inspector" data-card-id={dockedCard.id} aria-labelledby="floor-inspector-heading">
     <header><div><span className="wj-section-label">Task evidence</span><h2 id="floor-inspector-heading" tabIndex={-1}>Inspector</h2></div><Button aria-label="Close task inspector" variant="ghost" size="icon-xs" onClick={closeInspector}><X /></Button></header>
     <div className="wj-floor-inspector-scroll">
       <section className="wj-floor-inspector-summary"><div><RunStateBadge status={opsCardDisplayStatus(dockedLane ?? "ready", dockedRuntime ? [dockedRuntime.status] : [], dockedCard.verificationRun?.status, dockedCard.paused)} variant="compact" /><small>{dockedCard.priority} priority</small></div><h3>{dockedCard.title}</h3><p>{dockedCard.detail || "No objective was recorded."}</p></section>
@@ -3929,243 +3926,6 @@ export function TranscriptDrawerSurface({
           {transcript.hasMore && <Button type="button" variant="outline" size="sm" disabled={transcript.loadingOlder} onClick={onLoadOlder}>{transcript.loadingOlder ? "Loading earlier output…" : "Load earlier output"}</Button>}
           <pre className="wj-transcript-content" tabIndex={0} aria-label={`${transcript.title} transcript`}>{transcript.text || "No transcript content was saved."}</pre>
         </ScrollArea>}
-      </SheetContent>
-    </Sheet>
-  );
-}
-
-// Kept during state migration while persisted verification runs and recovery callbacks remain supported.
-// oxlint-disable-next-line eslint(no-unused-vars)
-function LegacyReviewDrawerSurface({
-  reviewCard,
-  reviewEvidenceReady,
-  reviewEvidenceMessage,
-  evidence,
-  hasFileConflict,
-  verificationBusy,
-  onClose,
-  onReviewAction,
-  onStartReviewer,
-  onRunVerification,
-  onCancelVerification,
-  onViewVerificationOutput,
-  onRequestChanges,
-  onUpdateContract,
-}: {
-  reviewCard?: OpsCard;
-  reviewEvidenceReady: boolean;
-  reviewEvidenceMessage: string;
-  evidence?: OpsReviewEvidence;
-  hasFileConflict: boolean;
-  verificationBusy: boolean;
-  onClose: () => void;
-  onReviewAction: (approved: boolean) => Promise<void>;
-  onStartReviewer: (card: OpsCard) => Promise<boolean>;
-  onRunVerification: (card: OpsCard) => Promise<void>;
-  onCancelVerification: (card: OpsCard) => Promise<void>;
-  onViewVerificationOutput: (card: OpsCard) => Promise<void>;
-  onRequestChanges: (card: OpsCard, feedback: string) => Promise<boolean>;
-  onUpdateContract: (card: OpsCard, change: OpsTaskEditablePatch) => void;
-}) {
-  const [drawerWidth, setDrawerWidth] = useState(480);
-  const [feedback, setFeedback] = useState("");
-  const [feedbackOpen, setFeedbackOpen] = useState(false);
-  const [changesBusy, setChangesBusy] = useState(false);
-  const [changesError, setChangesError] = useState("");
-  const [reviewerBusy, setReviewerBusy] = useState(false);
-  const [reviewerError, setReviewerError] = useState("");
-  const [approvalBusy, setApprovalBusy] = useState(false);
-  const [definitionDraft, setDefinitionDraft] = useState("");
-  const [constraintsDraft, setConstraintsDraft] = useState("");
-  const [verificationDraft, setVerificationDraft] = useState("");
-  const [reviewPolicyDraft, setReviewPolicyDraft] = useState<OpsTaskContractDraft["reviewPolicy"]>("agent");
-  const verdict = reviewCard ? opsReviewVerdict(reviewCard) : undefined;
-  const contractIssues = reviewCard ? opsVerificationContractIssues(reviewCard) : [];
-  useEffect(() => {
-    setDefinitionDraft(reviewCard?.definitionOfDone ?? "");
-    setConstraintsDraft(reviewCard?.constraints ?? "");
-    setVerificationDraft(reviewCard?.verificationCommand ?? "");
-    setReviewPolicyDraft(reviewCard?.reviewPolicy ?? "agent");
-    setFeedback(verdict?.status === "changes_requested"
-      ? verdict.message
-      : ["failed", "canceled", "interrupted"].includes(reviewCard?.verificationRun?.status ?? "")
-        ? reviewCard?.verificationRun?.message ?? "Verification needs to be rerun."
-        : "");
-    setFeedbackOpen(verdict?.status === "changes_requested");
-  }, [reviewCard?.id, reviewCard?.definitionOfDone, reviewCard?.constraints, reviewCard?.verificationCommand, reviewCard?.reviewPolicy, reviewCard?.verificationRun?.status, reviewCard?.verificationRun?.message, verdict?.status, verdict?.message]);
-  const contractDirty = Boolean(reviewCard && (
-    definitionDraft !== (reviewCard.definitionOfDone ?? "")
-    || constraintsDraft !== (reviewCard.constraints ?? "")
-    || verificationDraft !== (reviewCard.verificationCommand ?? "")
-    || reviewPolicyDraft !== (reviewCard.reviewPolicy ?? "agent")
-  ));
-  const staleReason = reviewCard && reviewEvidenceReady
-    ? opsVerificationStaleReason(reviewCard, evidence?.snapshotId)
-    : undefined;
-  const approval = reviewCard
-    ? opsVerificationApproval(reviewCard, hasFileConflict, reviewEvidenceReady ? evidence?.snapshotId : undefined, "human")
-    : { ready: false };
-  const verificationStatus = staleReason
-    ? "Verification stale"
-    : reviewCard?.verificationRun?.status === "running"
-      ? "Verification running"
-      : reviewCard?.verificationRun?.status === "passed"
-        ? "Verification passed"
-        : reviewCard?.verificationRun?.status === "failed"
-          ? "Verification failed"
-          : reviewCard?.verificationRun?.status === "canceled"
-            ? "Verification canceled"
-            : reviewCard?.verificationRun?.status === "interrupted"
-              ? "Verification interrupted"
-              : "Verification not run";
-  const reviewRecommendation = contractIssues.length > 0 || hasFileConflict
-    ? "Resolve blockers"
-    : verdict?.status === "changes_requested"
-      ? "Request changes"
-      : staleReason || reviewCard?.verificationRun?.status !== "passed"
-        ? "Run verification"
-        : approval.ready
-          ? "Approve verification"
-          : "Resolve blockers";
-  const recommendationReason = reviewRecommendation === "Run verification"
-    ? staleReason ?? reviewCard?.verificationRun?.message ?? "A current passing verification run is required."
-    : reviewRecommendation === "Approve verification"
-      ? "The task contract, review evidence, repository snapshot, and verification run are current."
-      : reviewRecommendation === "Request changes"
-        ? verdict?.message ?? "The reviewer recorded changes that must be addressed."
-        : approval.reason ?? contractIssues[0] ?? (hasFileConflict ? "Resolve the claimed-file conflict before approval." : "Review evidence is incomplete.");
-  const submitReviewChanges = () => {
-    if (!reviewCard || !feedback.trim() || changesBusy || approvalBusy) return;
-    setChangesBusy(true);
-    setChangesError("");
-    void onRequestChanges(reviewCard, feedback).then((started) => {
-      if (started) {
-        setFeedback("");
-        setFeedbackOpen(false);
-      }
-    }).catch((cause) => setChangesError(cause instanceof Error ? cause.message : String(cause))).finally(() => setChangesBusy(false));
-  };
-  const recommendationActions: ActionCardAction[] = reviewCard ? [
-    {
-      id: "changes",
-      label: feedbackOpen ? "Start fresh worker" : "Request changes",
-      intent: reviewRecommendation === "Request changes" ? "primary" : "secondary",
-      disabled: feedbackOpen && !feedback.trim(),
-      pending: changesBusy,
-      onInvoke: () => feedbackOpen ? submitReviewChanges() : setFeedbackOpen(true),
-    },
-    ...(reviewRecommendation === "Run verification" ? [{
-      id: "verify",
-      label: "Run verification",
-      intent: "primary" as const,
-      disabled: verificationBusy || reviewCard.verificationRun?.status === "running" || !reviewCard.taskLane || Boolean(reviewCard.taskLane.closedAt) || !reviewCard.verificationCommand?.trim(),
-      pending: verificationBusy,
-      onInvoke: () => void onRunVerification(reviewCard),
-    }] : reviewRecommendation === "Approve verification" ? [{
-      id: "approve",
-      label: "Approve verification",
-      intent: "primary" as const,
-      disabled: !reviewEvidenceReady || !approval.ready || changesBusy || approvalBusy || verificationBusy,
-      pending: approvalBusy,
-      onInvoke: () => {
-        setApprovalBusy(true);
-        void onReviewAction(true).finally(() => setApprovalBusy(false));
-      },
-    }] : []),
-  ] : [];
-  if (reviewCard?.report) {
-    const humanAcceptance = reviewCard.reviewPolicy === "human" && reviewCard.reconciliation?.status === "needs_human";
-    return <Sheet open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <SheetContent className="wj-drawer" side="right" style={{ "--wj-drawer-width": `${drawerWidth}px` } as React.CSSProperties}>
-        <div className="wj-drawer-resizer" role="separator" tabIndex={0} aria-label="Resize task evidence" aria-orientation="vertical" aria-valuemin={320} aria-valuemax={760} aria-valuenow={drawerWidth} onPointerDown={(event) => beginHorizontalResize(event, drawerWidth, 320, 760, -1, setDrawerWidth)} />
-        <SheetHeader><SheetTitle>Task evidence</SheetTitle><SheetDescription>Worker evidence and objective-level reconciliation state.</SheetDescription></SheetHeader>
-        <ScrollArea className="wj-drawer-body"><div className="wj-drawer-review">
-          <ActionCard variant="evidence" title={reviewCard.title} summary={reviewCard.detail} source="worker report" status="completed">
-            <div className="wj-section-label">Report</div><p className="mt-2 text-sm">{reviewCard.report.summary}</p>
-            {reviewCard.report.evidence && <p className="mt-3 text-sm text-muted-foreground">{reviewCard.report.evidence}</p>}
-            {reviewCard.report.checks.length > 0 && <div className="wj-floor-inspector-checks mt-4">{reviewCard.report.checks.map((check) => <span data-passed key={check}><CheckIcon />{check}</span>)}</div>}
-            {reviewCard.report.risks.length > 0 && <div className="wj-inspector-warning mt-4"><CircleDot />{reviewCard.report.risks.join(" · ")}</div>}
-          </ActionCard>
-          <ActionCard variant="evidence" title="Reconciliation" summary={reviewCard.reconciliation?.message || "Waiting for reconciliation."} source="wheeljack core" status={reviewCard.reconciliation?.status === "integrated" ? "completed" : humanAcceptance ? "review" : "verifying"}>
-            {reviewCard.taskLane && <div className="wj-transcript-meta"><code>{reviewCard.taskLane.branch}</code><code>{reviewCard.taskLane.baseCommit.slice(0, 10)}</code><code>{reviewCard.taskLane.worktreePath}</code></div>}
-          </ActionCard>
-          <ActionCard variant="evidence" title="Repository evidence" summary={reviewEvidenceMessage} source={reviewCard.taskLane ? "task worktree" : "shared checkout"} status={reviewEvidenceReady ? "completed" : "pending"} detailLabel={evidence?.changedFiles.length ? `Show ${evidence.changedFiles.length} changed ${evidence.changedFiles.length === 1 ? "file" : "files"}` : "Show repository evidence"} details={<>{evidence?.changedFiles.map((file) => <div className="wj-file-row" key={file}><Files />{file}</div>)}{evidence?.text && <pre className="wj-diff mt-3">{evidence.text}</pre>}</>} />
-        </div></ScrollArea>
-        {humanAcceptance && <div className="wj-drawer-footer wj-review-recommendation"><ActionCard variant="recommendation" title="Explicit acceptance" status="review" recommendation="Accept or request changes" rationale="This task was configured to require a human decision." actions={[
-          { id: "changes", label: feedbackOpen ? "Start fresh worker" : "Request changes", intent: "secondary", disabled: feedbackOpen && !feedback.trim(), pending: changesBusy, onInvoke: () => feedbackOpen ? submitReviewChanges() : setFeedbackOpen(true) },
-          { id: "accept", label: "Accept and reconcile", intent: "primary", pending: approvalBusy, disabled: approvalBusy, onInvoke: () => { setApprovalBusy(true); void onReviewAction(true).finally(() => setApprovalBusy(false)); } },
-        ]}>{feedbackOpen && <div className="space-y-2"><Textarea autoFocus aria-label="Review feedback" value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="What must change?" />{changesError && <p className="text-sm text-destructive" role="alert">{changesError}</p>}</div>}</ActionCard></div>}
-      </SheetContent>
-    </Sheet>;
-  }
-  return (
-    <Sheet open={Boolean(reviewCard)} onOpenChange={(open) => {
-      if (open) return;
-      setFeedback("");
-      setChangesError("");
-      setReviewerError("");
-      onClose();
-    }}>
-      <SheetContent className="wj-drawer" side="right" style={{ "--wj-drawer-width": `${drawerWidth}px` } as React.CSSProperties}>
-        <div className="wj-drawer-resizer" role="separator" tabIndex={0} aria-label="Resize task review" aria-orientation="vertical" aria-valuemin={320} aria-valuemax={760} aria-valuenow={drawerWidth} onPointerDown={(event) => beginHorizontalResize(event, drawerWidth, 320, 760, -1, setDrawerWidth)} onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); setDrawerWidth((current) => Math.min(760, Math.max(320, current + (event.key === "ArrowLeft" ? 8 : -8)))); } }} />
-        <SheetHeader><SheetTitle>Task review</SheetTitle><SheetDescription>Inspect agent handoff and repository evidence before approval.</SheetDescription></SheetHeader>
-        <ScrollArea className="wj-drawer-body">
-          {reviewCard && (
-            <div className="wj-drawer-review">
-              <ActionCard variant="evidence" title={reviewCard.title} summary={reviewCard.detail} source="task contract" status={contractIssues.length ? "blocked" : "completed"}>
-                <div className="wj-section-label">Verification handoff</div>
-                <p className="mt-2 text-sm">{reviewCard.lastNote || "No verification handoff was reported."}</p>
-                {verdict && <div className={`wj-inspector-warning mt-4 ${verdict.status === "approved" ? "border-success/40" : ""}`}><CircleDot />{verdict.status === "approved" ? "Agent reviewer approved this task." : "Agent reviewer requested changes."}</div>}
-                {reviewCard.approvalAttempt && <div className="wj-inspector-warning mt-4"><CircleDot />{reviewCard.approvalAttempt.status === "retrying" ? "Automatic approval will retry" : "Automatic approval is blocked"}: {reviewCard.approvalAttempt.message}</div>}
-                <div className="mt-4 space-y-3">
-                  <div><Label htmlFor="review-definition">Definition of done</Label><Textarea id="review-definition" value={definitionDraft} onChange={(event) => setDefinitionDraft(event.target.value)} placeholder="Observable acceptance criteria" /></div>
-                  <div><Label htmlFor="review-constraints">Constraints</Label><Textarea id="review-constraints" value={constraintsDraft} onChange={(event) => setConstraintsDraft(event.target.value)} placeholder="Boundaries and compatibility requirements" /></div>
-                  <div><Label htmlFor="review-verification">Verification command</Label><Input className="font-mono" id="review-verification" value={verificationDraft} onChange={(event) => setVerificationDraft(event.target.value)} placeholder="bun run test" /></div>
-                  <div><Label>Review policy</Label><Select value={reviewPolicyDraft} onValueChange={(value) => setReviewPolicyDraft(value as OpsTaskContractDraft["reviewPolicy"])}><SelectTrigger aria-label="Review policy"><SelectValue /></SelectTrigger><SelectContent><ReviewPolicyOptions /></SelectContent></Select></div>
-                  {contractIssues.length > 0 && <p className="text-sm text-destructive" role="alert">{contractIssues.join(" · ")}</p>}
-                  <Button variant="outline" disabled={!contractDirty || !definitionDraft.trim() || !verificationDraft.trim()} onClick={() => onUpdateContract(reviewCard, {
-                    definitionOfDone: definitionDraft.trim(),
-                    constraints: constraintsDraft.trim(),
-                    verificationCommand: verificationDraft.trim(),
-                    reviewPolicy: reviewPolicyDraft,
-                  })}>Save contract</Button>
-                </div>
-              </ActionCard>
-              <ActionCard variant="evidence" title="Verification run" summary={verificationStatus} source="verification session" status={staleReason ? "review" : reviewCard.verificationRun?.status ?? "pending"} actions={[
-                ...(reviewCard.verificationRun?.status === "running" ? [{ id: "cancel", label: "Cancel verification", intent: "secondary" as const, disabled: verificationBusy, onInvoke: () => void onCancelVerification(reviewCard) }] : []),
-                ...(reviewCard.verificationRun?.sessionId ? [{ id: "output", label: "View verification output", intent: "secondary" as const, onInvoke: () => void onViewVerificationOutput(reviewCard) }] : []),
-              ]}>
-                {reviewCard.verificationRun && <div className="wj-transcript-meta"><code>{reviewCard.verificationRun.sessionId}</code><code>{reviewCard.verificationRun.exitCode ?? "running"}</code><code>{reviewCard.verificationRun.snapshotId?.slice(0, 12) ?? "No snapshot"}</code></div>}
-                {reviewCard.verificationRun?.message && <p className="mt-3 text-sm text-muted-foreground">{reviewCard.verificationRun.message}</p>}
-                {(!reviewCard.taskLane || reviewCard.taskLane.closedAt) && <p className="mt-3 text-xs text-muted-foreground">Shared-checkout tasks use Complete with override.</p>}
-                {reviewCard.taskLane && !reviewCard.taskLane.closedAt && !reviewCard.verificationCommand?.trim() && <p className="mt-3 text-xs text-destructive">Save a verification command above to start this run.</p>}
-              </ActionCard>
-              <ActionCard
-                variant="evidence"
-                title="Repository evidence"
-                summary={reviewEvidenceMessage}
-                source={reviewCard.taskLane ? "task worktree" : "shared checkout"}
-                status={reviewEvidenceMessage.startsWith("Loading") || reviewEvidenceMessage.startsWith("Revalidating") ? "verifying" : reviewEvidenceReady ? "completed" : "pending"}
-                detailLabel={evidence?.changedFiles.length ? `Show ${evidence.changedFiles.length} changed ${evidence.changedFiles.length === 1 ? "file" : "files"}` : "Show repository evidence"}
-                details={<>{evidence?.changedFiles.map((file) => <div className="wj-file-row" key={file}><Files />{file}</div>)}{evidence?.text && <pre className="wj-diff mt-3">{evidence.text}</pre>}</>}
-                actions={[{ id: "reviewer", label: reviewCard.reviewerId && !verdict ? "Reviewer running" : verdict ? "Send another reviewer" : "Send fresh reviewer", intent: "secondary", disabled: reviewerBusy || Boolean(reviewCard.taskLane?.closedAt) || Boolean(reviewCard.reviewerId && !verdict), pending: reviewerBusy, onInvoke: () => { setReviewerBusy(true); setReviewerError(""); void onStartReviewer(reviewCard).catch((cause) => setReviewerError(cause instanceof Error ? cause.message : String(cause))).finally(() => setReviewerBusy(false)); } }]}
-              >
-                {reviewCard.taskLane && <div className="wj-transcript-meta"><code>{evidence?.branch ?? reviewCard.taskLane.branch}</code><code>{(evidence?.baseCommit ?? reviewCard.taskLane.baseCommit).slice(0, 10)}</code><code>{evidence?.worktreePath ?? reviewCard.taskLane.worktreePath}</code></div>}
-                {reviewerError && <p className="mt-2 text-sm text-destructive" role="alert">{reviewerError}</p>}
-              </ActionCard>
-            </div>
-          )}
-        </ScrollArea>
-        {reviewCard && <div className="wj-drawer-footer wj-review-recommendation max-h-[min(440px,58vh)] overflow-y-auto"><ActionCard
-          variant="recommendation"
-          title="Recommended next step"
-          status={reviewRecommendation === "Approve verification" ? "verified" : "review"}
-          recommendation={reviewRecommendation}
-          rationale={feedbackOpen ? undefined : recommendationReason}
-          actions={recommendationActions}
-        >
-          {feedbackOpen && <div className="space-y-2"><Textarea className="max-h-40 overflow-y-auto" autoFocus aria-label="Review feedback" value={feedback} onChange={(event) => { setFeedback(event.target.value); setChangesError(""); }} placeholder="What must change before approval?" />{changesError && <p className="text-sm text-destructive" role="alert">{changesError}</p>}</div>}
-        </ActionCard></div>}
       </SheetContent>
     </Sheet>
   );

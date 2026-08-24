@@ -11,9 +11,12 @@ export function opsNextAutonomousTask(state: Pick<OpsState, "cards" | "columns" 
   const queuedColumnIds = new Set(state.columns.filter((column) => column.role === "queued").map((column) => column.id));
   const doneColumnIds = new Set(state.columns.filter((column) => column.role === "done").map((column) => column.id));
   const byId = new Map(state.cards.map((card) => [card.id, card]));
+  const objectiveIds = new Set(state.cards.flatMap((card) => card.parentId ?? []));
   const archivedIds = new Set((state.archivedCards ?? []).map((card) => card.id));
   return state.cards.find((card) =>
     queuedColumnIds.has(card.columnId)
+    && card.kind !== "objective"
+    && !objectiveIds.has(card.id)
     && !card.paused
     && !card.assigneeIds.length
     && !card.taskLane?.closedAt

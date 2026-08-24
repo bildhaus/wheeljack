@@ -773,11 +773,19 @@ fn spawn_ops_scheduler_worker(
             return;
         };
         while !shutdown.load(Ordering::SeqCst) {
-            if let Ok(leases) = tick_ops_scheduler(&db) {
-                for lease in leases {
-                    if let Ok(payload) = serde_json::to_value(&lease) {
-                        events.emit("ops:scheduler-lease", &payload);
+            match tick_ops_scheduler(&db) {
+                Ok(leases) => {
+                    for lease in leases {
+                        if let Ok(payload) = serde_json::to_value(&lease) {
+                            events.emit("ops:scheduler-lease", &payload);
+                        }
                     }
+                }
+                Err(error) => {
+                    events.emit(
+                        "ops:scheduler-error",
+                        &json!({ "message": format!("{error:#}") }),
+                    );
                 }
             }
             for _ in 0..20 {
@@ -811,6 +819,7 @@ pub struct Core {
     response_sequence: AtomicU64,
     route_approvals: Mutex<HashMap<String, RouteApproval>>,
     document_approvals: Mutex<HashMap<String, DocumentApproval>>,
+    git_mutations: Mutex<()>,
 }
 
 impl Core {
@@ -871,6 +880,7 @@ impl Core {
             response_sequence: AtomicU64::new(0),
             route_approvals: Mutex::new(HashMap::new()),
             document_approvals: Mutex::new(HashMap::new()),
+            git_mutations: Mutex::new(()),
         };
         if !core.test_mode && !core.startup_recovery.safe_mode {
             core.register_worker(spawn_ops_scheduler_worker(
@@ -1083,6 +1093,9 @@ impl Core {
                 .map_err(CommandError::failed),
             "ops_scheduler_finish" => self
                 .ops_scheduler_finish(payload)
+                .map_err(CommandError::failed),
+            "ops_scheduler_recover" => self
+                .ops_scheduler_recover(payload)
                 .map_err(CommandError::failed),
             "git_status" => self.git_status(payload).map_err(CommandError::failed),
             "git_diff" => self.git_diff(payload).map_err(CommandError::failed),
@@ -1761,7 +1774,7 @@ impl Core {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let db = self.lock_db()?;
-        let project_path: String = db
+        let _project_path: String = db
             .query_row(
                 "SELECT path FROM projects WHERE id = ?1",
                 params![project_id],
@@ -1782,76 +1795,18 @@ impl Core {
             bail!("stop active project sessions before removing this project");
         }
 
-        if !delete_from_disk {
-            db.execute(
-                "UPDATE projects SET archived_at = ?1, updated_at = ?1 WHERE id = ?2",
-                params![now(), project_id],
-            )?;
-            return Ok(json!({
-                "projectId": project_id,
-                "archived": true,
-                "deletedFromDisk": false
-            }));
+        if delete_from_disk {
+            bail!("Wheeljack no longer deletes project folders. Remove the project from Wheeljack, then delete its folder with your operating system if you still want to.");
         }
 
-        let registered_path = PathBuf::from(&project_path);
-        let registered_root = if !registered_path.exists() {
-            None
-        } else {
-            let registered_root = registered_path
-                .canonicalize()
-                .with_context(|| format!("resolve registered project root {project_path}"))?;
-            let is_home = home_dir()
-                .and_then(|home| home.canonicalize().ok())
-                .is_some_and(|home| home == registered_root);
-            if registered_root.parent().is_none() || is_home {
-                bail!("refusing to delete an unsafe project root");
-            }
-            Some(registered_root)
-        };
-
-        let tx = db.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM session_chunks_fts WHERE session_id IN (
-                 SELECT s.id FROM sessions s
-                 JOIN nodes n ON n.id = s.node_id
-                 JOIN canvases c ON c.id = n.canvas_id
-                 WHERE c.project_id = ?1
-             )",
-            params![project_id],
+        db.execute(
+            "UPDATE projects SET archived_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![now(), project_id],
         )?;
-        tx.execute(
-            "DELETE FROM session_chunks WHERE session_id IN (
-                 SELECT s.id FROM sessions s
-                 JOIN nodes n ON n.id = s.node_id
-                 JOIN canvases c ON c.id = n.canvas_id
-                 WHERE c.project_id = ?1
-             )",
-            params![project_id],
-        )?;
-        tx.execute(
-            "DELETE FROM sessions WHERE id IN (
-                 SELECT s.id FROM sessions s
-                 JOIN nodes n ON n.id = s.node_id
-                 JOIN canvases c ON c.id = n.canvas_id
-                 WHERE c.project_id = ?1
-             )",
-            params![project_id],
-        )?;
-        tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
-        if let Some(registered_root) = registered_root {
-            fs::remove_dir_all(&registered_root).with_context(|| {
-                format!(
-                    "delete registered project root {}",
-                    registered_root.display()
-                )
-            })?;
-        }
-        tx.commit()?;
         Ok(json!({
             "projectId": project_id,
-            "archived": false,
-            "deletedFromDisk": true
+            "archived": true,
+            "deletedFromDisk": false
         }))
     }
 
@@ -1979,6 +1934,15 @@ impl Core {
         Ok(Value::Null)
     }
 
+    fn ops_scheduler_recover(&self, payload: Value) -> Result<Value> {
+        let lease_id = required_str(&payload, "leaseId")?;
+        let state = required_str(&payload, "state")?;
+        let db = self.lock_db()?;
+        Ok(serde_json::to_value(recover_ops_lease(
+            &db, lease_id, state,
+        )?)?)
+    }
+
     fn git_status(&self, payload: Value) -> Result<Value> {
         let path = required_str(&payload, "path")?;
         let include_worktrees = payload
@@ -1999,6 +1963,10 @@ impl Core {
     }
 
     fn git_worktree_create(&self, payload: Value) -> Result<Value> {
+        let _git_guard = self
+            .git_mutations
+            .lock()
+            .map_err(|_| anyhow!("Git operation lock is poisoned"))?;
         let req =
             serde_json::from_value::<GitWorktreeCreateRequest>(unwrap_payload(payload, "req"))?;
         let project_path = normalize_command_cwd(
@@ -2093,6 +2061,10 @@ impl Core {
     }
 
     fn git_worktree_remove(&self, payload: Value) -> Result<Value> {
+        let _git_guard = self
+            .git_mutations
+            .lock()
+            .map_err(|_| anyhow!("Git operation lock is poisoned"))?;
         let req =
             serde_json::from_value::<GitWorktreeRemoveRequest>(unwrap_payload(payload, "req"))?;
         let project_path = normalize_command_cwd(
@@ -2131,6 +2103,10 @@ impl Core {
     }
 
     fn git_worktree_integrate(&self, payload: Value) -> Result<Value> {
+        let _git_guard = self
+            .git_mutations
+            .lock()
+            .map_err(|_| anyhow!("Git operation lock is poisoned"))?;
         let req =
             serde_json::from_value::<GitWorktreeIntegrateRequest>(unwrap_payload(payload, "req"))?;
         let project_path = normalize_command_cwd(
@@ -2693,6 +2669,7 @@ impl Core {
             bail!("project was not found");
         }
 
+        let scheduler_config = load_ops_scheduler_config(&db, project_id)?;
         let canvas_ids = db
             .prepare("SELECT id FROM canvases WHERE project_id = ?1")?
             .query_map(params![project_id], |row| row.get::<_, String>(0))?
@@ -2735,6 +2712,17 @@ impl Core {
             ],
         )?;
         tx.commit()?;
+        if let Some(config) = scheduler_config {
+            configure_ops_scheduler(
+                &db,
+                project_id,
+                &canvas_id,
+                config.enabled,
+                config.paused,
+                config.concurrency_limit,
+                config.adapter_id.as_deref(),
+            )?;
+        }
         Ok(serde_json::to_value(load_canvas(&db, &canvas_id)?)?)
     }
 
@@ -2759,7 +2747,36 @@ impl Core {
         if canvas_count <= 1 {
             bail!("keep at least one canvas");
         }
+        let scheduler_config = load_ops_scheduler_config(&db, &project_id)?;
+        let replacement_canvas_id = if scheduler_config
+            .as_ref()
+            .is_some_and(|config| config.canvas_id == canvas_id)
+        {
+            db.query_row(
+                "SELECT id FROM canvases
+                 WHERE project_id = ?1 AND id <> ?2
+                 ORDER BY sort_index, created_at LIMIT 1",
+                params![project_id, canvas_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
         let tx = db.transaction()?;
+        if let (Some(config), Some(replacement_canvas_id)) =
+            (scheduler_config.as_ref(), replacement_canvas_id.as_deref())
+        {
+            configure_ops_scheduler(
+                &tx,
+                &project_id,
+                replacement_canvas_id,
+                config.enabled,
+                config.paused,
+                config.concurrency_limit,
+                config.adapter_id.as_deref(),
+            )?;
+        }
         tx.execute("DELETE FROM edges WHERE canvas_id = ?1", params![canvas_id])?;
         tx.execute("DELETE FROM nodes WHERE canvas_id = ?1", params![canvas_id])?;
         let deleted = tx.execute("DELETE FROM canvases WHERE id = ?1", params![canvas_id])?;

@@ -16,6 +16,7 @@ fn coordination_board_ensure_creates_files_and_appends_agent_event() {
                 "callsigns": ["Atlas", "bad/name"],
                 "agentEvent": {
                     "callsign": "Atlas",
+                    "runId": "run-42",
                     "task": "Fix terminal routing",
                     "expectedFiles": ["src/terminal/TerminalNode.tsx", " "],
                     "note": " queued by app "
@@ -39,6 +40,7 @@ fn coordination_board_ensure_creates_files_and_appends_agent_event() {
     let event = serde_json::from_str::<Value>(line).unwrap();
     assert_eq!(event["source"], "wheeljack");
     assert_eq!(event["callsign"], "Atlas");
+    assert_eq!(event["runId"], "run-42");
     assert_eq!(event["status"], "queued");
     assert_eq!(event["task"], "Fix terminal routing");
     assert_eq!(event["expectedFiles"][0], "src/terminal/TerminalNode.tsx");
