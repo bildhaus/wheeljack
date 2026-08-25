@@ -102,10 +102,11 @@ use db::{
 };
 use dto::*;
 use git::{
-    ensure_safe_branch_name, git_command, hidden_command, integrate_git_worktree, is_git_repo,
-    paths_equivalent, read_git_diff, read_git_head, read_git_status, read_worktree_snapshot,
-    read_worktrees, removable_missing_worktree, removable_worktree, resolve_git_worktree_context,
-    resolve_new_worktree_path, run_git_worktree_add, run_git_worktree_remove, validate_full_commit,
+    cleanup_git_task_workspaces, ensure_safe_branch_name, git_command, hidden_command,
+    integrate_git_worktree, is_git_repo, paths_equivalent, read_git_diff, read_git_head,
+    read_git_status, read_worktree_snapshot, read_worktrees, removable_missing_worktree,
+    removable_worktree, resolve_git_worktree_context, resolve_new_worktree_path,
+    run_git_worktree_add, run_git_worktree_remove, validate_full_commit,
 };
 use intent::{
     build_orchestrator_harness_prompt, detect_local_preview_urls, json_object_without_nulls,
@@ -1147,6 +1148,9 @@ impl Core {
             "git_worktree_remove" => self
                 .git_worktree_remove(payload)
                 .map_err(CommandError::failed),
+            "git_task_workspaces_cleanup" => self
+                .git_task_workspaces_cleanup(payload)
+                .map_err(CommandError::failed),
             "coordination_board_ensure" => self
                 .coordination_board_ensure(payload)
                 .map_err(CommandError::failed),
@@ -2144,6 +2148,52 @@ impl Core {
             removed_path,
             status: read_git_status(&repo_path, true),
         })?)
+    }
+
+    fn git_task_workspaces_cleanup(&self, payload: Value) -> Result<Value> {
+        let req = serde_json::from_value::<GitTaskWorkspacesCleanupRequest>(unwrap_payload(
+            payload, "req",
+        ))?;
+        let project_path = normalize_command_cwd(
+            expand_home_path(req.project_path.trim())
+                .canonicalize()
+                .map_err(|_| anyhow!("Project path does not exist."))?,
+        );
+        if !is_git_repo(&project_path) {
+            bail!("Project path is not a git repository.");
+        }
+        let (repo_path, _) = resolve_git_worktree_context(&project_path)?;
+        let mut protected_paths = req
+            .protected_paths
+            .iter()
+            .map(|path| normalize_command_cwd(expand_home_path(path.trim())))
+            .collect::<Vec<_>>();
+        {
+            let db = self
+                .db
+                .lock()
+                .map_err(|_| anyhow!("Database lock is poisoned"))?;
+            let mut statement = db.prepare(
+                "SELECT DISTINCT cwd FROM sessions
+                 WHERE status NOT IN ('completed', 'failed', 'disconnected', 'canceled', 'exited')",
+            )?;
+            let live_paths = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            protected_paths.extend(
+                live_paths
+                    .into_iter()
+                    .map(|path| normalize_command_cwd(expand_home_path(path.trim()))),
+            );
+        }
+        let _git_guard = self
+            .git_mutations
+            .lock()
+            .map_err(|_| anyhow!("Git operation lock is poisoned"))?;
+        Ok(serde_json::to_value(cleanup_git_task_workspaces(
+            &repo_path,
+            &protected_paths,
+        )?)?)
     }
 
     fn git_worktree_integrate(&self, payload: Value) -> Result<Value> {

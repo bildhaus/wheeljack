@@ -298,6 +298,19 @@ export interface GitWorktreeCreateResult {
   baseCommit: string;
 }
 
+export interface GitTaskWorkspacePreserved {
+  path: string;
+  reason: string;
+  retryable: boolean;
+}
+
+export interface GitTaskWorkspacesCleanupResult {
+  removedWorktrees: string[];
+  removedResidualDirectories: string[];
+  preserved: GitTaskWorkspacePreserved[];
+  status: GitStatus;
+}
+
 export interface GitWorktreeReview {
   branch: string;
   baseCommit: string;

@@ -409,6 +409,133 @@ fn git_worktree_remove_only_drops_the_requested_stale_registration() {
 }
 
 #[test]
+fn git_task_workspace_cleanup_removes_only_merged_unowned_workspaces() {
+    let repo = committed_repo("git-task-workspace-cleanup");
+    fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+    run_git(&repo, ["add", ".gitignore"]).unwrap();
+    run_git(&repo, ["commit", "-m", "ignore generated files"]).unwrap();
+    let parent = repo.parent().unwrap();
+    let repo_name = repo.file_name().unwrap().to_string_lossy();
+    let task_path = |suffix: &str| parent.join(format!("{repo_name}-wheeljack-task-{suffix}"));
+    let task_branch = |suffix: &str| format!("wheeljack/task-{suffix}");
+    let removable_suffix = "11111111111111111111";
+    let protected_suffix = "22222222222222222222";
+    let residual_suffix = "33333333333333333333";
+    let unique_suffix = "44444444444444444444";
+    let removable = task_path(removable_suffix);
+    let protected = task_path(protected_suffix);
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-b",
+            &task_branch(removable_suffix),
+            removable.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+    run_git(
+        &repo,
+        [
+            "worktree",
+            "add",
+            "-b",
+            &task_branch(protected_suffix),
+            protected.to_str().unwrap(),
+        ],
+    )
+    .unwrap();
+
+    let residual = task_path(residual_suffix);
+    let unique = task_path(unique_suffix);
+    run_git(&repo, ["branch", &task_branch(residual_suffix)]).unwrap();
+    run_git(&repo, ["branch", &task_branch(unique_suffix)]).unwrap();
+    fs::create_dir_all(residual.join("target")).unwrap();
+    fs::write(
+        residual.join("README.md"),
+        fs::read(repo.join("README.md")).unwrap(),
+    )
+    .unwrap();
+    fs::write(residual.join("target").join("cache.bin"), "generated").unwrap();
+    fs::create_dir_all(&unique).unwrap();
+    fs::write(unique.join("README.md"), "unique local work").unwrap();
+    fs::write(unique.join(".gitignore"), "target/\n").unwrap();
+
+    let core = Core::new(
+        test_init("git-task-workspace-cleanup-core"),
+        Arc::new(NullEventSink),
+    )
+    .unwrap();
+    let response: Value = serde_json::from_str(
+        &core.call_json(
+            &json!({
+                "id": "cleanup-task-workspaces",
+                "command": "git_task_workspaces_cleanup",
+                "payload": {
+                    "projectPath": repo,
+                    "protectedPaths": [protected.join("nested-agent-cwd")]
+                }
+            })
+            .to_string(),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(response["ok"], true, "{response:#}");
+    assert!(!removable.exists());
+    assert!(protected.exists());
+    assert!(!residual.exists());
+    assert!(unique.exists());
+    assert_eq!(
+        response["payload"]["removedWorktrees"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        response["payload"]["removedResidualDirectories"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(response["payload"]["preserved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["path"]
+            .as_str()
+            .is_some_and(|path| paths_equivalent(Path::new(path), &protected))));
+    assert!(response["payload"]["preserved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["path"]
+            .as_str()
+            .is_some_and(|path| paths_equivalent(Path::new(path), &unique))));
+    for suffix in [
+        removable_suffix,
+        protected_suffix,
+        residual_suffix,
+        unique_suffix,
+    ] {
+        assert!(git_succeeds(
+            &repo,
+            [
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{}", task_branch(suffix))
+            ]
+        ));
+    }
+
+    run_git_worktree_remove(&repo, &protected).unwrap();
+    fs::remove_dir_all(&unique).unwrap();
+}
+
+#[test]
 fn git_task_worktree_uses_repo_root_nested_cwd_and_source_head() {
     let repo = committed_repo("git-task-nested");
     let nested = repo.join("apps").join("desktop");

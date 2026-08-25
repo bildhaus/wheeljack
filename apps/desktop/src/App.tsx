@@ -224,6 +224,7 @@ import type {
   CoordinationEvents,
   GitDiff,
   GitStatus,
+  GitTaskWorkspacesCleanupResult,
   GitWorktreeCreateResult,
   GitWorktreeIntegrate,
   GitWorktreeReview,
@@ -517,6 +518,7 @@ export function App() {
   const [reviewEvidenceMessage, setReviewEvidenceMessage] = useState("");
   const [reviewEvidence, setReviewEvidence] = useState<OpsReviewEvidence>();
   const [cleanupRetryVersion, setCleanupRetryVersion] = useState(0);
+  const [taskWorkspaceSweepVersion, setTaskWorkspaceSweepVersion] = useState(0);
   const [reconciliationRetryVersion, setReconciliationRetryVersion] = useState(0);
   const [removeProject, setRemoveProject] = useState<Project>();
   const [customizeProject, setCustomizeProject] = useState<Project>();
@@ -566,6 +568,9 @@ export function App() {
   const agentControlHandlerRef = useRef<((runtime: PaneRuntime, request: AgentControlRequest) => Promise<void>) | undefined>(undefined);
   const handledAgentControlIdsRef = useRef(new Set<string>());
   const taskLaneCleanupIdsRef = useRef(new Set<string>());
+  const taskWorkspaceSweepPendingRef = useRef(new Set<string>());
+  const taskWorkspaceSweepCompletedRef = useRef(new Set<string>());
+  const taskWorkspaceSweepAttemptsRef = useRef(new Map<string, number>());
   const layoutViewportRef = useRef<LayoutViewport>({ width: 0, height: 0 });
   const stageRef = useRef<HTMLDivElement>(null);
   const preferencesRef = useRef<UiPreferences>(defaultUiPreferences);
@@ -1298,6 +1303,8 @@ export function App() {
     setActivatingProjectId(nextProject.id);
     setBusy(true);
     setError("");
+    taskWorkspaceSweepCompletedRef.current.delete(nextProject.id);
+    taskWorkspaceSweepAttemptsRef.current.delete(nextProject.id);
     try {
       if (projectRef.current && projectRef.current.id !== nextProject.id) {
         await flushPendingSavesRef.current();
@@ -1325,6 +1332,7 @@ export function App() {
           ?? projectCanvases[0],
       );
       await Promise.all([refreshProjectData(nextProject), refreshProjectDocuments(nextProject, true)]);
+      setTaskWorkspaceSweepVersion((current) => current + 1);
       return true;
     } catch (cause) {
       setError(message(cause));
@@ -5239,7 +5247,12 @@ export function App() {
     await setTaskLaneCleanupStatus(cardId, "queued", detail, retryAt, attempts);
   };
 
-  const finalizeTaskLaneCleanup = async (card: OpsCard, registered: boolean, projectId: string) => {
+  const finalizeTaskLaneCleanup = async (
+    card: OpsCard,
+    registered: boolean,
+    projectId: string,
+    removedByProjectSweep = false,
+  ) => {
     const currentCard = opsStateRef.current.cards.find((candidate) => candidate.id === card.id);
     const lane = currentCard?.taskLane;
     const cleanup = lane?.cleanup;
@@ -5260,7 +5273,9 @@ export function App() {
     const timestamp = new Date().toISOString();
     const note = registered
       ? `Removed task worktree; branch ${lane.branch} was preserved.`
-      : `Detached stale task lane ${lane.branch}; its unregistered path was left untouched.`;
+      : removedByProjectSweep
+        ? `Removed residual task workspace; branch ${lane.branch} was preserved.`
+        : `Detached stale task lane ${lane.branch}; its unregistered path was left untouched.`;
     const { archiveDoneOpsCards } = cleanup.action === "archive" ? await import("./opsArchive") : { archiveDoneOpsCards: undefined };
     await persistOpsImmediately((current) => {
       const closed = {
@@ -5286,6 +5301,71 @@ export function App() {
     }, true);
     if (nextGit) setGit(nextGit);
   };
+
+  useEffect(() => {
+    const activeProject = projectRef.current;
+    if (!startupReady || safeStartupActive || !activeProject || canvas?.projectId !== activeProject.id) return;
+    if (!opsRevisionByProjectRef.current.has(activeProject.id)
+      || taskWorkspaceSweepPendingRef.current.has(activeProject.id)
+      || taskWorkspaceSweepCompletedRef.current.has(activeProject.id)) return;
+    const projectId = activeProject.id;
+    const projectPath = activeProject.path;
+    const attempts = (taskWorkspaceSweepAttemptsRef.current.get(projectId) ?? 0) + 1;
+    taskWorkspaceSweepAttemptsRef.current.set(projectId, attempts);
+    taskWorkspaceSweepPendingRef.current.add(projectId);
+    const protectedPaths = [...opsState.cards, ...(opsState.archivedCards ?? [])]
+      .flatMap((card) => card.taskLane && !card.taskLane.closedAt && !card.taskLane.cleanup
+        ? [card.taskLane.worktreePath]
+        : []);
+    void callCore<GitTaskWorkspacesCleanupResult>("git_task_workspaces_cleanup", {
+      req: { projectPath, protectedPaths },
+    }).then(async (result) => {
+      if (projectRef.current?.id !== projectId) return;
+      setGit(result.status);
+      const removedPaths = [...result.removedWorktrees, ...result.removedResidualDirectories];
+      for (const card of opsStateRef.current.cards) {
+        if (!card.taskLane?.cleanup) continue;
+        const removed = removedPaths.some((path) =>
+          workspacePathsEqual(path, card.taskLane!.worktreePath));
+        const registered = result.status.worktrees.some((worktree) =>
+          workspacePathsEqual(worktree.path, card.taskLane!.worktreePath));
+        const pathExists = removed || registered
+          ? true
+          : (await callCore<GitStatus>("git_status", {
+              path: card.taskLane.worktreePath,
+              includeWorktrees: false,
+            })).pathExists;
+        if (removed || (!registered && !pathExists)) {
+          await finalizeTaskLaneCleanup(card, false, projectId, true);
+        }
+      }
+      const retryable = result.preserved.some((item) => item.retryable);
+      if (!retryable || attempts >= 6) {
+        taskWorkspaceSweepCompletedRef.current.add(projectId);
+        return;
+      }
+      window.setTimeout(() => {
+        if (projectRef.current?.id === projectId) {
+          setCleanupRetryVersion((current) => current + 1);
+        }
+      }, Math.min(60_000, 1_000 * 2 ** (attempts - 1)));
+    }).catch((cause) => {
+      if (projectRef.current?.id !== projectId || attempts >= 6) {
+        taskWorkspaceSweepCompletedRef.current.add(projectId);
+        if (projectRef.current?.id === projectId) {
+          setError(`Could not reconcile task workspaces: ${message(cause)}`);
+        }
+        return;
+      }
+      window.setTimeout(() => {
+        if (projectRef.current?.id === projectId) {
+          setCleanupRetryVersion((current) => current + 1);
+        }
+      }, Math.min(60_000, 1_000 * 2 ** (attempts - 1)));
+    }).finally(() => taskWorkspaceSweepPendingRef.current.delete(projectId));
+    // Project task workspaces reconcile once after durable Ops state loads, with bounded retries.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvas?.projectId, cleanupRetryVersion, safeStartupActive, startupReady, taskWorkspaceSweepVersion]);
 
   useEffect(() => {
     const doneColumnIds = new Set(opsState.columns.filter((column) => column.role === "done").map((column) => column.id));

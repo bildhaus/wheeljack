@@ -639,6 +639,19 @@ test("orders isolated task setup before spawn and keeps review evidence separate
   expect(spawnSource).toContain("autoCloseTaskAgent: Boolean(opsTask)");
 });
 
+test("reconciles project task workspaces without dispatching a cleanup agent", () => {
+  const sweepSource = appSource.slice(
+    appSource.indexOf("taskWorkspaceSweepPendingRef.current.add"),
+    appSource.indexOf("useEffect(() => {", appSource.indexOf("taskWorkspaceSweepPendingRef.current.add")),
+  );
+  expect(sweepSource).toContain('"git_task_workspaces_cleanup"');
+  expect(sweepSource).toContain("...(opsState.archivedCards ?? [])");
+  expect(sweepSource).toContain("!card.taskLane.cleanup");
+  expect(sweepSource).toContain("finalizeTaskLaneCleanup(card, false, projectId, true)");
+  expect(sweepSource).not.toContain("startAgentForOpsTask");
+  expect(sweepSource).not.toContain("spawnAgent");
+});
+
 test("makes Floor the evidence-only Plan default and combines PRD/TDD under Spec", () => {
   const floorSource = paritySource.slice(
     paritySource.indexOf("function FloorSurface"),

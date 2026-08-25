@@ -729,14 +729,330 @@ pub(crate) fn run_git_worktree_remove(repo_path: &Path, target_path: &Path) -> R
             .arg(target_path)
             .output()?;
         if output.status.success() {
+            if target_path.exists() {
+                remove_directory_with_retries(target_path)?;
+            }
             return Ok(());
         }
         last_detail = command_output_detail(&output);
+        if find_missing_worktree_registration(repo_path, target_path)?.is_none() {
+            if target_path.exists() {
+                remove_directory_with_retries(target_path)?;
+            }
+            return Ok(());
+        }
         if attempt < 4 {
             thread::sleep(Duration::from_millis(150 * (attempt + 1)));
         }
     }
     bail!("git worktree remove failed after retries: {last_detail}");
+}
+
+pub(crate) fn cleanup_git_task_workspaces(
+    repo_path: &Path,
+    protected_paths: &[PathBuf],
+) -> Result<GitTaskWorkspacesCleanupResult> {
+    let parent = repo_path
+        .parent()
+        .ok_or_else(|| anyhow!("Project repository has no parent directory."))?;
+    let repo_name = repo_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow!("Project repository name is not valid UTF-8."))?;
+    let task_prefix = format!("{repo_name}-wheeljack-task-");
+    let mut result = GitTaskWorkspacesCleanupResult {
+        removed_worktrees: Vec::new(),
+        removed_residual_directories: Vec::new(),
+        preserved: Vec::new(),
+        status: read_git_status(repo_path, true),
+    };
+
+    for worktree in read_worktrees(repo_path) {
+        let path = PathBuf::from(&worktree.path);
+        let Some(suffix) = task_workspace_suffix(&path, parent, &task_prefix) else {
+            continue;
+        };
+        let expected_branch = format!("wheeljack/task-{suffix}");
+        if worktree.bare || worktree.detached || worktree.branch != expected_branch {
+            continue;
+        }
+        if protected_paths
+            .iter()
+            .any(|protected| workspace_path_is_protected(&path, protected))
+        {
+            result.preserved.push(GitTaskWorkspacePreservedDto {
+                path: worktree.path,
+                reason: "Task workspace is still owned by an open task or live session."
+                    .to_string(),
+                retryable: false,
+            });
+            continue;
+        }
+        if worktree.dirty {
+            result.preserved.push(GitTaskWorkspacePreservedDto {
+                path: worktree.path,
+                reason: "Task workspace has local changes that are not preserved by its branch."
+                    .to_string(),
+                retryable: false,
+            });
+            continue;
+        }
+        if !branch_is_merged_into_head(repo_path, &expected_branch)? {
+            result.preserved.push(GitTaskWorkspacePreservedDto {
+                path: worktree.path,
+                reason: "Task branch is not integrated into the opened project branch.".to_string(),
+                retryable: false,
+            });
+            continue;
+        }
+        match run_git_worktree_remove(repo_path, &path) {
+            Ok(()) => result
+                .removed_worktrees
+                .push(path.to_string_lossy().to_string()),
+            Err(error) => result.preserved.push(GitTaskWorkspacePreservedDto {
+                path: path.to_string_lossy().to_string(),
+                reason: format!("Could not finish removing the task workspace: {error:#}"),
+                retryable: true,
+            }),
+        }
+    }
+
+    let registered = read_worktrees(repo_path)
+        .into_iter()
+        .map(|worktree| PathBuf::from(worktree.path))
+        .collect::<Vec<_>>();
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(suffix) = task_workspace_suffix(&path, parent, &task_prefix) else {
+            continue;
+        };
+        if registered
+            .iter()
+            .any(|registered_path| paths_equivalent(registered_path, &path))
+            || protected_paths
+                .iter()
+                .any(|protected| workspace_path_is_protected(&path, protected))
+            || path.join(".git").exists()
+        {
+            continue;
+        }
+        let branch = format!("wheeljack/task-{suffix}");
+        if !branch_exists(repo_path, &branch)? {
+            result.preserved.push(GitTaskWorkspacePreservedDto {
+                path: path.to_string_lossy().to_string(),
+                reason: "No matching preserved Wheeljack task branch exists.".to_string(),
+                retryable: false,
+            });
+            continue;
+        }
+        if !branch_is_merged_into_head(repo_path, &branch)? {
+            result.preserved.push(GitTaskWorkspacePreservedDto {
+                path: path.to_string_lossy().to_string(),
+                reason: "Task branch is not integrated into the opened project branch.".to_string(),
+                retryable: false,
+            });
+            continue;
+        }
+        match directory_has_unique_task_work(repo_path, &path, &branch) {
+            Ok(true) => result.preserved.push(GitTaskWorkspacePreservedDto {
+                path: path.to_string_lossy().to_string(),
+                reason:
+                    "Residual task directory contains work that is not preserved by its branch."
+                        .to_string(),
+                retryable: false,
+            }),
+            Ok(false) => match remove_directory_with_retries(&path) {
+                Ok(()) => result
+                    .removed_residual_directories
+                    .push(path.to_string_lossy().to_string()),
+                Err(error) => result.preserved.push(GitTaskWorkspacePreservedDto {
+                    path: path.to_string_lossy().to_string(),
+                    reason: format!("Could not finish removing the residual directory: {error:#}"),
+                    retryable: true,
+                }),
+            },
+            Err(error) => result.preserved.push(GitTaskWorkspacePreservedDto {
+                path: path.to_string_lossy().to_string(),
+                reason: format!("Could not verify the residual task directory: {error:#}"),
+                retryable: true,
+            }),
+        }
+    }
+    result.status = read_git_status(repo_path, true);
+    Ok(result)
+}
+
+fn workspace_path_is_protected(workspace_path: &Path, protected_path: &Path) -> bool {
+    protected_path
+        .ancestors()
+        .any(|candidate| paths_equivalent(candidate, workspace_path))
+}
+
+fn task_workspace_suffix(path: &Path, parent: &Path, prefix: &str) -> Option<String> {
+    if path
+        .parent()
+        .is_none_or(|candidate| !paths_equivalent(candidate, parent))
+    {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    let suffix = name.strip_prefix(prefix)?;
+    (suffix.len() == 20 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| suffix.to_ascii_lowercase())
+}
+
+fn branch_exists(repo_path: &Path, branch: &str) -> Result<bool> {
+    let output = git_command()
+        .arg("-C")
+        .arg(repo_path)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}^{{commit}}"),
+        ])
+        .output()?;
+    Ok(output.status.success())
+}
+
+fn branch_is_merged_into_head(repo_path: &Path, branch: &str) -> Result<bool> {
+    let output = git_command()
+        .arg("-C")
+        .arg(repo_path)
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &format!("refs/heads/{branch}"),
+            "HEAD",
+        ])
+        .output()?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "Could not verify whether {branch} is integrated: {}",
+            command_output_detail(&output)
+        ),
+    }
+}
+
+fn directory_has_unique_task_work(repo_path: &Path, path: &Path, branch: &str) -> Result<bool> {
+    let index_path =
+        env::temp_dir().join(format!("wheeljack-task-cleanup-index-{}", Uuid::now_v7()));
+    let result = (|| -> Result<bool> {
+        let read_tree = git_command()
+            .env("GIT_INDEX_FILE", &index_path)
+            .arg("-C")
+            .arg(repo_path)
+            .args(["read-tree", &format!("refs/heads/{branch}")])
+            .output()?;
+        if !read_tree.status.success() {
+            bail!(
+                "Could not read the preserved task branch: {}",
+                command_output_detail(&read_tree)
+            );
+        }
+        let _ = git_command()
+            .env("GIT_INDEX_FILE", &index_path)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("--work-tree")
+            .arg(path)
+            .args(["update-index", "--refresh"])
+            .output()?;
+        let tracked = git_command()
+            .env("GIT_INDEX_FILE", &index_path)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("--work-tree")
+            .arg(path)
+            .args([
+                "diff-files",
+                "--name-only",
+                "--diff-filter=d",
+                "--ignore-submodules",
+            ])
+            .output()?;
+        if !tracked.status.success() {
+            bail!(
+                "Could not inspect residual tracked files: {}",
+                command_output_detail(&tracked)
+            );
+        }
+        if !String::from_utf8_lossy(&tracked.stdout).trim().is_empty() {
+            return Ok(true);
+        }
+        let mut untracked_command = git_command();
+        untracked_command
+            .env("GIT_INDEX_FILE", &index_path)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("--work-tree")
+            .arg(path)
+            .args(["ls-files", "--others", "--exclude-standard"]);
+        let root_ignore = repo_path.join(".gitignore");
+        if root_ignore.is_file() {
+            untracked_command.arg(format!("--exclude-from={}", root_ignore.display()));
+        }
+        let untracked = untracked_command.output()?;
+        if !untracked.status.success() {
+            bail!(
+                "Could not inspect residual untracked files: {}",
+                command_output_detail(&untracked)
+            );
+        }
+        Ok(!String::from_utf8_lossy(&untracked.stdout).trim().is_empty())
+    })();
+    let _ = fs::remove_file(index_path);
+    result
+}
+
+fn remove_directory_with_retries(path: &Path) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+        #[cfg(windows)]
+        clear_readonly_recursively(path);
+        if attempt < 4 {
+            thread::sleep(Duration::from_millis(200 * (attempt + 1)));
+        }
+    }
+    Err(last_error
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow!("directory still exists")))
+    .with_context(|| format!("remove directory {}", path.display()))
+}
+
+#[cfg(windows)]
+#[allow(clippy::permissions_set_readonly_false)]
+fn clear_readonly_recursively(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+    if metadata.is_dir() {
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                clear_readonly_recursively(&entry.path());
+            }
+        }
+    }
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        let _ = fs::set_permissions(path, permissions);
+    }
 }
 
 pub(crate) fn integrate_git_worktree(

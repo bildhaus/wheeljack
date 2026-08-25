@@ -809,6 +809,31 @@ pub struct GitWorktreeRemoveResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitTaskWorkspacesCleanupRequest {
+    pub project_path: String,
+    #[serde(default)]
+    pub protected_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitTaskWorkspacePreservedDto {
+    pub path: String,
+    pub reason: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitTaskWorkspacesCleanupResult {
+    pub removed_worktrees: Vec<String>,
+    pub removed_residual_directories: Vec<String>,
+    pub preserved: Vec<GitTaskWorkspacePreservedDto>,
+    pub status: GitStatusDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CoordinationBoardEnsureRequest {
     pub cwd: String,
     pub board_id: String,
