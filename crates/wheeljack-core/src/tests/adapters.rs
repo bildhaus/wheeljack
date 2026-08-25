@@ -199,6 +199,30 @@ fn adapter_list_save_and_detect_roundtrip() {
 }
 
 #[test]
+fn production_profile_rejects_the_ui_smoke_fixture() {
+    let mut init = test_init("production-rejects-ui-fixture");
+    init.test_mode = false;
+    let core = Core::new(init, Arc::new(NullEventSink)).unwrap();
+    let manifest = adapter_json(
+        "wheeljack-ui-fixture",
+        "wheeljack UI fixture",
+        "powershell",
+        "powershell",
+        "stdin",
+    );
+    let response: Value = serde_json::from_str(&core.call_json(
+        &json!({ "id": "save", "command": "adapter_save", "payload": manifest }).to_string(),
+    ))
+    .unwrap();
+
+    assert_eq!(response["ok"], false);
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("isolated test profile"));
+}
+
+#[test]
 fn adapter_probe_reports_missing_without_launching() {
     let core = Core::new(test_init("adapter-probe-missing"), Arc::new(NullEventSink)).unwrap();
     let manifest = adapter_json(

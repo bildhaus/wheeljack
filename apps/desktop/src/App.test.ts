@@ -988,7 +988,7 @@ test("holds unverified legacy review cards for explicit recovery", () => {
   expect(state.cards[0].reconciliation?.reason).toBeUndefined();
 });
 
-test("migrates verified and approved legacy review cards into reconciliation", () => {
+test("holds verified and approved legacy review cards for one project recovery pass", () => {
   const state = parseOpsState({
     version: 2,
     columns: [
@@ -999,6 +999,9 @@ test("migrates verified and approved legacy review cards into reconciliation", (
       id: "legacy-approved",
       title: "Legacy approved",
       columnId: "review",
+      assignee: "Atlas",
+      assigneeIds: ["node-old"],
+      agentStatuses: { "node-old": "disconnected" },
       verificationRun: {
         sessionId: "verification",
         command: "bun run test",
@@ -1020,7 +1023,15 @@ test("migrates verified and approved legacy review cards into reconciliation", (
     }],
   });
 
-  expect(state.cards[0].reconciliation?.status).toBe("queued");
+  expect(state.cards[0].reconciliation).toMatchObject({
+    status: "awaiting_repair",
+    reason: "legacy_recovery",
+  });
+  expect(state.cards[0]).toMatchObject({
+    assignee: "Unassigned",
+    assigneeIds: [],
+    agentStatuses: {},
+  });
 });
 
 test("recovers interrupted reconciliation as a safe retry", () => {

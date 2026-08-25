@@ -21,6 +21,7 @@ export interface CoreStatus {
   version: string;
   appDataDir: string;
   updateDir: string;
+  testMode: boolean;
   recoveredSessions: number;
   migrated: boolean;
   startupRecovery: StartupRecoveryState;
@@ -297,6 +298,19 @@ export interface GitWorktreeCreateResult {
   baseCommit: string;
 }
 
+export interface GitTaskWorkspacePreserved {
+  path: string;
+  reason: string;
+  retryable: boolean;
+}
+
+export interface GitTaskWorkspacesCleanupResult {
+  removedWorktrees: string[];
+  removedResidualDirectories: string[];
+  preserved: GitTaskWorkspacePreserved[];
+  status: GitStatus;
+}
+
 export interface GitWorktreeReview {
   branch: string;
   baseCommit: string;
@@ -308,7 +322,7 @@ export interface GitWorktreeReview {
 }
 
 export interface GitWorktreeIntegrate {
-  status: "integrated" | "empty" | "source_dirty" | "target_dirty" | "conflict";
+  status: "integrated" | "empty" | "source_dirty" | "target_dirty" | "conflict" | "orphaned_source";
   branch: string;
   baseCommit: string;
   sourceHead: string;
@@ -420,7 +434,7 @@ export interface OpsTaskReconciliation {
   attempts: number;
   message: string;
   updatedAt: string;
-  reason?: "source_dirty" | "target_dirty" | "conflict" | "closed_before_integration" | "error";
+  reason?: "source_dirty" | "target_dirty" | "conflict" | "closed_before_integration" | "legacy_recovery" | "error";
   sourceHead?: string;
   targetHead?: string;
 }

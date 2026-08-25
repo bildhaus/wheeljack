@@ -37,7 +37,21 @@ fn initializes_schema_and_emits_ready() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(schema_version, db::LATEST_SCHEMA_VERSION);
+    assert_eq!(response["payload"]["testMode"], true);
     assert_eq!(sink.events.lock().unwrap()[0].0, "core:ready");
+}
+
+#[test]
+fn production_core_status_exposes_non_test_profile_identity() {
+    let mut init = test_init("production-core-status");
+    init.test_mode = false;
+    let core = Core::new(init, Arc::new(NullEventSink)).unwrap();
+    let response: Value = serde_json::from_str(
+        &core.call_json(r#"{"id":"status","command":"core_status","payload":{}}"#),
+    )
+    .unwrap();
+
+    assert_eq!(response["payload"]["testMode"], false);
 }
 
 #[test]

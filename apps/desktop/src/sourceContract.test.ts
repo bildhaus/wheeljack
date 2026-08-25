@@ -639,6 +639,19 @@ test("orders isolated task setup before spawn and keeps review evidence separate
   expect(spawnSource).toContain("autoCloseTaskAgent: Boolean(opsTask)");
 });
 
+test("reconciles project task workspaces without dispatching a cleanup agent", () => {
+  const sweepSource = appSource.slice(
+    appSource.indexOf("taskWorkspaceSweepPendingRef.current.add"),
+    appSource.indexOf("useEffect(() => {", appSource.indexOf("taskWorkspaceSweepPendingRef.current.add")),
+  );
+  expect(sweepSource).toContain('"git_task_workspaces_cleanup"');
+  expect(sweepSource).toContain("...(opsState.archivedCards ?? [])");
+  expect(sweepSource).toContain("!card.taskLane.cleanup");
+  expect(sweepSource).toContain("finalizeTaskLaneCleanup(card, false, projectId, true)");
+  expect(sweepSource).not.toContain("startAgentForOpsTask");
+  expect(sweepSource).not.toContain("spawnAgent");
+});
+
 test("makes Floor the evidence-only Plan default and combines PRD/TDD under Spec", () => {
   const floorSource = paritySource.slice(
     paritySource.indexOf("function FloorSurface"),
@@ -1067,7 +1080,9 @@ test("sending from a disconnected chat resumes and submits in one action", () =>
   expect(spawnSource).toContain("const launchPrompt = taskPrompt.trim()");
   expect(spawnSource).toContain("? botStandingPrompt(taskPrompt, bot?.snapshot)");
   expect(sendSource).toContain("provider: profile.provider, model: profile.model, thinking: profile.thinking");
-  expect(sendSource).toContain("messages: mergeAgentMessages(current[runtime.nodeId].messages, [userMessage])");
+  expect(sendSource).toContain("const latest = current[runtime.nodeId]");
+  expect(sendSource).toContain("if (!latest) return current");
+  expect(sendSource).toContain("messages: mergeAgentMessages(latest.messages, [userMessage])");
   expect(resumeSource).toContain("resumeSessionId: priorSessionId");
   expect(resumeSource).toContain("prompt: effectivePrompt");
   expect(resumeSource).toContain("botStandingPrompt(submittedPrompt, snapshot)");
@@ -1208,12 +1223,34 @@ test("reconciles worker reports and starts repair agents only for integration fa
   expect(reconciliationSource).toContain('recordReconciliation("retrying"');
   expect(reconciliationSource).not.toContain("Automatic reconciliation exhausted");
   expect(reconciliationSource).toContain('result.status === "source_dirty"');
+  expect(reconciliationSource).toContain('result.status === "orphaned_source"');
+  expect(reconciliationSource).toContain('event.id.startsWith("automatic:legacy-recovery-complete:")');
+  expect(reconciliationSource).toContain("preserved the divergent orphan directory as a separate audit artifact");
+  expect(reconciliationSource).toContain('recordReconciliation("awaiting_repair", result.message, "legacy_recovery")');
   expect(reconciliationSource).toContain("Reconciliation rolled back a Git conflict");
   expect(reconciliationSource).toContain('startAgentForOpsTask(card, repairPrompt, "worker")');
   expect(reconciliationSource).not.toContain("runOpsVerification(candidate)");
   expect(reconciliationSource).not.toContain("startReviewerForOpsTask(candidate)");
   expect(paritySource).toContain("Worker results and automatic reconciliation state.");
   expect(paritySource).toContain("Send repair task");
+});
+
+test("runs one project recovery agent before reconciling legacy task cards", () => {
+  const recoverySource = appSource.slice(
+    appSource.indexOf("const recoveryCards = opsState.cards.filter"),
+    appSource.indexOf("const reviewColumnIds = new Set", appSource.indexOf("const recoveryCards = opsState.cards.filter")),
+  );
+  expect(recoverySource).toContain('card.reconciliation.reason === "legacy_recovery"');
+  expect(recoverySource).toContain('project recovery must resolve it without discarding files.');
+  expect(recoverySource).toContain("recoveryCardIds.has(card.id)");
+  expect(recoverySource).toContain('event.id.startsWith("automatic:legacy-recovery-complete:")');
+  expect(recoverySource).toContain("legacyRecoveryRuntimeRef.current.get(activeProject.id)");
+  expect(recoverySource).toContain("legacyRecoverySpawnPendingRef.current.has(activeProject.id)");
+  expect(recoverySource).not.toContain("if (recoveryEvent) legacyRecoverySpawnPendingRef.current.delete");
+  expect(recoverySource).toContain("Act as the single project reconciler");
+  expect(recoverySource).toContain("not clearly attributable to a listed legacy task as active work");
+  expect(recoverySource.match(/spawnAgent\(/g)).toHaveLength(1);
+  expect(recoverySource).toContain('status: "queued"');
 });
 
 test("migrates legacy verification state without starting redundant verification jobs", () => {

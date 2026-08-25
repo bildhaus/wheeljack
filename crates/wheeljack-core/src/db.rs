@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 18;
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 19;
 type Migration = (i32, fn(&Connection) -> Result<()>);
 const SQLITE_WRITE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(25),
@@ -262,7 +262,8 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
         (15, add_bot_profiles),
         (16, migrate_interim_bot_profiles),
         (17, add_session_node_title),
-        (LATEST_SCHEMA_VERSION, add_project_ops_state),
+        (18, add_project_ops_state),
+        (LATEST_SCHEMA_VERSION, repair_legacy_recovery_state),
     ];
     for (version, migration) in migrations {
         if current_version >= *version {
@@ -720,6 +721,154 @@ fn add_project_ops_state(connection: &Connection) -> Result<()> {
         "#,
     )?;
     Ok(())
+}
+
+fn repair_legacy_recovery_state(connection: &Connection) -> Result<()> {
+    let repaired_at = now();
+    let fixture_updated_at = if table_exists(connection, "adapter_configs")? {
+        connection
+            .query_row(
+                "SELECT updated_at FROM adapter_configs WHERE id = 'wheeljack-ui-fixture'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+    } else {
+        None
+    };
+
+    if let Some(fixture_updated_at) = fixture_updated_at {
+        let adapters = {
+            let mut statement = connection.prepare(
+                "SELECT id, manifest_json
+                 FROM adapter_configs
+                 WHERE id IN ('claude-code', 'codex-cli', 'opencode', 'pi-coding-agent')
+                   AND enabled = 0
+                   AND ABS((julianday(updated_at) - julianday(?1)) * 86400) <= 30",
+            )?;
+            let rows = statement.query_map([&fixture_updated_at], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (adapter_id, manifest_json) in adapters {
+            let mut manifest = serde_json::from_str::<Value>(&manifest_json)?;
+            if let Some(object) = manifest.as_object_mut() {
+                object.insert("enabled".to_string(), Value::Bool(true));
+            }
+            connection.execute(
+                "UPDATE adapter_configs
+                 SET manifest_json = ?1, enabled = 1, updated_at = ?2
+                 WHERE id = ?3",
+                params![manifest.to_string(), repaired_at, adapter_id],
+            )?;
+        }
+
+        if table_exists(connection, "projects")? {
+            let smoke_projects = {
+                let mut statement = connection.prepare("SELECT id, path FROM projects")?;
+                let rows = statement.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (project_id, project_path) in smoke_projects {
+                if is_ui_smoke_project_path(&project_path) {
+                    connection.execute("DELETE FROM projects WHERE id = ?1", [project_id])?;
+                }
+            }
+        }
+
+        if table_exists(connection, "adapter_verifications")? {
+            connection.execute(
+                "DELETE FROM adapter_verifications WHERE adapter_id = 'wheeljack-ui-fixture'",
+                [],
+            )?;
+        }
+        connection.execute(
+            "DELETE FROM adapter_configs WHERE id = 'wheeljack-ui-fixture'",
+            [],
+        )?;
+    }
+
+    if !table_exists(connection, "ops_project_states")? {
+        return Ok(());
+    }
+    let states = {
+        let mut statement =
+            connection.prepare("SELECT project_id, state_json FROM ops_project_states")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (project_id, state_json) in states {
+        let mut state = serde_json::from_str::<Value>(&state_json)?;
+        let Some(cards) = state.get_mut("cards").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let mut changed = false;
+        for card in cards {
+            if !is_legacy_recovery_card(card) {
+                continue;
+            }
+            let Some(card) = card.as_object_mut() else {
+                continue;
+            };
+            card.insert(
+                "assignee".to_string(),
+                Value::String("Unassigned".to_string()),
+            );
+            card.insert("assigneeIds".to_string(), json!([]));
+            card.insert("agentStatuses".to_string(), json!({}));
+            card.remove("reviewerId");
+            card.remove("retryAt");
+            card.insert(
+                "reconciliation".to_string(),
+                json!({
+                    "status": "awaiting_repair",
+                    "attempts": 0,
+                    "message": "Legacy evidence awaits project recovery.",
+                    "updatedAt": repaired_at,
+                    "reason": "legacy_recovery"
+                }),
+            );
+            if let Some(task_lane) = card.get_mut("taskLane").and_then(Value::as_object_mut) {
+                task_lane.remove("cleanup");
+            }
+            changed = true;
+        }
+        if changed {
+            connection.execute(
+                "UPDATE ops_project_states
+                 SET revision = revision + 1, state_json = ?1, updated_at = ?2
+                 WHERE project_id = ?3",
+                params![state.to_string(), repaired_at, project_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn is_ui_smoke_project_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    normalized.ends_with("/project")
+        && (normalized.contains("/appdata/local/temp/wheeljack-runtime-")
+            || normalized.contains("/appdata/local/temp/wheeljack-tauri-runtime-smoke-"))
+}
+
+fn is_legacy_recovery_card(card: &Value) -> bool {
+    let reconciliation = &card["reconciliation"];
+    let message = reconciliation["message"].as_str();
+    reconciliation["status"] == "retrying"
+        && reconciliation["reason"] == "error"
+        && card["report"]["status"] == "reported"
+        && card["taskLane"].is_object()
+        && matches!(
+            message,
+            Some("Task worktree is not registered with this repository.")
+                | Some("The reconciliation repair agent could not be resumed or restarted.")
+        )
 }
 
 fn add_project_identity(connection: &Connection) -> Result<()> {

@@ -697,3 +697,170 @@ fn migration_promotes_canvas_ops_state_to_project_authority() {
     assert_eq!(record.revision, 2);
     assert_eq!(record.state["cards"][0]["id"], "new");
 }
+
+#[test]
+fn migration_repairs_smoke_profile_contamination_and_legacy_reconciliation() {
+    let db = Connection::open_in_memory().unwrap();
+    run_migrations(&db).unwrap();
+    let legacy_state = json!({
+        "version": 2,
+        "cards": [
+            {
+                "id": "legacy-recovery",
+                "assignee": "Atlas",
+                "assigneeIds": ["agent-old"],
+                "agentStatuses": { "agent-old": "disconnected" },
+                "reviewerId": "reviewer-old",
+                "retryAt": "later",
+                "report": { "status": "reported" },
+                "reconciliation": {
+                    "status": "retrying",
+                    "reason": "error",
+                    "attempts": 5,
+                    "message": "Task worktree is not registered with this repository."
+                },
+                "taskLane": {
+                    "branch": "wheeljack/task",
+                    "cleanup": { "status": "blocked" }
+                }
+            },
+            {
+                "id": "unrelated-retry",
+                "report": { "status": "reported" },
+                "reconciliation": {
+                    "status": "retrying",
+                    "reason": "error",
+                    "message": "A different transient failure."
+                },
+                "taskLane": { "branch": "wheeljack/other" }
+            }
+        ]
+    });
+    db.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('project_real', 'Real', 'C:\\repo', 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('project_smoke', 'Smoke',
+                 'C:\\Users\\tester\\AppData\\Local\\Temp\\wheeljack-runtime-test\\project',
+                 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO projects (id, name, path, created_at, updated_at)
+         VALUES ('project_temp_real', 'Temp real',
+                 'C:\\Users\\tester\\AppData\\Local\\Temp\\real-project',
+                 'now', 'now')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO ops_project_states (project_id, revision, state_json, updated_at)
+         VALUES ('project_real', 4, ?1, 'before')",
+        [legacy_state.to_string()],
+    )
+    .unwrap();
+    for (id, enabled, updated_at) in [
+        ("wheeljack-ui-fixture", 1, "2026-08-24T14:22:02.007Z"),
+        ("opencode", 0, "2026-08-24T14:22:01.995Z"),
+        ("claude-code", 0, "2026-08-01T10:00:00Z"),
+    ] {
+        db.execute(
+            "INSERT INTO adapter_configs
+             (id, manifest_json, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'before', ?4)",
+            params![
+                id,
+                json!({ "id": id, "enabled": enabled == 1 }).to_string(),
+                enabled,
+                updated_at
+            ],
+        )
+        .unwrap();
+    }
+    db.execute(
+        "INSERT INTO adapter_verifications
+         (adapter_id, executable_path, version, verified_at, verified_args_json, launch_fingerprint)
+         VALUES ('wheeljack-ui-fixture', 'fixture', '1', 'now', '[]', 'fixture')",
+        [],
+    )
+    .unwrap();
+    db.pragma_update(None, "user_version", 18).unwrap();
+
+    run_migrations(&db).unwrap();
+
+    let opencode: (i64, String) = db
+        .query_row(
+            "SELECT enabled, manifest_json FROM adapter_configs WHERE id = 'opencode'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(opencode.0, 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&opencode.1).unwrap()["enabled"],
+        true
+    );
+    let claude_enabled: i64 = db
+        .query_row(
+            "SELECT enabled FROM adapter_configs WHERE id = 'claude-code'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(claude_enabled, 0);
+    for table in ["adapter_configs", "adapter_verifications"] {
+        let fixture_count: i64 = db
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table} WHERE {} = 'wheeljack-ui-fixture'",
+                    if table == "adapter_configs" {
+                        "id"
+                    } else {
+                        "adapter_id"
+                    }
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fixture_count, 0);
+    }
+    let smoke_count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE id = 'project_smoke'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(smoke_count, 0);
+    let real_temp_count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE id = 'project_temp_real'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(real_temp_count, 1);
+
+    let record = load_project_ops_state(&db, "project_real")
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.revision, 5);
+    let repaired = &record.state["cards"][0];
+    assert_eq!(repaired["reconciliation"]["status"], "awaiting_repair");
+    assert_eq!(repaired["reconciliation"]["reason"], "legacy_recovery");
+    assert_eq!(repaired["assignee"], "Unassigned");
+    assert_eq!(repaired["assigneeIds"], json!([]));
+    assert!(repaired.get("reviewerId").is_none());
+    assert!(repaired.get("retryAt").is_none());
+    assert!(repaired["taskLane"].get("cleanup").is_none());
+    assert_eq!(
+        record.state["cards"][1]["reconciliation"]["message"],
+        "A different transient failure."
+    );
+}

@@ -2346,6 +2346,7 @@ fn structured_process_tree_kills_descendant_after_direct_child_exits() {
         sink.clone(),
         sessions.clone(),
         Some(rpc_state),
+        Arc::new(AtomicBool::new(false)),
         &mut readers,
     )
     .unwrap()
@@ -3512,7 +3513,108 @@ fn structured_opencode_sse_driver_posts_prompt_and_emits_events() {
         .opencode
         .pending_interactions
         .is_empty());
+    driver.cancellation.shutdown.store(true, Ordering::SeqCst);
     sse_reader.join().unwrap();
+}
+
+#[test]
+fn structured_opencode_sse_reader_reconnects_after_the_stream_closes() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        for (index, stream) in listener.incoming().take(2).enumerate() {
+            let mut stream = stream.unwrap();
+            let request = read_test_http_request(&stream).unwrap();
+            assert_eq!(request.path, "/global/event");
+            let event = if index == 0 {
+                json!({
+                    "type": "session.status",
+                    "properties": {
+                        "sessionID": "session-opencode",
+                        "status": { "type": "busy" }
+                    }
+                })
+            } else {
+                json!({
+                    "type": "session.idle",
+                    "properties": { "sessionID": "session-opencode" }
+                })
+            };
+            let body = format!("data: {event}\r\n\r\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+    let sink = Arc::new(RecordingSink::default());
+    let db_dir = temp_dir("structured-sse-reconnect");
+    fs::create_dir_all(&db_dir).unwrap();
+    let db_path = db_dir.join(DB_FILE_NAME);
+    let db = Connection::open(&db_path).unwrap();
+    run_migrations(&db).unwrap();
+    db.execute(
+        "INSERT INTO sessions
+         (id, node_id, adapter_id, command_json, cwd, status, started_at, created_at, updated_at)
+         VALUES ('session_reconnect', 'node_reconnect', 'opencode', '{}', '.', 'running', ?1, ?1, ?1)",
+        params![now()],
+    )
+    .unwrap();
+    drop(db);
+    let cancellation = StructuredReaderCancellation {
+        shutdown: Arc::new(AtomicBool::new(false)),
+        rollback: Arc::new(AtomicBool::new(false)),
+    };
+    let driver = StructuredSseDriver {
+        protocol: "opencode-sse".to_string(),
+        port,
+        db_path: db_path.clone(),
+        session_id: "session_reconnect".to_string(),
+        node_id: "node_reconnect".to_string(),
+        adapter_id: "opencode".to_string(),
+        seq: Arc::new(AtomicU64::new(0)),
+        rpc_state: Arc::new(Mutex::new(StructuredAgentRpcState {
+            turn_active: true,
+            opencode: OpenCodeRpcState {
+                session_id: Some("session-opencode".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })),
+        events: sink.clone(),
+        cancellation: cancellation.clone(),
+        model: None,
+        thinking: None,
+        approval_policy: None,
+        protocol_state: Arc::new(Mutex::new(AgentProtocolStreamState::default())),
+    };
+
+    let reader = spawn_structured_sse_reader(driver);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !sink.snapshot().iter().any(|(event, payload)| {
+        event == "agent:structured-line" && decoded_line(payload).contains("session.idle")
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the reconnected stream"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    cancellation.shutdown.store(true, Ordering::SeqCst);
+    reader.join().unwrap();
+    server.join().unwrap();
+
+    let db = Connection::open(db_path).unwrap();
+    let chunk_count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM session_chunks WHERE session_id = 'session_reconnect'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(chunk_count, 2);
 }
 
 #[test]
