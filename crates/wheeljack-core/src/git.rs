@@ -845,7 +845,7 @@ pub(crate) fn cleanup_git_task_workspaces(
         if !branch_exists(repo_path, &branch)? {
             result.preserved.push(GitTaskWorkspacePreservedDto {
                 path: path.to_string_lossy().to_string(),
-                reason: "No matching preserved Wheeljack task branch exists.".to_string(),
+                reason: "No matching preserved wheeljack task branch exists.".to_string(),
                 retryable: false,
             });
             continue;
