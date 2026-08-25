@@ -130,6 +130,16 @@ const coreCall = async (command, payload) => {
 };
 const invoke = (command, payload) =>
   evaluate(`window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(payload)})`, true);
+const expectedDataDir = process.env.WHEELJACK_DESKTOP_DATA_DIR;
+if (!expectedDataDir) throw new Error("WHEELJACK_DESKTOP_DATA_DIR is required for the packaged WebView smoke.");
+const coreStatus = await coreCall("core_status", {});
+if (coreStatus.testMode !== true || !samePath(coreStatus.appDataDir, expectedDataDir)) {
+  throw new Error(`Refusing smoke mutations outside the isolated profile: ${JSON.stringify({
+    expectedDataDir,
+    actualDataDir: coreStatus.appDataDir,
+    testMode: coreStatus.testMode,
+  })}`);
+}
 const openedProject = await coreCall("project_open", { path: projectPath });
 let dataPaneCanvas;
 if (dataPanesOnly) {
@@ -178,9 +188,6 @@ if (dataPanesOnly) {
       },
     });
   }
-}
-for (const adapterId of ["codex-cli", "claude-code", "opencode", "pi-coding-agent"]) {
-  await coreCall("adapter_set_enabled", { adapterId, enabled: false });
 }
 const fixtureScript = String.raw`
 param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Ignored)
@@ -324,6 +331,9 @@ const fixtureVerification = await coreCall("adapter_verify", {
 });
 if (fixtureVerification.verificationStatus !== "verified") {
   throw new Error(`The structured-agent fixture did not verify: ${JSON.stringify(fixtureVerification)}`);
+}
+for (const adapterId of ["codex-cli", "claude-code", "opencode", "pi-coding-agent"]) {
+  await coreCall("adapter_set_enabled", { adapterId, enabled: false });
 }
 const exerciseOnboarding = !dataPanesOnly && !sixSessionOnly && !floorOnly;
 await coreCall("settings_import", { settings: {

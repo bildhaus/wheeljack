@@ -410,6 +410,54 @@ fn batched_session_chunks_defer_retention_until_the_requested_checkpoint() {
 }
 
 #[test]
+fn global_transcript_retention_bounds_history_across_sessions() {
+    let core = Core::new(
+        test_init("global-session-chunk-retention"),
+        Arc::new(NullEventSink),
+    )
+    .expect("core");
+    let db = core.lock_db().unwrap();
+    db.execute(
+        "INSERT INTO settings (key, value_json, updated_at)
+         VALUES ('sessionTranscriptGlobalRetentionBytes', '1048576', ?1)",
+        params![now()],
+    )
+    .unwrap();
+    for session_id in ["session_oldest", "session_middle", "session_newest"] {
+        db.execute(
+            "INSERT INTO sessions
+             (id, node_id, adapter_id, command_json, cwd, status, started_at, created_at, updated_at)
+             VALUES (?1, ?1, 'generic-shell', '{}', '.', 'completed', ?2, ?2, ?2)",
+            params![session_id, now()],
+        )
+        .unwrap();
+    }
+    persist_session_stream_chunk(&db, "session_oldest", 1, "pty", &vec![b'a'; 600 * 1024]).unwrap();
+    persist_session_stream_chunk(&db, "session_middle", 1, "pty", &vec![b'b'; 600 * 1024]).unwrap();
+    persist_session_stream_chunk(&db, "session_newest", 1, "pty", &vec![b'c'; 600 * 1024]).unwrap();
+
+    prune_global_session_chunks_to_retention(&db).unwrap();
+
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM session_chunks", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(load_session_chunks(&db, "session_newest").unwrap().len(), 1);
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM session_chunks_fts
+             WHERE rowid NOT IN (SELECT id FROM session_chunks)",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn terminal_session_index_can_skip_persisted_transcripts() {
     let core = Core::new(test_init("session-index-light"), Arc::new(NullEventSink)).expect("core");
     {

@@ -798,6 +798,36 @@ fn spawn_ops_scheduler_worker(
     })
 }
 
+fn spawn_history_maintenance_worker(
+    db_path: PathBuf,
+    events: Arc<dyn EventSink>,
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        for _ in 0..50 {
+            if shutdown.load(Ordering::SeqCst) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        let result = (|| -> Result<()> {
+            let db = open_app_connection(&db_path)?;
+            prune_all_session_chunks_to_retention(&db)?;
+            prune_global_session_chunks_to_retention(&db)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            events.emit(
+                "history:maintenance-error",
+                &json!({ "message": format!("{error:#}") }),
+            );
+        }
+    })
+}
+
 pub struct Core {
     db: Mutex<Connection>,
     pty_sessions: Arc<Mutex<HashMap<String, PtySessionHandle>>>,
@@ -884,6 +914,11 @@ impl Core {
         };
         if !core.test_mode && !core.startup_recovery.safe_mode {
             core.register_worker(spawn_ops_scheduler_worker(
+                core.paths.db_path(),
+                core.events.clone(),
+                core.shutdown_cancel.clone(),
+            ));
+            core.register_worker(spawn_history_maintenance_worker(
                 core.paths.db_path(),
                 core.events.clone(),
                 core.shutdown_cancel.clone(),
@@ -986,6 +1021,7 @@ impl Core {
                 "appDataDir": self.paths.app_data_dir,
                 "cacheDir": self.paths.cache_dir,
                 "updateDir": self.paths.update_dir,
+                "testMode": self.test_mode,
                 "migrated": self.migrated,
                 "recoveredSessions": self.recovered_sessions,
                 "startupRecovery": self.startup_recovery
@@ -1463,6 +1499,9 @@ impl Core {
         let manifest = normalize_adapter_manifest(serde_json::from_value::<AdapterDto>(
             unwrap_payload(payload, "manifest"),
         )?);
+        if manifest.id == "wheeljack-ui-fixture" && !self.test_mode {
+            bail!("wheeljack-ui-fixture is available only in an isolated test profile");
+        }
         let db = self.lock_db()?;
         Ok(serde_json::to_value(persist_adapter_manifest(
             &db, manifest,
@@ -2123,11 +2162,14 @@ impl Core {
             bail!("Project path is not a git repository.");
         }
         let (target_path, _) = resolve_git_worktree_context(&project_path)?;
-        let source_path = normalize_command_cwd(
-            expand_home_path(req.worktree_path.trim())
-                .canonicalize()
-                .map_err(|_| anyhow!("Task worktree path does not exist."))?,
-        );
+        let requested_source = expand_home_path(req.worktree_path.trim());
+        let source_path = if requested_source.exists() {
+            normalize_command_cwd(requested_source.canonicalize()?)
+        } else if requested_source.is_absolute() {
+            normalize_command_cwd(requested_source)
+        } else {
+            bail!("Missing task worktree paths must be absolute.");
+        };
         let expected_branch = req.expected_branch.trim();
         ensure_safe_branch_name(expected_branch)?;
         Ok(serde_json::to_value(integrate_git_worktree(
@@ -3737,6 +3779,7 @@ impl Core {
                 self.events.clone(),
                 self.structured_agent_sessions.clone(),
                 rpc_state.clone(),
+                rollback.reader_cancel(),
                 &mut rollback.readers,
             )?;
             rollback.disarm();
@@ -4769,7 +4812,8 @@ impl Core {
                 }
             }
         }
-        let prune_transcripts = settings.contains_key("sessionTranscriptRetentionBytes");
+        let prune_transcripts = settings.contains_key("sessionTranscriptRetentionBytes")
+            || settings.contains_key("sessionTranscriptGlobalRetentionBytes");
         for (key, value) in settings {
             db.execute(
                 "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)",
@@ -4778,6 +4822,7 @@ impl Core {
         }
         if prune_transcripts {
             prune_all_session_chunks_to_retention(&db)?;
+            prune_global_session_chunks_to_retention(&db)?;
         }
         if let Some(Value::Array(adapters)) = adapter_payload {
             for adapter in adapters {

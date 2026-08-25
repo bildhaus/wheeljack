@@ -29,6 +29,8 @@ const STRUCTURED_TRANSCRIPT_FLUSH_INTERVAL: Duration = Duration::from_millis(100
 const SESSION_TRANSCRIPT_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_SESSION_TRANSCRIPT_RETENTION_BYTES: i64 = 10 * 1024 * 1024;
 const MAX_SESSION_TRANSCRIPT_RETENTION_BYTES: i64 = 100 * 1024 * 1024;
+const DEFAULT_GLOBAL_SESSION_TRANSCRIPT_RETENTION_BYTES: i64 = 256 * 1024 * 1024;
+const MAX_GLOBAL_SESSION_TRANSCRIPT_RETENTION_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 pub(crate) const MAX_STRUCTURED_LINE_BYTES: usize = 1024 * 1024;
 const SESSION_EXIT_BUSY_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(25),
@@ -1852,6 +1854,7 @@ pub(crate) fn spawn_structured_waiter(
     events: Arc<dyn EventSink>,
     sessions: Arc<Mutex<HashMap<String, StructuredAgentSessionHandle>>>,
     rpc_state: Option<Arc<Mutex<StructuredAgentRpcState>>>,
+    reader_cancel: Arc<AtomicBool>,
     readers: &mut Vec<JoinHandle<()>>,
 ) -> Result<JoinHandle<()>> {
     let reader_slot = Arc::new(Mutex::new(Some(std::mem::take(readers))));
@@ -1877,6 +1880,7 @@ pub(crate) fn spawn_structured_waiter(
                 thread::sleep(Duration::from_millis(25));
             };
             let _ = process.process_tree.terminate();
+            reader_cancel.store(true, Ordering::SeqCst);
             for reader in readers {
                 let _ = reader.join();
             }
@@ -3354,127 +3358,144 @@ pub(crate) fn read_chunked_line<R: BufRead>(
 pub(crate) fn spawn_structured_sse_reader(driver: StructuredSseDriver) -> JoinHandle<()> {
     thread::spawn(move || {
         let db = open_app_connection(&driver.db_path).ok();
-        let Some((mut reader, headers)) = connect_sse_event_stream(driver.port) else {
-            return;
-        };
-        let mut line = String::new();
-        let mut event_name: Option<String> = None;
-        let mut data_lines: Vec<String> = Vec::new();
-        let chunked = headers_are_chunked(&headers);
-        let mut chunk_remaining = 0_usize;
-        let mut pending_chunks: Vec<(u64, String, Vec<u8>)> =
-            Vec::with_capacity(STRUCTURED_TRANSCRIPT_BATCH_SIZE);
-        let mut last_chunk_flush = Instant::now();
-        let mut last_retention_prune = Instant::now();
         loop {
             if driver.cancellation.is_canceled() {
                 break;
             }
-            let line_text = if chunked {
-                line.clear();
-                match read_chunked_line(&mut reader, &mut chunk_remaining, &mut line) {
-                    Ok(0) => break,
-                    Ok(_) => line.trim_end_matches(['\r', '\n']).to_string(),
-                    Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                        emit_protocol_line_limit_warning(
-                            &driver.session_id,
-                            &driver.node_id,
-                            &driver.adapter_id,
-                            &driver.seq,
-                            &driver.protocol_state,
-                            &driver.events,
-                        );
-                        break;
-                    }
-                    Err(_) => break,
-                }
-            } else {
-                match read_bounded_protocol_line(&mut reader) {
-                    Ok(BoundedProtocolLine::Line(value)) => value,
-                    Ok(BoundedProtocolLine::Oversized) => {
-                        emit_protocol_line_limit_warning(
-                            &driver.session_id,
-                            &driver.node_id,
-                            &driver.adapter_id,
-                            &driver.seq,
-                            &driver.protocol_state,
-                            &driver.events,
-                        );
-                        event_name = None;
-                        data_lines.clear();
-                        continue;
-                    }
-                    Ok(BoundedProtocolLine::Eof) => break,
-                    Err(_) => break,
-                }
+            let Some((mut reader, headers)) = connect_sse_event_stream(driver.port) else {
+                thread::sleep(Duration::from_millis(250));
+                continue;
             };
-            if driver.cancellation.is_canceled() {
-                break;
-            }
-            if line_text.is_empty() {
-                if let Some(chunk) =
-                    process_sse_event(&driver, db.as_ref(), event_name.take(), &data_lines)
-                {
-                    if let Some(db) = db.as_ref() {
-                        pending_chunks.push(chunk);
-                        if pending_chunks.len() >= STRUCTURED_TRANSCRIPT_BATCH_SIZE
-                            || last_chunk_flush.elapsed() >= STRUCTURED_TRANSCRIPT_FLUSH_INTERVAL
-                        {
-                            let enforce_retention =
-                                last_retention_prune.elapsed() >= SESSION_TRANSCRIPT_PRUNE_INTERVAL;
-                            if flush_pending_session_chunks(
-                                db,
+            let mut line = String::new();
+            let mut event_name: Option<String> = None;
+            let mut data_lines: Vec<String> = Vec::new();
+            let chunked = headers_are_chunked(&headers);
+            let mut chunk_remaining = 0_usize;
+            let mut pending_chunks: Vec<(u64, String, Vec<u8>)> =
+                Vec::with_capacity(STRUCTURED_TRANSCRIPT_BATCH_SIZE);
+            let mut last_chunk_flush = Instant::now();
+            let mut last_retention_prune = Instant::now();
+            loop {
+                if driver.cancellation.is_canceled() {
+                    break;
+                }
+                let line_text = if chunked {
+                    line.clear();
+                    match read_chunked_line(&mut reader, &mut chunk_remaining, &mut line) {
+                        Ok(0) => break,
+                        Ok(_) => line.trim_end_matches(['\r', '\n']).to_string(),
+                        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                            emit_protocol_line_limit_warning(
                                 &driver.session_id,
-                                &mut pending_chunks,
-                                enforce_retention,
-                            )
-                            .is_ok()
+                                &driver.node_id,
+                                &driver.adapter_id,
+                                &driver.seq,
+                                &driver.protocol_state,
+                                &driver.events,
+                            );
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                } else {
+                    match read_bounded_protocol_line(&mut reader) {
+                        Ok(BoundedProtocolLine::Line(value)) => value,
+                        Ok(BoundedProtocolLine::Oversized) => {
+                            emit_protocol_line_limit_warning(
+                                &driver.session_id,
+                                &driver.node_id,
+                                &driver.adapter_id,
+                                &driver.seq,
+                                &driver.protocol_state,
+                                &driver.events,
+                            );
+                            event_name = None;
+                            data_lines.clear();
+                            continue;
+                        }
+                        Ok(BoundedProtocolLine::Eof) => break,
+                        Err(_) => break,
+                    }
+                };
+                if driver.cancellation.is_canceled() {
+                    break;
+                }
+                if line_text.is_empty() {
+                    if let Some(chunk) =
+                        process_sse_event(&driver, db.as_ref(), event_name.take(), &data_lines)
+                    {
+                        if let Some(db) = db.as_ref() {
+                            pending_chunks.push(chunk);
+                            if pending_chunks.len() >= STRUCTURED_TRANSCRIPT_BATCH_SIZE
+                                || last_chunk_flush.elapsed()
+                                    >= STRUCTURED_TRANSCRIPT_FLUSH_INTERVAL
                             {
-                                last_chunk_flush = Instant::now();
-                                if enforce_retention {
-                                    last_retention_prune = Instant::now();
+                                let enforce_retention = last_retention_prune.elapsed()
+                                    >= SESSION_TRANSCRIPT_PRUNE_INTERVAL;
+                                if flush_pending_session_chunks(
+                                    db,
+                                    &driver.session_id,
+                                    &mut pending_chunks,
+                                    enforce_retention,
+                                )
+                                .is_ok()
+                                {
+                                    last_chunk_flush = Instant::now();
+                                    if enforce_retention {
+                                        last_retention_prune = Instant::now();
+                                    }
                                 }
                             }
                         }
                     }
+                    data_lines.clear();
+                    continue;
                 }
-                data_lines.clear();
-                continue;
+                if let Some(rest) = line_text.strip_prefix("event:") {
+                    event_name = Some(rest.trim().to_string());
+                } else if let Some(rest) = line_text.strip_prefix("data:") {
+                    data_lines.push(rest.trim_start().to_string());
+                }
             }
-            if let Some(rest) = line_text.strip_prefix("event:") {
-                event_name = Some(rest.trim().to_string());
-            } else if let Some(rest) = line_text.strip_prefix("data:") {
-                data_lines.push(rest.trim_start().to_string());
-            }
-        }
-        if !driver.cancellation.is_canceled() {
-            if let Some(chunk) = process_sse_event(&driver, db.as_ref(), event_name, &data_lines) {
-                pending_chunks.push(chunk);
-            }
-        }
-        if let Some(db) = db.as_ref() {
-            for attempt in 0..3 {
-                if flush_pending_session_chunks(db, &driver.session_id, &mut pending_chunks, true)
-                    .is_ok()
-                    || pending_chunks.is_empty()
+            if !driver.cancellation.is_canceled() {
+                if let Some(chunk) =
+                    process_sse_event(&driver, db.as_ref(), event_name, &data_lines)
                 {
-                    break;
-                }
-                if attempt < 2 {
-                    thread::sleep(Duration::from_millis(25));
+                    pending_chunks.push(chunk);
                 }
             }
+            if let Some(db) = db.as_ref() {
+                for attempt in 0..3 {
+                    if flush_pending_session_chunks(
+                        db,
+                        &driver.session_id,
+                        &mut pending_chunks,
+                        true,
+                    )
+                    .is_ok()
+                        || pending_chunks.is_empty()
+                    {
+                        break;
+                    }
+                    if attempt < 2 {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                }
+            }
+            emit_structured_protocol_events(
+                &driver.session_id,
+                &driver.node_id,
+                &driver.adapter_id,
+                driver.seq.load(Ordering::SeqCst),
+                Vec::new(),
+                &driver.protocol_state,
+                &driver.events,
+                true,
+            );
+            if !driver.cancellation.is_canceled() {
+                thread::sleep(Duration::from_millis(100));
+            }
         }
-        emit_structured_protocol_events(
-            &driver.session_id,
-            &driver.node_id,
-            &driver.adapter_id,
-            driver.seq.load(Ordering::SeqCst),
-            Vec::new(),
-            &driver.protocol_state,
-            &driver.events,
-            true,
-        );
     })
 }
 
@@ -4070,6 +4091,42 @@ pub(crate) fn prune_all_session_chunks_to_retention(db: &Connection) -> rusqlite
     Ok(pruned)
 }
 
+pub(crate) fn prune_global_session_chunks_to_retention(db: &Connection) -> rusqlite::Result<usize> {
+    let max_bytes = global_session_transcript_retention_bytes(db)?;
+    db.execute(
+        "DELETE FROM session_chunks_fts
+         WHERE rowid IN (
+           SELECT id FROM (
+             SELECT
+               id,
+               SUM(length(data)) OVER (
+                 ORDER BY created_at DESC, id DESC
+                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+               ) AS retained_bytes
+             FROM session_chunks
+           )
+           WHERE retained_bytes > ?1
+         )",
+        params![max_bytes],
+    )?;
+    db.execute(
+        "DELETE FROM session_chunks
+         WHERE id IN (
+           SELECT id FROM (
+             SELECT
+               id,
+               SUM(length(data)) OVER (
+                 ORDER BY created_at DESC, id DESC
+                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+               ) AS retained_bytes
+             FROM session_chunks
+           )
+           WHERE retained_bytes > ?1
+         )",
+        params![max_bytes],
+    )
+}
+
 fn session_transcript_retention_bytes(db: &Connection) -> rusqlite::Result<i64> {
     let value_json = db
         .query_row(
@@ -4088,6 +4145,26 @@ fn session_transcript_retention_bytes(db: &Connection) -> rusqlite::Result<i64> 
         })
         .unwrap_or(DEFAULT_SESSION_TRANSCRIPT_RETENTION_BYTES);
     Ok(value.clamp(1_048_576, MAX_SESSION_TRANSCRIPT_RETENTION_BYTES))
+}
+
+fn global_session_transcript_retention_bytes(db: &Connection) -> rusqlite::Result<i64> {
+    let value_json = db
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = 'sessionTranscriptGlobalRetentionBytes'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let value = value_json
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+                .or_else(|| value.as_f64().map(|number| number as i64))
+        })
+        .unwrap_or(DEFAULT_GLOBAL_SESSION_TRANSCRIPT_RETENTION_BYTES);
+    Ok(value.clamp(1_048_576, MAX_GLOBAL_SESSION_TRANSCRIPT_RETENTION_BYTES))
 }
 
 fn persist_session_exit(

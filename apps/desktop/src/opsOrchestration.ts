@@ -190,7 +190,7 @@ function parseOpsTaskReconciliation(value: unknown): OpsCard["reconciliation"] {
     || typeof reconciliation.updatedAt !== "string"
   ) return undefined;
   const recoveredRunning = reconciliation.status === "running";
-  const reason = ["source_dirty", "target_dirty", "conflict", "closed_before_integration", "error"].includes(String(reconciliation.reason))
+  const reason = ["source_dirty", "target_dirty", "conflict", "closed_before_integration", "legacy_recovery", "error"].includes(String(reconciliation.reason))
     ? reconciliation.reason as NonNullable<OpsCard["reconciliation"]>["reason"]
     : undefined;
   return {
@@ -395,6 +395,10 @@ export function parseOpsState(value?: JsonObject): OpsState {
     return {
       ...card,
       columnId: legacyDoneLane ? reviewColumnId : card.columnId,
+      assignee: "Unassigned",
+      assigneeIds: [],
+      agentStatuses: {},
+      reviewerId: undefined,
       report: {
         status: "reported" as const,
         summary: card.lastNote || "Legacy task evidence is ready for reconciliation.",
@@ -407,12 +411,13 @@ export function parseOpsState(value?: JsonObject): OpsState {
         agentId: card.assigneeIds[0],
       },
       reconciliation: {
-        status: needsHuman ? "needs_human" as const : "queued" as const,
+        status: needsHuman ? "needs_human" as const : "awaiting_repair" as const,
         attempts: 0,
+        reason: needsHuman ? undefined : "legacy_recovery" as const,
         message: card.reviewPolicy === "human"
           ? "This task explicitly requires human acceptance."
           : safeToReconcile
-            ? "Migrated approved evidence from the previous Review workflow."
+            ? "Legacy evidence awaits project recovery."
             : "Legacy review evidence was incomplete or unsuccessful; inspect it before retrying.",
         updatedAt: timestamp,
       },

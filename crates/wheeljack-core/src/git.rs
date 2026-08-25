@@ -281,6 +281,23 @@ pub(crate) fn read_git_head(path: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn read_git_branch_head(path: &Path, branch: &str) -> Result<String> {
+    let output = git_command()
+        .arg("-C")
+        .arg(path)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg(format!("refs/heads/{branch}^{{commit}}"))
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "Task branch is not available in this repository: {}",
+            command_output_detail(&output)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 pub(crate) fn validate_full_commit(path: &Path, value: &str) -> Result<String> {
     let commit = value.trim();
     if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -731,14 +748,83 @@ pub(crate) fn integrate_git_worktree(
     let worktrees = read_worktrees(target_path);
     let source = worktrees
         .iter()
-        .find(|worktree| paths_equivalent(Path::new(&worktree.path), source_path))
-        .ok_or_else(|| anyhow!("Task worktree is not registered with this repository."))?;
+        .find(|worktree| paths_equivalent(Path::new(&worktree.path), source_path));
+    let base_commit = validate_full_commit(target_path, base_commit)?;
+    let previous_target_head = read_git_head(target_path)?;
+    let Some(source) = source else {
+        let source_head = read_git_branch_head(target_path, expected_branch)?;
+        let source_contains_base = git_command()
+            .arg("-C")
+            .arg(target_path)
+            .args(["merge-base", "--is-ancestor", &base_commit, &source_head])
+            .status()?;
+        if !source_contains_base.success() {
+            bail!("Task branch no longer descends from its recorded base commit.");
+        }
+        let already_integrated = git_command()
+            .arg("-C")
+            .arg(target_path)
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                &source_head,
+                &previous_target_head,
+            ])
+            .status()?;
+        if !already_integrated.success() {
+            let cherry_output = git_command()
+                .arg("-C")
+                .arg(target_path)
+                .args(["cherry", &previous_target_head, &source_head, &base_commit])
+                .output()?;
+            if !cherry_output.status.success() {
+                bail!(
+                    "Could not compare the preserved task branch with the opened project branch: {}",
+                    command_output_detail(&cherry_output)
+                );
+            }
+            let has_pending_patches = String::from_utf8_lossy(&cherry_output.stdout)
+                .lines()
+                .any(|line| line.starts_with("+ "));
+            if has_pending_patches {
+                bail!("Task worktree is missing and its preserved branch has not been integrated by project recovery.");
+            }
+        }
+        let verified_orphan = source_path.exists()
+            && (orphan_directory_matches_branch(target_path, source_path, &source_head)?
+                || orphan_directory_matches_branch(target_path, source_path, &base_commit)?);
+        if source_path.exists() && !verified_orphan {
+            return Ok(GitWorktreeIntegrateResult {
+                status: "orphaned_source".to_string(),
+                branch: expected_branch.to_string(),
+                base_commit,
+                source_head,
+                target_head: previous_target_head.clone(),
+                previous_target_head,
+                commits: Vec::new(),
+                message: "Task directory exists without a Git worktree registration and differs from both its preserved branch and recorded base. One project recovery pass must preserve or archive it before reconciliation continues.".to_string(),
+            });
+        }
+        return Ok(GitWorktreeIntegrateResult {
+            status: "integrated".to_string(),
+            branch: expected_branch.to_string(),
+            base_commit,
+            source_head,
+            target_head: previous_target_head.clone(),
+            previous_target_head,
+            commits: Vec::new(),
+            message: if verified_orphan {
+                "Project recovery integrated the preserved task branch and verified that its orphan directory contains no additional repository work beyond the task branch or its recorded base."
+            } else {
+                "Project recovery already integrated the preserved task branch."
+            }
+            .to_string(),
+        });
+    };
     if source.detached || source.bare || source.branch != expected_branch {
         bail!("Task worktree branch does not match the expected integration source.");
     }
-    let base_commit = validate_full_commit(target_path, base_commit)?;
     let source_head = read_git_head(source_path)?;
-    let previous_target_head = read_git_head(target_path)?;
     let result = |status: &str, target_head: String, commits: Vec<String>, message: &str| {
         GitWorktreeIntegrateResult {
             status: status.to_string(),
@@ -886,6 +972,67 @@ pub(crate) fn integrate_git_worktree(
         commits,
         "Task commits were integrated into the opened project branch.",
     ))
+}
+
+fn orphan_directory_matches_branch(
+    repo_path: &Path,
+    orphan_path: &Path,
+    branch_head: &str,
+) -> Result<bool> {
+    if !orphan_path.is_dir() || orphan_path.join(".git").exists() {
+        return Ok(false);
+    }
+    let index_path = env::temp_dir().join(format!("wheeljack-orphan-index-{}", Uuid::now_v7()));
+    let result = (|| -> Result<bool> {
+        let read_tree = git_command()
+            .env("GIT_INDEX_FILE", &index_path)
+            .arg("-C")
+            .arg(repo_path)
+            .args(["read-tree", branch_head])
+            .output()?;
+        if !read_tree.status.success() {
+            bail!(
+                "Could not inspect the orphan task directory: {}",
+                command_output_detail(&read_tree)
+            );
+        }
+        let _ = git_command()
+            .env("GIT_INDEX_FILE", &index_path)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("--work-tree")
+            .arg(orphan_path)
+            .args(["update-index", "--refresh"])
+            .output()?;
+        let tracked = git_command()
+            .env("GIT_INDEX_FILE", &index_path)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("--work-tree")
+            .arg(orphan_path)
+            .args(["diff-files", "--quiet", "--ignore-submodules"])
+            .status()?;
+        if !tracked.success() {
+            return Ok(false);
+        }
+        let untracked = git_command()
+            .env("GIT_INDEX_FILE", &index_path)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("--work-tree")
+            .arg(orphan_path)
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .output()?;
+        if !untracked.status.success() {
+            bail!(
+                "Could not inspect untracked orphan task files: {}",
+                command_output_detail(&untracked)
+            );
+        }
+        Ok(String::from_utf8_lossy(&untracked.stdout).trim().is_empty())
+    })();
+    let _ = fs::remove_file(index_path);
+    result
 }
 
 fn resolve_path_with_existing_ancestor(path: &Path) -> PathBuf {

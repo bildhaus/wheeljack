@@ -44,6 +44,20 @@ while installation or recovery is in progress.
 Upgrading directly from wheeljack v0.1.0 requires a one-time manual download
 from the latest GitHub Release. In-app updates work from v0.1.1 onward.
 
+## Legacy Plan recovery
+
+When an older project contains task branches or directories that no longer match
+Git's registered worktrees, wheeljack preserves them and starts one project-level
+recovery agent. The recovery pass inventories every affected task, integrates
+recoverable work, and then returns the cards to normal reconciliation. It does
+not require one repair agent or confirmation per card.
+
+Do not manually delete an orphan task directory or branch while recovery is in
+progress. A missing directory is accepted only when its preserved branch is
+already represented in the opened project branch. If a completed recovery pass
+finds a divergent orphan copy, wheeljack leaves that copy intact as an audit
+artifact and completes the reconciled card instead of starting another agent.
+
 ## If an update fails
 
 - Confirm the latest release is published and contains the package for your platform.

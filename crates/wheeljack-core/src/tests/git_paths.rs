@@ -854,6 +854,60 @@ fn git_worktree_integrate_is_idempotent_and_preserves_dirty_targets() {
     assert_eq!(dirty["ok"], true);
     assert_eq!(dirty["payload"]["status"], "target_dirty");
     assert!(!repo.join("second.txt").exists());
+    fs::remove_file(repo.join("local.txt")).unwrap();
+    let integrated_second: Value =
+        serde_json::from_str(&core.call_json(&request().to_string())).unwrap();
+    assert_eq!(integrated_second["payload"]["status"], "integrated");
+    let removed: Value = serde_json::from_str(
+        &core.call_json(
+            &json!({
+                "id": "remove-integrated-task",
+                "command": "git_worktree_remove",
+                "payload": {
+                    "projectPath": repo,
+                    "worktreePath": worktree,
+                    "expectedBranch": branch
+                }
+            })
+            .to_string(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(removed["ok"], true);
+    let recovered_without_worktree: Value =
+        serde_json::from_str(&core.call_json(&request().to_string())).unwrap();
+    assert_eq!(
+        recovered_without_worktree["ok"], true,
+        "{recovered_without_worktree:#}"
+    );
+    assert_eq!(
+        recovered_without_worktree["payload"]["status"],
+        "integrated"
+    );
+    assert!(recovered_without_worktree["payload"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Project recovery"));
+
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(worktree.join("README.md"), "native git\n").unwrap();
+    let verified_orphan: Value =
+        serde_json::from_str(&core.call_json(&request().to_string())).unwrap();
+    assert_eq!(verified_orphan["ok"], true, "{verified_orphan:#}");
+    assert!(verified_orphan["payload"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("orphan directory"));
+
+    fs::write(worktree.join("untracked-recovery.txt"), "preserve me\n").unwrap();
+    let divergent_orphan: Value =
+        serde_json::from_str(&core.call_json(&request().to_string())).unwrap();
+    assert_eq!(divergent_orphan["ok"], true);
+    assert_eq!(divergent_orphan["payload"]["status"], "orphaned_source");
+    assert!(divergent_orphan["payload"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("project recovery"));
 }
 
 #[test]

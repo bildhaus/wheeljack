@@ -368,8 +368,8 @@ interface HistoryTranscript {
 }
 
 interface AgentSpawnOrigin {
-  parentNodeId: string;
-  parentSessionId: string;
+  parentNodeId?: string;
+  parentSessionId?: string;
   autonomyDepth: number;
   onSpawned?: (node: CanvasNode, session: Session) => void;
 }
@@ -603,6 +603,9 @@ export function App() {
   const reviewCardRef = useRef<OpsCard | undefined>(undefined);
   const reconciliationCardIdsRef = useRef(new Set<string>());
   const reconciliationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const legacyRecoverySpawnPendingRef = useRef(new Set<string>());
+  const legacyRecoveryCompletionPendingRef = useRef(new Set<string>());
+  const legacyRecoveryRuntimeRef = useRef(new Map<string, string>());
   const automaticAdapterVerificationRef = useRef(new Map<string, { key: string; attempts: number; pending: boolean }>());
   const verificationOutputTimerRef = useRef<number | undefined>(undefined);
   const opsPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -2620,18 +2623,22 @@ export function App() {
     const previousStartedAt = runtime.startedAt;
     const previousEndedAt = runtime.endedAt;
     const turnStartedAt = new Date().toISOString();
-    setRuntimes((current) => ({
-      ...current,
-      [runtime.nodeId]: {
-        ...current[runtime.nodeId],
-        startedAt: turnStartedAt,
-        endedAt: undefined,
-        status: "starting",
-        statusSummary: "Starting turn…",
-        turnStartLine: current[runtime.nodeId].protocolSequence ?? current[runtime.nodeId].structuredLines.length,
-        messages: mergeAgentMessages(current[runtime.nodeId].messages, [userMessage]),
-      },
-    }));
+    setRuntimes((current) => {
+      const latest = current[runtime.nodeId];
+      if (!latest) return current;
+      return {
+        ...current,
+        [runtime.nodeId]: {
+          ...latest,
+          startedAt: turnStartedAt,
+          endedAt: undefined,
+          status: "starting",
+          statusSummary: "Starting turn…",
+          turnStartLine: latest.protocolSequence ?? latest.structuredLines.length,
+          messages: mergeAgentMessages(latest.messages, [userMessage]),
+        },
+      };
+    });
     try {
       const baseProfile = agentProfiles.find((candidate) => candidate.adapterId === runtime.adapterId);
       const profile = botProfileForLaunch(baseProfile, snapshot);
@@ -2648,20 +2655,24 @@ export function App() {
         ...(profile ? { provider: profile.provider, model: profile.model, thinking: profile.thinking } : {}),
         ...agentProjectAccessConfig(profile, project.agentAccess),
       });
-      setRuntimes((current) => ({
-        ...current,
-        [runtime.nodeId]: {
-          ...current[runtime.nodeId],
-          endedAt: undefined,
-          status: ["needs_input", "canceling", "failed", "completed", "canceled"].includes(current[runtime.nodeId].status)
-            ? current[runtime.nodeId].status
-            : "running",
-          messages: mergeAgentMessages(current[runtime.nodeId].messages, nextMessages),
-          statusSummary: current[runtime.nodeId].status === "needs_input"
-            ? current[runtime.nodeId].statusSummary
-            : undefined,
-        },
-      }));
+      setRuntimes((current) => {
+        const latest = current[runtime.nodeId];
+        if (!latest) return current;
+        return {
+          ...current,
+          [runtime.nodeId]: {
+            ...latest,
+            endedAt: undefined,
+            status: ["needs_input", "canceling", "failed", "completed", "canceled"].includes(latest.status)
+              ? latest.status
+              : "running",
+            messages: mergeAgentMessages(latest.messages, nextMessages),
+            statusSummary: latest.status === "needs_input"
+              ? latest.statusSummary
+              : undefined,
+          },
+        };
+      });
       const liveRuntime = currentRuntimes()[runtime.nodeId];
       persistAgentNodeState(
         runtime.nodeId,
@@ -2672,18 +2683,22 @@ export function App() {
       return true;
     } catch (cause) {
       const detail = message(cause);
-      setRuntimes((current) => ({
-        ...current,
-        [runtime.nodeId]: {
-          ...current[runtime.nodeId],
-          startedAt: previousStartedAt,
-          endedAt: previousEndedAt,
-          status: previousStatus,
-          statusSummary: detail,
-          turnStartLine: runtime.turnStartLine,
-          messages: current[runtime.nodeId].messages.filter((item) => item.id !== userMessage.id),
-        },
-      }));
+      setRuntimes((current) => {
+        const latest = current[runtime.nodeId];
+        if (!latest) return current;
+        return {
+          ...current,
+          [runtime.nodeId]: {
+            ...latest,
+            startedAt: previousStartedAt,
+            endedAt: previousEndedAt,
+            status: previousStatus,
+            statusSummary: detail,
+            turnStartLine: runtime.turnStartLine,
+            messages: latest.messages.filter((item) => item.id !== userMessage.id),
+          },
+        };
+      });
       setError(`Prompt blocked: ${detail}`);
       return false;
     }
@@ -5406,6 +5421,15 @@ export function App() {
     }));
   };
 
+  const adapterArgsById = useMemo(() => Object.fromEntries(
+    agentProfiles.map((profile) => [profile.adapterId, agentLaunchArgs(profile)]),
+  ), [agentProfiles]);
+  const selectedAdapter = adapters.find((adapter) => adapter.id === selectedAdapterId);
+  const selectedAdapterReady = isAdapterReady(
+    selectedAdapter,
+    adapterArgsById[selectedAdapterId] ?? [],
+  );
+
   const reconcileReportedTask = async (reportedCard: OpsCard) => {
     const activeProject = projectRef.current;
     const card = opsStateRef.current.cards.find((candidate) => candidate.id === reportedCard.id);
@@ -5494,6 +5518,20 @@ export function App() {
           : candidate),
       }));
     };
+    if (result.status === "orphaned_source") {
+      const projectRecoveryCompleted = (card.events ?? []).some((event) =>
+        event.id.startsWith("automatic:legacy-recovery-complete:"));
+      if (projectRecoveryCompleted) {
+        await complete(
+          "Project recovery confirmed the task branch was integrated and preserved the divergent orphan directory as a separate audit artifact.",
+          result.sourceHead,
+          result.targetHead,
+        );
+        return;
+      }
+      await recordReconciliation("awaiting_repair", result.message, "legacy_recovery");
+      return;
+    }
     const reason = result.status === "source_dirty" ? "source_dirty" : result.status === "target_dirty" ? "target_dirty" : "conflict";
     if (result.status === "target_dirty") {
       await recordReconciliation("retrying", result.message, reason);
@@ -5509,6 +5547,123 @@ export function App() {
       throw new Error("The reconciliation repair agent could not be resumed or restarted.");
     }
   };
+
+  useEffect(() => {
+    const activeProject = projectRef.current;
+    if (!activeProject || !canvas || safeStartupActive) return;
+    const recoveryCards = opsState.cards.filter((card) =>
+      (card.reconciliation?.status === "awaiting_repair"
+        && card.reconciliation.reason === "legacy_recovery")
+      || (card.reconciliation?.status === "retrying"
+        && card.reconciliation.message?.includes("project recovery must resolve it without discarding files.")));
+    if (!recoveryCards.length) return;
+    const recoveryCardIds = new Set(recoveryCards.map((card) => card.id));
+    const recoveryEvent = recoveryCards
+      .flatMap((card) => card.events ?? [])
+      .filter((event) => event.id.startsWith("automatic:legacy-recovery:"))
+      .sort((left, right) => left.timestamp.localeCompare(right.timestamp))
+      .at(-1);
+    const recoveryCompleted = recoveryEvent && recoveryCards
+      .flatMap((card) => card.events ?? [])
+      .some((event) => event.id.startsWith("automatic:legacy-recovery-complete:")
+        && event.targetId === recoveryEvent.targetId
+        && event.timestamp >= recoveryEvent.timestamp);
+    const recoveryRuntimeId = legacyRecoveryRuntimeRef.current.get(activeProject.id)
+      ?? (!recoveryCompleted ? recoveryEvent?.targetId : undefined);
+    const recoveryRuntime = recoveryRuntimeId
+      ? currentRuntimes()[recoveryRuntimeId]
+      : undefined;
+    if (recoveryRuntime && ["starting", "running", "in_progress", "needs_input"].includes(recoveryRuntime.status)) return;
+    if (recoveryRuntime?.status === "completed") {
+      if (legacyRecoveryCompletionPendingRef.current.has(activeProject.id)) return;
+      legacyRecoveryCompletionPendingRef.current.add(activeProject.id);
+      const timestamp = new Date().toISOString();
+      void persistOpsImmediately((current) => ({
+        ...current,
+        cards: current.cards.map((card) => recoveryCardIds.has(card.id)
+          ? appendOpsTaskEvent({
+              ...card,
+              reconciliation: {
+                status: "queued",
+                attempts: 0,
+                message: "Project recovery completed; task evidence is ready for reconciliation.",
+                updatedAt: timestamp,
+              },
+            }, {
+              id: `automatic:legacy-recovery-complete:${timestamp}:${card.id}`,
+              kind: "update",
+              timestamp,
+              message: "Project recovery completed",
+              targetId: recoveryRuntime.nodeId,
+            })
+          : card),
+      })).finally(() => {
+        legacyRecoveryCompletionPendingRef.current.delete(activeProject.id);
+        legacyRecoveryRuntimeRef.current.delete(activeProject.id);
+      });
+      return;
+    }
+    if (recoveryRuntimeId) legacyRecoveryRuntimeRef.current.delete(activeProject.id);
+    if (!selectedAdapterReady || legacyRecoverySpawnPendingRef.current.has(activeProject.id)) return;
+    legacyRecoverySpawnPendingRef.current.add(activeProject.id);
+    const inventory = recoveryCards.map((card) => ({
+      id: card.id,
+      title: card.title,
+      branch: card.taskLane?.branch,
+      baseCommit: card.taskLane?.baseCommit,
+      worktreePath: card.taskLane?.worktreePath,
+    }));
+    const prompt = [
+      `Recover legacy wheeljack task state for ${activeProject.path}.`,
+      "Act as the single project reconciler. Inspect the main checkout, every listed branch, every registered worktree, and every orphan task directory. Preserve all valuable staged, unstaged, untracked, and committed work. Commit uncommitted work on the correct task branch, integrate completed branches into the opened branch in a coherent order, resolve overlaps, and run repository-relevant checks.",
+      "Never reset, discard, or overwrite work. Do not delete a task directory unless every file is committed and integrated; archive uncertain copies instead. Treat opened-checkout changes that are not clearly attributable to a listed legacy task as active work, even when they predate your inventory. Also treat files that appear or change after inventory as active concurrent work. Leave active work untouched, do not wait on or commit it, and do not let it block legacy recovery. Finish with a concise recovery report after every legacy artifact is integrated, preserved, or safely archived.",
+      `Recovery inventory:\n${JSON.stringify(inventory, null, 2)}`,
+    ].join("\n\n");
+    void spawnAgent(prompt, undefined, prompt, "worker", undefined, selectedAdapterId, {
+      autonomyDepth: 0,
+      onSpawned: (node) => {
+        legacyRecoveryRuntimeRef.current.set(activeProject.id, node.id);
+        const timestamp = new Date().toISOString();
+        void persistOpsImmediately((current) => ({
+          ...current,
+          cards: current.cards.map((card) => recoveryCardIds.has(card.id)
+            ? appendOpsTaskEvent({
+                ...card,
+                reconciliation: {
+                  ...card.reconciliation,
+                  status: "awaiting_repair",
+                  attempts: card.reconciliation?.attempts ?? 0,
+                  reason: "legacy_recovery",
+                  message: `Project recovery is running with ${node.title}.`,
+                  updatedAt: timestamp,
+                },
+              }, card.id === recoveryCards[0].id ? {
+                id: `automatic:legacy-recovery:${timestamp}`,
+                kind: "assignment",
+                timestamp,
+                message: `Started one project recovery agent for ${recoveryCards.length} legacy tasks`,
+                targetId: node.id,
+              } : {
+                id: `automatic:legacy-recovery-linked:${timestamp}:${card.id}`,
+                kind: "update",
+                timestamp,
+                message: "Included in project recovery",
+                targetId: node.id,
+              })
+            : card),
+        })).catch(() => undefined);
+      },
+    }).then((started) => {
+      if (!started) legacyRecoveryRuntimeRef.current.delete(activeProject.id);
+    }).catch((cause) => {
+      legacyRecoveryRuntimeRef.current.delete(activeProject.id);
+      setError(`Project recovery could not start: ${message(cause)}`);
+    }).finally(() => {
+      legacyRecoverySpawnPendingRef.current.delete(activeProject.id);
+    });
+    // Recovery is one project-scoped agent; card events provide durable restart linkage.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvas, opsState.cards, runtimes, safeStartupActive, selectedAdapterId, selectedAdapterReady]);
 
   useEffect(() => {
     const reviewColumnIds = new Set(opsState.columns.filter((column) => column.role === "review").map((column) => column.id));
@@ -5818,16 +5973,8 @@ export function App() {
     opsState,
     nodes: nodeById,
   }), [activity, nodeById, opsState, runtimes]);
-  const adapterArgsById = useMemo(() => Object.fromEntries(
-    agentProfiles.map((profile) => [profile.adapterId, agentLaunchArgs(profile)]),
-  ), [agentProfiles]);
   const readyCodingAdapters = adapters.filter((adapter) =>
     adapter.id !== "generic-shell" && isAdapterReady(adapter, adapterArgsById[adapter.id] ?? []));
-  const selectedAdapter = adapters.find((adapter) => adapter.id === selectedAdapterId);
-  const selectedAdapterReady = isAdapterReady(
-    selectedAdapter,
-    adapterArgsById[selectedAdapterId] ?? [],
-  );
   useEffect(() => {
     if (!startupReady || safeStartupActive) return;
     const targets = adapters.flatMap((adapter) => {
