@@ -3,6 +3,7 @@ import {
   agentLaunchArgs,
   agentLaunchConfig,
   agentProjectAccessConfig,
+  supportsAskIntent,
   agentStatusAfterInteraction,
   agentRuntimeCapabilities,
   agentTaskCardsFromProposal,
@@ -1032,6 +1033,19 @@ test("holds verified and approved legacy review cards for one project recovery p
     assigneeIds: [],
     agentStatuses: {},
   });
+});
+
+test("maps Ask intent only to enforceable read-only adapter profiles", () => {
+  const profiles = defaultAgentProfiles();
+  const codex = profiles.find((profile) => profile.adapterId === "codex-cli");
+  const claude = profiles.find((profile) => profile.adapterId === "claude-code");
+  expect(agentProjectAccessConfig(codex, "full", "ask"))
+    .toEqual({ approvalPolicy: "never", sandbox: "read-only" });
+  expect(agentLaunchConfig(claude, "full", "ask").args)
+    .toContain("plan");
+  expect(supportsAskIntent("codex-cli")).toBe(true);
+  expect(supportsAskIntent("claude-code")).toBe(true);
+  expect(supportsAskIntent("opencode")).toBe(false);
 });
 
 test("recovers interrupted reconciliation as a safe retry", () => {

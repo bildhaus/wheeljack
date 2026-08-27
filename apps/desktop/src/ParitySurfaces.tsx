@@ -142,7 +142,7 @@ type OpsTaskEditablePatch = Partial<Pick<OpsCard, "title" | "detail" | "definiti
 const OpsArchiveDialogs = lazy(() => import("./OpsArchiveDialogs"));
 const TaskWorktreeList = lazy(() => import("./TaskWorktreeList"));
 import { activeVsCodeThemeName, parseImportedThemeDocument, type ThemeImportResult } from "./themeImport";
-import { discoverVsCodeThemes, readThemeDocument, writeThemeDocument, type VsCodeThemeSource } from "./core";
+import { callCore, discoverVsCodeThemes, readThemeDocument, writeThemeDocument, type VsCodeThemeSource } from "./core";
 import type { UpdateController } from "./updater";
 import {
   formatUpdateDate,
@@ -2980,6 +2980,8 @@ export function SettingsSurface({
   const [vsCodeThemeQuery, setVsCodeThemeQuery] = useState("");
   const [fontFamilies, setFontFamilies] = useState<string[]>([]);
   const [storageStatus, setStorageStatus] = useState("");
+  const [systemCheck, setSystemCheck] = useState("");
+  const [systemCheckBusy, setSystemCheckBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
   useEffect(() => {
     void invoke<string[]>("system_font_families")
@@ -3415,8 +3417,19 @@ export function SettingsSurface({
                       .then(() => setStorageStatus("Diagnostics copied."))
                       .catch(() => setStorageStatus("Could not copy diagnostics."));
                   }}>Copy diagnostics</Button>
+                  <Button variant="outline" disabled={systemCheckBusy} onClick={() => {
+                    setSystemCheckBusy(true);
+                    void callCore<Record<string, unknown>>("system_diagnostics_run", {})
+                      .then((report) => {
+                        setSystemCheck(JSON.stringify(report, null, 2));
+                        setStorageStatus(report.ok === true ? "System check passed." : "System check found an issue.");
+                      })
+                      .catch((cause) => setStorageStatus(cause instanceof Error ? cause.message : String(cause)))
+                      .finally(() => setSystemCheckBusy(false));
+                  }}>{systemCheckBusy ? <><DotMatrixLoader size={16} />Checking…</> : "Run system check"}</Button>
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">Backups stay local. Diagnostics exclude credentials and transcript content.</p>
+                {systemCheck && <pre className="mt-3 max-h-64 overflow-auto rounded-md border p-3 text-xs" aria-label="System check results">{systemCheck}</pre>}
                 {storageStatus && <p className="mt-3 text-sm text-muted-foreground" role="status">{storageStatus}</p>}
               </SettingsCard>
               <SettingsCard danger title="Reset preferences" description="Restore appearance, workspace, shortcuts, and coding-agent profiles to their defaults.">

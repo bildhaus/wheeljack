@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 19;
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 20;
 type Migration = (i32, fn(&Connection) -> Result<()>);
 const SQLITE_WRITE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(25),
@@ -263,7 +263,8 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
         (16, migrate_interim_bot_profiles),
         (17, add_session_node_title),
         (18, add_project_ops_state),
-        (LATEST_SCHEMA_VERSION, repair_legacy_recovery_state),
+        (19, repair_legacy_recovery_state),
+        (LATEST_SCHEMA_VERSION, add_durable_agent_workflows),
     ];
     for (version, migration) in migrations {
         if current_version >= *version {
@@ -274,6 +275,94 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
     }
+    Ok(())
+}
+
+fn add_durable_agent_workflows(connection: &Connection) -> Result<()> {
+    if table_exists(connection, "sessions")? {
+        ensure_table_column(
+            connection,
+            "sessions",
+            "intent",
+            "TEXT NOT NULL DEFAULT 'code'",
+        )?;
+    }
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS session_prompt_deliveries (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          seq INTEGER NOT NULL,
+          mode TEXT NOT NULL,
+          state TEXT NOT NULL,
+          payload_json TEXT,
+          revision INTEGER NOT NULL DEFAULT 1,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          dispatch_token TEXT,
+          error_code TEXT,
+          error_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          delivered_at TEXT,
+          UNIQUE(session_id, seq)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_session_prompt_deliveries_pending
+        ON session_prompt_deliveries(session_id, state, seq);
+
+        CREATE TABLE IF NOT EXISTS project_lifecycle_runs (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          task_id TEXT,
+          worktree_path TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          state TEXT NOT NULL,
+          command_json TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL,
+          port INTEGER,
+          url TEXT,
+          pid INTEGER,
+          exit_code INTEGER,
+          error_message TEXT,
+          started_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          ended_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_project_lifecycle_runs_project
+        ON project_lifecycle_runs(project_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS project_lifecycle_trust (
+          project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+          manifest_hash TEXT NOT NULL,
+          trusted_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS project_lifecycle_chunks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL REFERENCES project_lifecycle_runs(id) ON DELETE CASCADE,
+          seq INTEGER NOT NULL,
+          stream TEXT NOT NULL,
+          data BLOB NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(run_id, seq)
+        );
+
+        UPDATE session_prompt_deliveries
+        SET state = 'indeterminate',
+            error_code = 'interrupted_dispatch',
+            error_message = 'Wheeljack stopped before prompt delivery could be confirmed.',
+            updated_at = datetime('now')
+        WHERE state = 'dispatching';
+
+        UPDATE project_lifecycle_runs
+        SET state = 'interrupted',
+            error_message = 'Wheeljack stopped while this process was running.',
+            updated_at = datetime('now'),
+            ended_at = datetime('now')
+        WHERE state IN ('starting', 'running', 'ready', 'stopping');
+        "#,
+    )?;
     Ok(())
 }
 

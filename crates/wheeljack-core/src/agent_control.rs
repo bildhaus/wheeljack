@@ -78,6 +78,19 @@ pub(crate) fn authorize_agent_control(
         "Agent autonomy is disabled.".to_string()
     };
 
+    let source_intent = db
+        .query_row(
+            "SELECT intent FROM sessions WHERE id = ?1",
+            params![&req.source_session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "code".to_string());
+    if source_intent == "ask" && req.action != "list_agents" {
+        decision = "deny".to_string();
+        reason = "Ask sessions cannot delegate or mutate workspace state.".to_string();
+    }
+
     let recent_actions: i64 = db.query_row(
         "SELECT COUNT(*) FROM session_events
          WHERE session_id = ?1 AND kind = ?2

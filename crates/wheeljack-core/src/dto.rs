@@ -600,6 +600,7 @@ pub struct SessionHistoryItemDto {
     pub adapter_id: String,
     pub cwd: String,
     pub status: String,
+    pub intent: String,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
     pub chunk_count: i64,

@@ -145,6 +145,34 @@ test("keeps the active turn visible and makes stop a distinct action", async () 
   expect(stop.querySelector('[data-sargam-icon="stop"]')).not.toBeNull();
   await user.click(stop);
   expect(callbacks.onCancel).toHaveBeenCalledOnce();
+
+  const composer = screen.getByRole("textbox", { name: "Agent prompt" });
+  await user.type(composer, "Check the tests next{Enter}");
+  await waitFor(() => expect(callbacks.onPrompt).toHaveBeenCalledWith("Check the tests next", []));
+  expect(screen.getByRole("button", { name: "Queue prompt" })).toBeTruthy();
+});
+
+test("shows durable prompt recovery actions", async () => {
+  const user = userEvent.setup();
+  coreMocks.callCore.mockResolvedValue({});
+  renderChat({
+    promptDeliveries: [{
+      id: "delivery-one",
+      sessionId: "session-one",
+      seq: 2,
+      mode: "next",
+      state: "indeterminate",
+      payload: { prompt: "Check again", historyText: "Check again", imagePaths: [] },
+      revision: 1,
+      attempts: 1,
+      errorMessage: "Delivery could not be confirmed.",
+      createdAt: "2026-08-28T00:00:00Z",
+      updatedAt: "2026-08-28T00:00:01Z",
+    }],
+  });
+  expect(screen.getByText("Delivery could not be confirmed.")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  expect(coreMocks.callCore).toHaveBeenCalledWith("session_prompt_retry", { deliveryId: "delivery-one" });
 });
 
 test("uses the latest progress update instead of a generic working fallback", () => {

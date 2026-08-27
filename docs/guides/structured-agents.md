@@ -13,12 +13,19 @@ normalizes presentation, lifecycle, and local persistence.
 1. [Verify an adapter](/getting-started/connect-agents/) in Settings.
 2. Open a project and enter Work.
 3. Create an agent pane.
-4. Choose the adapter, model, effort level when supported, and project access.
+4. Choose the adapter, model, effort level when supported, project access, and
+   session intent.
 5. Send a prompt or attach supported images.
 
 Model lists come from the adapter rather than a hard-coded cross-provider
 catalog. Availability can therefore change with the installed CLI, account,
 provider, and adapter version.
+
+**Code** sessions use the project's configured agent access. **Ask** sessions
+are strictly read-only and are only available when the adapter exposes an
+enforceable read-only mode. wheeljack currently maps Ask to Codex's read-only
+sandbox with approvals disabled and Claude's plan permission mode. It does not
+show Ask for adapters where that guarantee would only be cosmetic.
 
 ## Read a turn
 
@@ -41,6 +48,13 @@ Only attach project or local files that may be sent to the selected CLI and its
 provider. wheeljack stores imported attachments locally, but the agent may
 upload their contents according to its own provider contract.
 :::
+
+You can submit another prompt while a turn is running. wheeljack stores it in a
+bounded SQLite queue and sends prompts to that session in order. Queued prompts
+can be edited or canceled; failed prompts can be retried. If wheeljack stops
+after a provider may have received a prompt but before delivery was recorded,
+the prompt is marked **indeterminate** and is never replayed automatically.
+Choose Retry only after checking the conversation for a duplicate.
 
 ## Stop, resume, and repair
 

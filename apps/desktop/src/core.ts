@@ -29,8 +29,8 @@ export async function connectCore(
   const events = new Channel<CoreEventEnvelope>();
   events.onmessage = onEvent;
   const connection = await invoke<CoreConnection>("core_connect", { events });
-  await callCore("core_handshake", { supportedVersions: [2, 1] });
-  return connection;
+  const handshake = await callCore<{ protocolVersion: number; capabilities: string[] }>("core_handshake", { supportedVersions: [2, 1] });
+  return { ...connection, ...handshake };
 }
 
 export async function callCore<T>(

@@ -65,6 +65,38 @@ fn request(id: &str, action: &str) -> AgentControlRequestDto {
 }
 
 #[test]
+fn ask_sessions_can_inspect_agents_but_cannot_delegate() {
+    let core = control_fixture("agent-control-ask", 0);
+    {
+        let db = core.lock_db().unwrap();
+        db.execute(
+            "UPDATE sessions SET intent = 'ask' WHERE id = 'session_source'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let listed = {
+        let db = core.lock_db().unwrap();
+        authorize_agent_control(&db, request("ask-list", "list_agents")).unwrap()
+    };
+    assert_eq!(listed.decision, "allow");
+
+    let mut delegated = request("ask-message", "send_message");
+    delegated.target = Some("Peer".to_string());
+    delegated.message = Some("Make this change for me.".to_string());
+    let denied = {
+        let db = core.lock_db().unwrap();
+        authorize_agent_control(&db, delegated).unwrap()
+    };
+    assert_eq!(denied.decision, "deny");
+    assert_eq!(
+        denied.reason,
+        "Ask sessions cannot delegate or mutate workspace state."
+    );
+}
+
+#[test]
 fn agent_control_authorizes_workspace_messages_and_deduplicates_requests() {
     let core = control_fixture("agent-control-message", 0);
     let mut req = request("message-1", "send_message");

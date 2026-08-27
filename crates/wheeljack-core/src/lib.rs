@@ -52,6 +52,8 @@ mod ops_runtime;
 mod path_helpers;
 mod project_documents;
 mod project_files;
+mod project_lifecycle;
+mod prompt_delivery;
 mod protocol;
 mod session_history;
 mod settings;
@@ -98,7 +100,7 @@ use coordination::{
 };
 use db::{
     append_session_event, export_database_backup, migrate_app_data, open_app_connection,
-    recover_interrupted_sessions, retry_sqlite_write, run_migrations,
+    recover_interrupted_sessions, retry_sqlite_write, run_migrations, LATEST_SCHEMA_VERSION,
 };
 use dto::*;
 use git::{
@@ -124,6 +126,8 @@ use project_documents::{
     project_document_write_fingerprint, read_project_documents, DocumentApproval,
 };
 use project_files::list_project_files;
+use project_lifecycle::*;
+use prompt_delivery::*;
 use protocol::{
     response_error, response_error_versioned, response_ok_versioned, CommandError, CoreRequest,
 };
@@ -833,6 +837,8 @@ pub struct Core {
     db: Mutex<Connection>,
     pty_sessions: Arc<Mutex<HashMap<String, PtySessionHandle>>>,
     structured_agent_sessions: Arc<Mutex<HashMap<String, StructuredAgentSessionHandle>>>,
+    prompt_drainers: Arc<Mutex<HashSet<String>>>,
+    lifecycle_processes: Arc<Mutex<HashMap<String, LifecycleProcessHandle>>>,
     paths: CorePaths,
     platform: String,
     version: String,
@@ -865,6 +871,8 @@ impl Core {
         let connection = open_app_connection(&db_path)?;
         run_migrations(&connection)?;
         let recovered_sessions = recover_interrupted_sessions(&connection)?;
+        recover_prompt_deliveries(&connection)?;
+        recover_lifecycle_runs(&connection)?;
         let (startup_recovery, startup_run) = begin_startup_run(
             &paths.app_data_dir,
             &init.version,
@@ -894,6 +902,8 @@ impl Core {
             db: Mutex::new(connection),
             pty_sessions: Arc::new(Mutex::new(HashMap::new())),
             structured_agent_sessions: Arc::new(Mutex::new(HashMap::new())),
+            prompt_drainers: Arc::new(Mutex::new(HashSet::new())),
+            lifecycle_processes: Arc::new(Mutex::new(HashMap::new())),
             paths,
             platform: init.platform,
             version: init.version,
@@ -992,6 +1002,21 @@ impl Core {
                 let _ = kill_structured_process(&mut child, &session.process.process_tree);
             }
         }
+        let lifecycle_processes = self
+            .lifecycle_processes
+            .lock()
+            .map(|mut processes| {
+                processes
+                    .drain()
+                    .map(|(_, process)| process)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for process in lifecycle_processes {
+            if let Ok(mut child) = process.child.lock() {
+                let _ = kill_structured_process(&mut child, &process.process_tree);
+            }
+        }
 
         let workers = self
             .workers
@@ -1016,6 +1041,7 @@ impl Core {
     fn dispatch(&self, command: &str, payload: Value) -> std::result::Result<Value, CommandError> {
         match command {
             "core_handshake" => self.core_handshake(payload),
+            "system_diagnostics_run" => self.system_diagnostics_run().map_err(CommandError::failed),
             "core_status" => Ok(json!({
                 "platform": self.platform,
                 "version": self.version,
@@ -1181,6 +1207,39 @@ impl Core {
             "session_prompt_send" => self
                 .session_prompt_send(payload)
                 .map_err(CommandError::failed),
+            "session_prompt_submit" => self
+                .session_prompt_submit(payload)
+                .map_err(CommandError::failed),
+            "session_prompt_list" => self
+                .session_prompt_list(payload)
+                .map_err(CommandError::failed),
+            "session_prompt_retry" => self
+                .session_prompt_retry(payload)
+                .map_err(CommandError::failed),
+            "session_prompt_edit" => self
+                .session_prompt_edit(payload)
+                .map_err(CommandError::failed),
+            "session_prompt_cancel" => self
+                .session_prompt_cancel(payload)
+                .map_err(CommandError::failed),
+            "project_lifecycle_inspect" => self
+                .project_lifecycle_inspect(payload)
+                .map_err(CommandError::failed),
+            "project_lifecycle_trust" => self
+                .project_lifecycle_trust(payload)
+                .map_err(CommandError::failed),
+            "project_lifecycle_start" => self
+                .project_lifecycle_start(payload)
+                .map_err(CommandError::failed),
+            "project_lifecycle_stop" => self
+                .project_lifecycle_stop(payload)
+                .map_err(CommandError::failed),
+            "project_lifecycle_runs" => self
+                .project_lifecycle_runs(payload)
+                .map_err(CommandError::failed),
+            "project_lifecycle_logs" => self
+                .project_lifecycle_logs(payload)
+                .map_err(CommandError::failed),
             "pty_input_blocked_reason" => self
                 .pty_input_blocked_reason(payload)
                 .map_err(CommandError::failed),
@@ -1341,8 +1400,62 @@ impl Core {
                 "git-worktrees",
                 "git-task-lanes-v1",
                 "session-recovery"
-                ,"adapter-readiness-v1"
+                ,"adapter-readiness-v1",
+                "prompt-delivery-v1",
+                "session-intent-v1",
+                "project-lifecycle-v1",
+                "system-diagnostics-v1"
             ]
+        }))
+    }
+
+    fn system_diagnostics_run(&self) -> Result<Value> {
+        let db = self.lock_db()?;
+        let sqlite: String = db.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        let running_sessions: i64 = db.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE status = 'running'",
+            [],
+            |row| row.get(0),
+        )?;
+        let pending_prompts: i64 = db.query_row(
+            "SELECT COUNT(*) FROM session_prompt_deliveries
+             WHERE state IN ('queued', 'dispatching', 'failed', 'indeterminate', 'blocked')",
+            [],
+            |row| row.get(0),
+        )?;
+        let active_lifecycle: i64 = db.query_row(
+            "SELECT COUNT(*) FROM project_lifecycle_runs
+             WHERE state IN ('starting', 'running', 'ready', 'stopping')",
+            [],
+            |row| row.get(0),
+        )?;
+        let directory_checks = [
+            ("appData", &self.paths.app_data_dir),
+            ("cache", &self.paths.cache_dir),
+            ("updates", &self.paths.update_dir),
+        ]
+        .into_iter()
+        .map(|(name, path)| {
+            json!({
+                "name": name,
+                "ok": path.is_dir(),
+                "path": path,
+            })
+        })
+        .collect::<Vec<_>>();
+        Ok(json!({
+            "ok": sqlite == "ok" && directory_checks.iter().all(|check| check.get("ok") == Some(&Value::Bool(true))),
+            "checkedAt": now(),
+            "core": { "version": self.version, "platform": self.platform },
+            "database": { "ok": sqlite == "ok", "quickCheck": sqlite, "schemaVersion": LATEST_SCHEMA_VERSION },
+            "directories": directory_checks,
+            "runtime": {
+                "runningSessions": running_sessions,
+                "unresolvedPromptDeliveries": pending_prompts,
+                "activeLifecycleRuns": active_lifecycle,
+                "structuredProcesses": self.structured_agent_sessions.lock().map(|sessions| sessions.len()).unwrap_or_default(),
+                "ptyProcesses": self.pty_sessions.lock().map(|sessions| sessions.len()).unwrap_or_default()
+            }
         }))
     }
 
@@ -2465,6 +2578,363 @@ impl Core {
         }))
     }
 
+    fn session_prompt_submit(&self, payload: Value) -> Result<Value> {
+        let session_id = required_str(&payload, "sessionId")?.to_string();
+        let client_prompt_id = required_str(&payload, "clientPromptId")?.to_string();
+        let mode = payload
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("auto")
+            .to_string();
+        let image_paths = serde_json::from_value::<Vec<String>>(
+            payload
+                .get("imagePaths")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        )
+        .context("payload.imagePaths must be an array of paths")?;
+        let raw_prompt = payload
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if raw_prompt.trim().is_empty() && image_paths.is_empty() {
+            bail!("prompt text or an image is required");
+        }
+        let session = self
+            .lock_structured_sessions()?
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown structured agent session: {session_id}"))?;
+        if mode == "steer" && !session.capabilities.steer {
+            bail!("this agent protocol does not support steering an active turn");
+        }
+
+        let coordinated_prompt = self.coordinated_session_prompt(&payload, raw_prompt)?;
+        let effective_prompt = if payload.get("canvasId").and_then(Value::as_str).is_some()
+            && payload.get("nodeId").and_then(Value::as_str).is_some()
+        {
+            let db = self.lock_db()?;
+            append_agent_control_instructions(
+                &coordinated_prompt,
+                &load_agent_autonomy_policy(&db)?,
+                payload.get("taskId").and_then(Value::as_str),
+            )
+        } else {
+            coordinated_prompt
+        };
+        let req = SubmitPromptDeliveryRequest {
+            client_prompt_id,
+            session_id: session_id.clone(),
+            mode,
+            payload: PromptDeliveryPayload {
+                prompt: effective_prompt,
+                history_text: raw_prompt.to_string(),
+                image_paths,
+                provider: optional_agent_profile_value(&payload, "provider", 64)?,
+                model: optional_agent_profile_value(&payload, "model", 128)?,
+                thinking: optional_agent_profile_value(&payload, "thinking", 32)?,
+                approval_policy: if session.intent == "ask" {
+                    session.approval_policy.clone()
+                } else {
+                    payload
+                        .get("approvalPolicy")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                },
+                sandbox: if session.intent == "ask" {
+                    session.sandbox.clone()
+                } else {
+                    payload
+                        .get("sandbox")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                },
+            },
+        };
+        let delivery = {
+            let db = self.lock_db()?;
+            submit_prompt_delivery(&db, &req)?
+        };
+        self.events.emit("agent:prompt-delivery", &json!(delivery));
+        self.ensure_prompt_drainer(&session_id)?;
+        Ok(serde_json::to_value(delivery)?)
+    }
+
+    fn session_prompt_list(&self, payload: Value) -> Result<Value> {
+        let session_id = required_str(&payload, "sessionId")?;
+        let db = self.lock_db()?;
+        Ok(serde_json::to_value(list_prompt_deliveries(
+            &db, session_id,
+        )?)?)
+    }
+
+    fn session_prompt_retry(&self, payload: Value) -> Result<Value> {
+        let delivery_id = required_str(&payload, "deliveryId")?;
+        let delivery = {
+            let db = self.lock_db()?;
+            retry_prompt_delivery(&db, delivery_id)?
+        };
+        self.events.emit("agent:prompt-delivery", &json!(delivery));
+        self.ensure_prompt_drainer(&delivery.session_id)?;
+        Ok(serde_json::to_value(delivery)?)
+    }
+
+    fn session_prompt_edit(&self, payload: Value) -> Result<Value> {
+        let delivery_id = required_str(&payload, "deliveryId")?;
+        let prompt_payload = serde_json::from_value::<PromptDeliveryPayload>(
+            payload
+                .get("payload")
+                .cloned()
+                .ok_or_else(|| anyhow!("payload.payload is required"))?,
+        )?;
+        let delivery = {
+            let db = self.lock_db()?;
+            edit_prompt_delivery(&db, delivery_id, &prompt_payload)?
+        };
+        self.events.emit("agent:prompt-delivery", &json!(delivery));
+        self.ensure_prompt_drainer(&delivery.session_id)?;
+        Ok(serde_json::to_value(delivery)?)
+    }
+
+    fn session_prompt_cancel(&self, payload: Value) -> Result<Value> {
+        let delivery_id = required_str(&payload, "deliveryId")?;
+        let delivery = {
+            let db = self.lock_db()?;
+            cancel_prompt_delivery(&db, delivery_id)?
+        };
+        self.events.emit("agent:prompt-delivery", &json!(delivery));
+        Ok(serde_json::to_value(delivery)?)
+    }
+
+    fn project_lifecycle_inspect(&self, payload: Value) -> Result<Value> {
+        let project_id = required_str(&payload, "projectId")?;
+        let project_path = required_str(&payload, "projectPath")?;
+        let db = self.lock_db()?;
+        let (manifest, _) = read_lifecycle_manifest(&db, project_id, project_path)?;
+        Ok(serde_json::to_value(manifest)?)
+    }
+
+    fn project_lifecycle_trust(&self, payload: Value) -> Result<Value> {
+        let project_id = required_str(&payload, "projectId")?;
+        let project_path = required_str(&payload, "projectPath")?;
+        let expected_hash = required_str(&payload, "hash")?;
+        let db = self.lock_db()?;
+        let (manifest, _) = read_lifecycle_manifest(&db, project_id, project_path)?;
+        trust_lifecycle_manifest(&db, project_id, expected_hash, &manifest)?;
+        Ok(json!({ "trusted": true, "hash": expected_hash }))
+    }
+
+    fn project_lifecycle_start(&self, payload: Value) -> Result<Value> {
+        let project_id = required_str(&payload, "projectId")?.to_string();
+        let project_path = required_str(&payload, "projectPath")?.to_string();
+        let kind = required_str(&payload, "kind")?.to_string();
+        if !matches!(kind.as_str(), "setup" | "preview") {
+            bail!("lifecycle kind must be setup or preview");
+        }
+        let (manifest_dto, manifest) = {
+            let db = self.lock_db()?;
+            read_lifecycle_manifest(&db, &project_id, &project_path)?
+        };
+        if !manifest_dto.trusted {
+            bail!("review and trust the current lifecycle manifest before running it");
+        }
+        let task = match kind.as_str() {
+            "setup" => manifest.setup,
+            "preview" => manifest.preview,
+            _ => None,
+        }
+        .ok_or_else(|| anyhow!("lifecycle manifest does not define {kind}"))?;
+        let mut command = lifecycle_task_command(&task, &self.platform)?;
+        let needs_port = command.iter().any(|arg| arg.contains("{port}"))
+            || task
+                .url
+                .as_deref()
+                .is_some_and(|url| url.contains("{port}"));
+        let port = needs_port.then(reserve_localhost_port).transpose()?;
+        if let Some(port) = port {
+            for arg in &mut command {
+                *arg = arg.replace("{port}", &port.to_string());
+            }
+        }
+        let url = task.url.as_ref().map(|url| {
+            port.map_or_else(
+                || url.clone(),
+                |port| url.replace("{port}", &port.to_string()),
+            )
+        });
+        if let Some(url) = url.as_deref() {
+            validate_lifecycle_preview_url(url)?;
+        }
+        let root = fs::canonicalize(&project_path)?;
+        let cwd = lifecycle_working_dir(&root, &task)?;
+        let executable = command.remove(0);
+        let mut child_command = hidden_command(&executable);
+        child_command
+            .args(&command)
+            .current_dir(&cwd)
+            .envs(&task.env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_structured_process(&mut child_command);
+        let mut child = child_command.spawn().context("start lifecycle process")?;
+        let process_tree = match StructuredProcessTree::attach(&child) {
+            Ok(process_tree) => process_tree,
+            Err(error) => {
+                kill_structured_process_before_attach(&mut child);
+                return Err(error);
+            }
+        };
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let pid = child.id();
+        let run_id = id("lifecycle");
+        let timestamp = now();
+        let full_command = std::iter::once(executable)
+            .chain(command)
+            .collect::<Vec<_>>();
+        let persist_result = (|| -> Result<()> {
+            let db = self.lock_db()?;
+            db.execute(
+                "INSERT INTO project_lifecycle_runs
+                 (id, project_id, task_id, worktree_path, kind, state, command_json,
+                  manifest_hash, port, url, pid, started_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+                params![
+                    run_id,
+                    project_id,
+                    payload.get("taskId").and_then(Value::as_str),
+                    cwd.to_string_lossy().to_string(),
+                    kind,
+                    serde_json::to_string(&full_command)?,
+                    manifest_dto.hash,
+                    port,
+                    url,
+                    pid,
+                    timestamp,
+                ],
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = persist_result {
+            let _ = kill_structured_process(&mut child, &process_tree);
+            return Err(error);
+        }
+        let handle = LifecycleProcessHandle {
+            child: Arc::new(Mutex::new(child)),
+            process_tree,
+        };
+        self.lifecycle_processes
+            .lock()
+            .map_err(|error| anyhow!(error.to_string()))?
+            .insert(run_id.clone(), handle.clone());
+        let seq = Arc::new(AtomicU64::new(0));
+        if let Some(stdout) = stdout {
+            self.register_worker(spawn_lifecycle_log_reader(
+                self.paths.db_path(),
+                run_id.clone(),
+                "stdout",
+                stdout,
+                seq.clone(),
+                self.events.clone(),
+                self.shutdown_cancel.clone(),
+            ));
+        }
+        if let Some(stderr) = stderr {
+            self.register_worker(spawn_lifecycle_log_reader(
+                self.paths.db_path(),
+                run_id.clone(),
+                "stderr",
+                stderr,
+                seq,
+                self.events.clone(),
+                self.shutdown_cancel.clone(),
+            ));
+        }
+        self.register_worker(spawn_lifecycle_waiter(
+            self.paths.db_path(),
+            run_id.clone(),
+            project_id.clone(),
+            kind.clone(),
+            handle,
+            self.lifecycle_processes.clone(),
+            task.timeout_seconds,
+            self.events.clone(),
+            self.shutdown_cancel.clone(),
+        ));
+        let run = {
+            let db = self.lock_db()?;
+            load_lifecycle_runs(&db, &project_id, 1)?
+                .into_iter()
+                .find(|run| run.id == run_id)
+                .ok_or_else(|| anyhow!("lifecycle run was not persisted"))?
+        };
+        self.events.emit("lifecycle:state", &json!(run));
+        Ok(serde_json::to_value(run)?)
+    }
+
+    fn project_lifecycle_stop(&self, payload: Value) -> Result<Value> {
+        let run_id = required_str(&payload, "runId")?;
+        let handle = self
+            .lifecycle_processes
+            .lock()
+            .map_err(|error| anyhow!(error.to_string()))?
+            .get(run_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("lifecycle process is not running"))?;
+        {
+            let db = self.lock_db()?;
+            db.execute(
+                "UPDATE project_lifecycle_runs SET state = 'stopping', updated_at = ?2
+                 WHERE id = ?1 AND state IN ('starting', 'running', 'ready')",
+                params![run_id, now()],
+            )?;
+        }
+        let mut child = handle
+            .child
+            .lock()
+            .map_err(|error| anyhow!(error.to_string()))?;
+        kill_structured_process(&mut child, &handle.process_tree)?;
+        Ok(json!({ "stopping": true }))
+    }
+
+    fn project_lifecycle_runs(&self, payload: Value) -> Result<Value> {
+        let project_id = required_str(&payload, "projectId")?;
+        let limit = payload.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+        let db = self.lock_db()?;
+        Ok(serde_json::to_value(load_lifecycle_runs(
+            &db, project_id, limit,
+        )?)?)
+    }
+
+    fn project_lifecycle_logs(&self, payload: Value) -> Result<Value> {
+        let run_id = required_str(&payload, "runId")?;
+        let db = self.lock_db()?;
+        Ok(json!({ "runId": run_id, "text": load_lifecycle_logs(&db, run_id)? }))
+    }
+
+    fn ensure_prompt_drainer(&self, session_id: &str) -> Result<()> {
+        let mut drainers = self
+            .prompt_drainers
+            .lock()
+            .map_err(|error| anyhow!(error.to_string()))?;
+        if !drainers.insert(session_id.to_string()) {
+            return Ok(());
+        }
+        let worker = spawn_prompt_delivery_worker(
+            self.paths.db_path(),
+            self.paths.app_data_dir.clone(),
+            session_id.to_string(),
+            self.structured_agent_sessions.clone(),
+            self.prompt_drainers.clone(),
+            self.events.clone(),
+            self.shutdown_cancel.clone(),
+        );
+        drop(drainers);
+        self.register_worker(worker);
+        Ok(())
+    }
+
     fn coordinated_session_prompt(&self, payload: &Value, prompt: &str) -> Result<String> {
         let Some(canvas_id) = payload.get("canvasId").and_then(Value::as_str) else {
             return Ok(prompt.to_string());
@@ -3416,6 +3886,7 @@ impl Core {
     fn agent_structured_spawn(&self, payload: Value) -> Result<Value> {
         let req =
             serde_json::from_value::<StructuredAgentSpawnRequest>(unwrap_payload(payload, "req"))?;
+        validate_session_intent(&req)?;
         validate_agent_profile_values(
             req.provider.as_deref(),
             req.model.as_deref(),
@@ -3671,6 +4142,7 @@ impl Core {
                         stdin: stdin_handle.clone(),
                         protocol: protocol_name.clone(),
                         cwd: cwd_string.clone(),
+                        intent: req.intent.clone(),
                         http_port,
                         rpc_state: rpc_state.clone(),
                         provider: req.provider.clone(),
@@ -3689,8 +4161,8 @@ impl Core {
                 let db = self.lock_db()?;
                 let tx = db.unchecked_transaction()?;
                 tx.execute(
-                "INSERT INTO sessions (id, node_id, node_title, adapter_id, command_json, cwd, status, started_at, created_at, updated_at)
-                 VALUES (?1, ?2, COALESCE(NULLIF(?7, ''), (SELECT title FROM nodes WHERE id = ?2), ''), ?3, ?4, ?5, 'running', ?6, ?6, ?6)",
+                "INSERT INTO sessions (id, node_id, node_title, adapter_id, command_json, cwd, status, intent, started_at, created_at, updated_at)
+                 VALUES (?1, ?2, COALESCE(NULLIF(?7, ''), (SELECT title FROM nodes WHERE id = ?2), ''), ?3, ?4, ?5, 'running', ?8, ?6, ?6, ?6)",
                 params![
                     session_id,
                     req.node_id,
@@ -3715,12 +4187,14 @@ impl Core {
                         "taskId": req.task_id,
                         "parentSessionId": req.parent_session_id,
                         "autonomyDepth": req.autonomy_depth,
+                        "intent": req.intent,
                         "source": "structured_agent"
                     })
                     .to_string(),
                     cwd_string,
                     ts,
-                    req.node_title.as_deref().unwrap_or_default()
+                    req.node_title.as_deref().unwrap_or_default(),
+                    req.intent,
                 ],
             )?;
                 append_session_event(
@@ -3842,6 +4316,7 @@ impl Core {
                 adapter_id: req.adapter_id,
                 cwd: cwd.to_string_lossy().to_string(),
                 status: "running".to_string(),
+                intent: req.intent,
                 started_at: ts,
                 protocol: Some(protocol_name),
                 driver: Some(protocol.driver_id().to_string()),
@@ -3951,16 +4426,24 @@ impl Core {
                 provider,
                 model,
                 thinking,
-                approval_policy: payload
-                    .get("approvalPolicy")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or(session.approval_policy.clone()),
-                sandbox: payload
-                    .get("sandbox")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or(session.sandbox.clone()),
+                approval_policy: if session.intent == "ask" {
+                    session.approval_policy.clone()
+                } else {
+                    payload
+                        .get("approvalPolicy")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or(session.approval_policy.clone())
+                },
+                sandbox: if session.intent == "ask" {
+                    session.sandbox.clone()
+                } else {
+                    payload
+                        .get("sandbox")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or(session.sandbox.clone())
+                },
             },
             &prompt,
         )?;
@@ -4363,6 +4846,7 @@ impl Core {
             adapter_id,
             cwd: cwd.to_string_lossy().to_string(),
             status: "running".to_string(),
+            intent: "code".to_string(),
             started_at: ts,
             protocol: None,
             driver: None,
@@ -5573,6 +6057,197 @@ impl Core {
 impl Drop for Core {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_prompt_delivery_worker(
+    db_path: PathBuf,
+    app_data_dir: PathBuf,
+    session_id: String,
+    sessions: Arc<Mutex<HashMap<String, StructuredAgentSessionHandle>>>,
+    drainers: Arc<Mutex<HashSet<String>>>,
+    events: Arc<dyn EventSink>,
+    shutdown: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while !shutdown.load(Ordering::SeqCst) {
+            let session = sessions
+                .lock()
+                .ok()
+                .and_then(|sessions| sessions.get(&session_id).cloned());
+            let Some(session) = session else {
+                if let Ok(db) = open_app_connection(&db_path) {
+                    let _ = db.execute(
+                        "UPDATE session_prompt_deliveries
+                         SET state = 'blocked', error_code = 'session_not_running',
+                             error_message = 'Resume the agent session before sending this prompt.',
+                             updated_at = ?2
+                         WHERE session_id = ?1 AND state = 'queued'",
+                        params![session_id, now()],
+                    );
+                }
+                break;
+            };
+            let turn_active = session
+                .rpc_state
+                .as_ref()
+                .and_then(|state| state.lock().ok().map(|state| state.turn_active))
+                .unwrap_or(false);
+            if turn_active {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            let delivery = match open_app_connection(&db_path)
+                .and_then(|db| claim_next_prompt_delivery(&db, &session_id))
+            {
+                Ok(Some(delivery)) => delivery,
+                Ok(None) => {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                Err(error) => {
+                    events.emit(
+                        "agent:prompt-delivery-error",
+                        &json!({ "sessionId": session_id, "message": format!("{error:#}") }),
+                    );
+                    thread::sleep(Duration::from_millis(250));
+                    continue;
+                }
+            };
+            events.emit("agent:prompt-delivery", &json!(delivery));
+            let result =
+                dispatch_queued_prompt(&db_path, &app_data_dir, &session_id, &session, &delivery);
+            if let Ok(db) = open_app_connection(&db_path) {
+                match result {
+                    Ok(()) => {
+                        let _ = complete_prompt_delivery(&db, &delivery.id);
+                    }
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        let (state, code) = if message.contains("still streaming") {
+                            ("queued", "turn_active")
+                        } else {
+                            ("failed", "dispatch_failed")
+                        };
+                        let _ =
+                            settle_prompt_delivery_error(&db, &delivery.id, state, code, &message);
+                    }
+                }
+                if let Ok(Some(updated)) = load_prompt_delivery(&db, &delivery.id) {
+                    events.emit("agent:prompt-delivery", &json!(updated));
+                }
+            }
+        }
+        if let Ok(mut drainers) = drainers.lock() {
+            drainers.remove(&session_id);
+        }
+    })
+}
+
+fn dispatch_queued_prompt(
+    db_path: &Path,
+    app_data_dir: &Path,
+    session_id: &str,
+    session: &StructuredAgentSessionHandle,
+    delivery: &PromptDeliveryDto,
+) -> Result<()> {
+    let payload = delivery
+        .payload
+        .as_ref()
+        .ok_or_else(|| anyhow!("prompt delivery has no payload"))?;
+    let provider = payload.provider.clone().or(session.provider.clone());
+    let model = payload.model.clone().or(session.model.clone());
+    let thinking = payload.thinking.clone().or(session.thinking.clone());
+    let prompt = structured_prompt_from_paths(
+        &payload.prompt,
+        &payload.image_paths,
+        Path::new(&session.cwd),
+        app_data_dir,
+    )?;
+    let history_line = structured_user_history_line(&prompt, &payload.history_text)?;
+    let history_seq = session.seq.fetch_add(1, Ordering::SeqCst) + 1;
+    if session.protocol == "opencode-sse" {
+        structured_sse_send_prompt(
+            &StructuredSsePromptDriver {
+                protocol: session.protocol.clone(),
+                port: session
+                    .http_port
+                    .ok_or_else(|| anyhow!("structured SSE session has no HTTP port"))?,
+                rpc_state: session
+                    .rpc_state
+                    .clone()
+                    .ok_or_else(|| anyhow!("structured session has no RPC state"))?,
+                model,
+                thinking,
+            },
+            &prompt,
+        )?;
+    } else {
+        structured_rpc_send_prompt(
+            &StructuredProtocolDriver {
+                protocol: session.protocol.clone(),
+                cwd: session.cwd.clone(),
+                db_path: db_path.to_path_buf(),
+                session_id: session_id.to_string(),
+                stdin: session.stdin.clone().ok_or_else(|| {
+                    anyhow!("structured session does not accept follow-up prompts")
+                })?,
+                rpc_state: session
+                    .rpc_state
+                    .clone()
+                    .ok_or_else(|| anyhow!("structured session has no RPC state"))?,
+                provider,
+                model,
+                thinking,
+                approval_policy: if session.intent == "ask" {
+                    session.approval_policy.clone()
+                } else {
+                    payload
+                        .approval_policy
+                        .clone()
+                        .or(session.approval_policy.clone())
+                },
+                sandbox: if session.intent == "ask" {
+                    session.sandbox.clone()
+                } else {
+                    payload.sandbox.clone().or(session.sandbox.clone())
+                },
+            },
+            &prompt,
+        )?;
+    }
+    let db = open_app_connection(db_path)?;
+    persist_session_stream_chunk(&db, session_id, history_seq, "agent-input", &history_line)?;
+    Ok(())
+}
+
+fn validate_session_intent(req: &StructuredAgentSpawnRequest) -> Result<()> {
+    match req.intent.as_str() {
+        "code" => Ok(()),
+        "ask" if req.adapter_id == "codex-cli" => {
+            if req.sandbox.as_deref() != Some("read-only")
+                || req.approval_policy.as_deref() != Some("never")
+            {
+                bail!("Ask sessions require Codex read-only sandboxing with approvals disabled");
+            }
+            Ok(())
+        }
+        "ask" if req.adapter_id == "claude-code" => {
+            let plan_arg = req
+                .args
+                .windows(2)
+                .any(|args| args[0] == "--permission-mode" && args[1].eq_ignore_ascii_case("plan"));
+            if req.approval_policy.as_deref() != Some("plan") || !plan_arg {
+                bail!("Ask sessions require Claude plan permission mode");
+            }
+            Ok(())
+        }
+        "ask" => bail!(
+            "Ask mode is not enforceable for adapter: {}",
+            req.adapter_id
+        ),
+        other => bail!("unsupported session intent: {other}"),
     }
 }
 

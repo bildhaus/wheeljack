@@ -1,6 +1,7 @@
-import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgentChat } from "./AgentChat";
+import { callCore } from "./core";
 import { botSnapshotFromNode } from "./bots";
 import { agentCompositionFromNode, type AgentCompositionState } from "./agentComposition";
 import { PaneAgentMenuItems, type TerminalAgentContext } from "./PaneAgentMenuItems";
@@ -35,6 +36,8 @@ import type {
   AgentProfile,
   CanvasNode,
   JsonObject,
+  LifecycleManifest,
+  LifecycleRun,
   OpsCard,
   PaneRuntime,
   SplitAxis,
@@ -67,6 +70,7 @@ interface SplitViewProps {
   agentContexts: Record<string, TerminalAgentContext>;
   agentProfiles: AgentProfile[];
   projectRoot?: string;
+  projectId?: string;
   agentAccess?: AgentAccessMode;
   focusedPaneId: string | null;
   zoomedPaneId?: string | null;
@@ -116,6 +120,7 @@ export function SplitView(props: SplitViewProps) {
         agentContext={props.agentContexts[pane.id]}
         agentProfile={props.agentProfiles.find((profile) => profile.adapterId === runtime?.adapterId)}
         projectRoot={props.projectRoot}
+        projectId={props.projectId}
         agentAccess={props.agentAccess}
         focused={props.focusedPaneId === pane.id}
         zoomed={props.zoomedPaneId === pane.id}
@@ -239,6 +244,7 @@ function Pane({
   runtime,
   agentContext,
   agentProfile,
+  projectId,
   projectRoot,
   agentAccess,
   focused,
@@ -278,6 +284,7 @@ function Pane({
   agentContext?: TerminalAgentContext;
   agentProfile?: AgentProfile;
   projectRoot?: string;
+  projectId?: string;
   agentAccess?: AgentAccessMode;
   focused: boolean;
   zoomed: boolean;
@@ -509,7 +516,7 @@ function Pane({
             onResizePaint={onResizePaint}
             onContextMenuSelection={setContextSelection}
           />
-        ) : <DataPane node={node} shortcuts={shortcuts} onSave={onSaveData} />}
+        ) : <DataPane node={node} shortcuts={shortcuts} projectId={projectId} projectRoot={projectRoot} onSave={onSaveData} />}
       </div>
         </article>
       </ContextMenuTrigger>
@@ -534,10 +541,10 @@ function Pane({
   );
 }
 
-function DataPane({ node, shortcuts, onSave }: { node: CanvasNode; shortcuts: ShortcutBindings; onSave: (data: JsonObject) => void }) {
+function DataPane({ node, shortcuts, projectId, projectRoot, onSave }: { node: CanvasNode; shortcuts: ShortcutBindings; projectId?: string; projectRoot?: string; onSave: (data: JsonObject) => void }) {
   if (node.kind === "markdown_note") return <MarkdownPane node={node} saveShortcut={shortcuts["pane.save"]} onSave={onSave} />;
   if (node.kind === "task_checklist" || node.kind === "checklist") return <ChecklistPane node={node} onSave={onSave} />;
-  if (node.kind === "browser_preview") return <BrowserPane node={node} onSave={onSave} />;
+  if (node.kind === "browser_preview") return <BrowserPane node={node} projectId={projectId} projectRoot={projectRoot} onSave={onSave} />;
   return <pre className="fallback-pane">{stringValue(node.data, "content") ?? "No content."}</pre>;
 }
 
@@ -628,11 +635,66 @@ function ChecklistPane({ node, onSave }: { node: CanvasNode; onSave: (data: Json
   );
 }
 
-function BrowserPane({ node, onSave }: { node: CanvasNode; onSave: (data: JsonObject) => void }) {
+function BrowserPane({ node, projectId, projectRoot, onSave }: { node: CanvasNode; projectId?: string; projectRoot?: string; onSave: (data: JsonObject) => void }) {
   const initial = stringValue(node.data, "url") ?? "";
   const [draft, setDraft] = useState(initial);
   const [url, setUrl] = useState(initial);
   const [error, setError] = useState("");
+  const [manifest, setManifest] = useState<LifecycleManifest>();
+  const [run, setRun] = useState<LifecycleRun>();
+  const [logs, setLogs] = useState("");
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const runId = run?.id;
+  const runState = run?.state;
+  useEffect(() => {
+    if (!projectId || !projectRoot) return;
+    void callCore<LifecycleManifest>("project_lifecycle_inspect", { projectId, projectPath: projectRoot })
+      .then(setManifest)
+      .catch(() => setManifest(undefined));
+  }, [projectId, projectRoot]);
+  useEffect(() => {
+    if (!runId || !runState || !["running", "starting", "ready"].includes(runState)) return;
+    const refresh = () => {
+      void callCore<{ text: string }>("project_lifecycle_logs", { runId }).then((value) => setLogs(value.text)).catch(() => undefined);
+      if (projectId) void callCore<LifecycleRun[]>("project_lifecycle_runs", { projectId, limit: 20 }).then((runs) => {
+        const latest = runs.find((candidate) => candidate.id === runId);
+        if (latest) setRun(latest);
+      }).catch(() => undefined);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 500);
+    return () => window.clearInterval(timer);
+  }, [projectId, runId, runState]);
+  const trustManifest = async () => {
+    if (!manifest || !projectId || !projectRoot) return;
+    setLifecycleBusy(true);
+    try {
+      await callCore("project_lifecycle_trust", { projectId, projectPath: projectRoot, hash: manifest.hash });
+      setManifest({ ...manifest, trusted: true });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
+  const startLifecycle = async (kind: "setup" | "preview") => {
+    if (!projectId || !projectRoot) return;
+    setLifecycleBusy(true);
+    setLogs("");
+    try {
+      const next = await callCore<LifecycleRun>("project_lifecycle_start", { projectId, projectPath: projectRoot, kind });
+      setRun(next);
+      if (kind === "preview" && next.url) {
+        setDraft(next.url);
+        setUrl(next.url);
+        onSave({ ...node.data, url: next.url, lifecycleRunId: next.id });
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
   const navigate = () => {
     try {
       const parsed = new URL(draft.trim());
@@ -647,6 +709,19 @@ function BrowserPane({ node, onSave }: { node: CanvasNode; onSave: (data: JsonOb
   };
   return (
     <div className="data-pane-browser">
+      {manifest && <section className="browser-lifecycle" aria-label="Project lifecycle">
+        <div><strong>Project lifecycle</strong><small>{manifest.trusted ? "Trusted manifest" : "Review required"} · {manifest.hash.slice(0, 10)}</small></div>
+        {!manifest.trusted ? <>
+          <code>{JSON.stringify({ setup: manifest.setup, preview: manifest.preview }, null, 2)}</code>
+          <Button type="button" size="sm" variant="outline" disabled={lifecycleBusy} onClick={() => void trustManifest()}>Trust this manifest</Button>
+        </> : <div className="browser-lifecycle-actions">
+          {manifest.setup && <Button type="button" size="sm" variant="outline" disabled={lifecycleBusy || run?.state === "running"} onClick={() => void startLifecycle("setup")}>Run setup</Button>}
+          {manifest.preview && <Button type="button" size="sm" disabled={lifecycleBusy || run?.state === "running"} onClick={() => void startLifecycle("preview")}>Start preview</Button>}
+          {run && ["running", "starting", "ready"].includes(run.state) && <Button type="button" size="sm" variant="outline" onClick={() => void callCore("project_lifecycle_stop", { runId: run.id })}>Stop</Button>}
+          {run && <small>{run.kind} · {run.state}{run.exitCode !== undefined ? ` · exit ${run.exitCode}` : ""}</small>}
+        </div>}
+        {logs && <pre aria-label="Lifecycle logs">{logs}</pre>}
+      </section>}
       <form onSubmit={(event) => { event.preventDefault(); navigate(); }}>
         <Input aria-label="Browser address" value={draft} onChange={(event) => setDraft(event.target.value)} aria-invalid={Boolean(error)} />
         <Button size="sm">Go</Button>

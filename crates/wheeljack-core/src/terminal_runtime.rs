@@ -226,6 +226,7 @@ pub(crate) struct StructuredAgentSessionHandle {
     pub(crate) stdin: Option<Arc<Mutex<ChildStdin>>>,
     pub(crate) protocol: String,
     pub(crate) cwd: String,
+    pub(crate) intent: String,
     pub(crate) http_port: Option<u16>,
     pub(crate) rpc_state: Option<Arc<Mutex<StructuredAgentRpcState>>>,
     pub(crate) provider: Option<String>,
@@ -343,6 +344,9 @@ impl StructuredProtocol {
                     | Self::PiRpc
                     | Self::HermesAcp
             ),
+            // None of the current upstream protocols exposes a documented,
+            // acknowledgeable in-flight steering primitive yet.
+            steer: false,
         }
     }
 }
@@ -355,6 +359,7 @@ pub(crate) struct StructuredDriverCapabilities {
     pub(crate) resume: bool,
     pub(crate) attached_terminal: bool,
     pub(crate) image_input: bool,
+    pub(crate) steer: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -665,6 +670,7 @@ pub(crate) struct SessionDto {
     pub(crate) adapter_id: String,
     pub(crate) cwd: String,
     pub(crate) status: String,
+    pub(crate) intent: String,
     pub(crate) started_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) protocol: Option<String>,
@@ -683,6 +689,8 @@ pub(crate) struct StructuredAgentSpawnRequest {
     #[serde(default)]
     pub(crate) node_title: Option<String>,
     pub(crate) adapter_id: String,
+    #[serde(default = "default_session_intent")]
+    pub(crate) intent: String,
     #[serde(default)]
     pub(crate) canvas_id: Option<String>,
     #[serde(default)]
@@ -716,6 +724,10 @@ pub(crate) struct StructuredAgentSpawnRequest {
     pub(crate) sandbox: Option<String>,
     #[serde(default)]
     pub(crate) resume_session_id: Option<String>,
+}
+
+fn default_session_intent() -> String {
+    "code".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -104,7 +104,7 @@ test("makes startup usable before probing adapters and verifies exact profile ar
   );
   expect(probeSource).toContain("...agentLaunchConfig(profile)");
   expect(appSource.match(/\.\.\.agentLaunchConfig\(profile\)/g)).toHaveLength(2);
-  expect(appSource.match(/agentLaunchConfig\(profile, project\.agentAccess\)/g)).toHaveLength(2);
+  expect(appSource.match(/agentLaunchConfig\(profile, project\.agentAccess, intent\)/g)).toHaveLength(2);
 });
 
 test("waits for a structured payload instead of treating shell preamble as agent output", () => {

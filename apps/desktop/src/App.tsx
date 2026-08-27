@@ -204,6 +204,7 @@ import type {
   AdapterProbe,
   ActivityEvent,
   AgentAccessMode,
+  AgentSessionIntent,
   AgentAutonomyPolicy,
   AgentControlAudit,
   AgentControlAuthorization,
@@ -242,6 +243,7 @@ import type {
   OpsTaskLease,
   OpsTaskEvent,
   PaneRuntime,
+  PromptDelivery,
   Project,
   ProjectDocumentKind,
   ProjectDocuments,
@@ -467,6 +469,7 @@ export function App() {
   const [selectedAdapterId, setSelectedAdapterId] = useState("");
   const selectedAdapterIdRef = useRef("");
   const [agentPrompt, setAgentPrompt] = useState("");
+  const [agentIntent, setAgentIntent] = useState<AgentSessionIntent>("code");
   const [agentTask, setAgentTask] = useState<OpsCard>();
   const [agentTaskRole, setAgentTaskRole] = useState<OpsAgentRole>("worker");
   const [agentCreatorOpen, setAgentCreatorOpen] = useState(false);
@@ -1004,6 +1007,20 @@ export function App() {
         setUsageRefreshVersion((version) => version + 1);
       } else if (envelope.event === "usage:error") {
         setError(`Usage accounting failed: ${stringValue(envelope.payload, "message") ?? "unknown error"}`);
+      } else if (envelope.event === "agent:prompt-delivery") {
+        const delivery = envelope.payload as unknown as PromptDelivery;
+        if (!delivery.sessionId || !delivery.id) return;
+        setRuntimes((current) => {
+          const runtime = Object.values(current).find((candidate) => candidate.sessionId === delivery.sessionId);
+          if (!runtime) return current;
+          const deliveries = (runtime.promptDeliveries ?? []).filter((item) => item.id !== delivery.id);
+          if (!["delivered", "canceled"].includes(delivery.state)) deliveries.push(delivery);
+          deliveries.sort((left, right) => left.seq - right.seq);
+          return {
+            ...current,
+            [runtime.nodeId]: { ...runtime, promptDeliveries: deliveries },
+          };
+        });
       } else if (envelope.event === "terminal:frame") {
         const frame = envelope.payload as unknown as TerminalFrame;
         if (frame.metrics) metrics.coreFrameBuilds.push(frame.metrics.frameBuildMs);
@@ -1537,6 +1554,11 @@ export function App() {
           let frame: TerminalFrame | undefined;
           const protocol = stringValue(node.data, "protocol");
           const session = sessionsById.get(sessionId) ?? sessionsById.get(historySessionId);
+          const savedIntent = stringValue(node.data, "intent") ?? session?.intent;
+          const intent: AgentSessionIntent = savedIntent === "ask" ? "ask" : "code";
+          const promptDeliveries = structured && sessionId
+            ? await callCore<PromptDelivery[]>("session_prompt_list", { sessionId }).catch(() => [])
+            : [];
           let messages = agentMessages(node.data);
           let parsedStatus: string | undefined;
           let structuredLines: string[] = [];
@@ -1596,6 +1618,8 @@ export function App() {
                 sessionsById.get(historySessionId)?.status,
                 parsedStatus ?? stringValue(node.data, "status"),
               ),
+              intent,
+              promptDeliveries,
               frame,
               transcript,
               structuredLines,
@@ -1972,15 +1996,16 @@ export function App() {
     }
   };
 
-  const spawnAgent = async (initialPrompt = agentPrompt, opsTask?: OpsCard, displayPrompt = initialPrompt, opsRole: OpsAgentRole = "worker", schedulerLeaseId?: string, adapterIdOverride?: string, origin?: AgentSpawnOrigin, placement: PanePlacement = "auto", bot?: BotSpawnContext, preserveTaskState = false): Promise<boolean> => {
+  const spawnAgent = async (initialPrompt = agentPrompt, opsTask?: OpsCard, displayPrompt = initialPrompt, opsRole: OpsAgentRole = "worker", schedulerLeaseId?: string, adapterIdOverride?: string, origin?: AgentSpawnOrigin, placement: PanePlacement = "auto", bot?: BotSpawnContext, preserveTaskState = false, intent: AgentSessionIntent = "code"): Promise<boolean> => {
     const launchAdapterId = bot?.snapshot.launch.adapterId ?? adapterIdOverride ?? selectedAdapterId;
     if (!canvas || !project || !launchAdapterId) return false;
     let adapter = adapters.find((candidate) => candidate.id === launchAdapterId);
     const baseProfile = agentProfiles.find((candidate) => candidate.adapterId === launchAdapterId)
       ?? defaultAgentProfiles().find((candidate) => candidate.adapterId === launchAdapterId);
     const profile = botProfileForLaunch(baseProfile, bot?.snapshot);
-    const launchConfig = agentLaunchConfig(profile, project.agentAccess);
+    const launchConfig = agentLaunchConfig(profile, project.agentAccess, intent);
     const launchArgs = launchConfig.args;
+    const readinessArgs = intent === "ask" ? agentLaunchArgs(profile) : launchArgs;
     if (adapter && bot) {
       try {
         const probe = await callCore<AdapterProbe>("adapter_probe", {
@@ -1993,7 +2018,7 @@ export function App() {
         return false;
       }
     }
-    if (!adapter || !isAdapterReady(adapter, launchArgs)) {
+    if (!adapter || !isAdapterReady(adapter, readinessArgs)) {
       setError(`${adapter?.displayName ?? launchAdapterId} is not ready. Open Settings, rescan, and complete any sign-in or verification step.`);
       return false;
     }
@@ -2131,6 +2156,7 @@ export function App() {
           nodeId,
           nodeTitle,
           adapterId: launchAdapterId,
+          intent,
           canvasId: canvas.id,
           taskId: opsTask?.id,
           parentSessionId: origin?.parentSessionId,
@@ -2176,6 +2202,8 @@ export function App() {
         endedAt: session.endedAt,
         protocolSequence: 0,
         status: initialPrompt.trim() ? "running" : "ready",
+        intent: session.intent ?? intent,
+        promptDeliveries: [],
         transcript: "",
         structuredLines: [],
         messages: initialMessages,
@@ -2631,6 +2659,7 @@ export function App() {
     const previousStartedAt = runtime.startedAt;
     const previousEndedAt = runtime.endedAt;
     const turnStartedAt = new Date().toISOString();
+    const turnWasActive = ["starting", "running", "needs_input", "canceling"].includes(runtime.status);
     setRuntimes((current) => {
       const latest = current[runtime.nodeId];
       if (!latest) return current;
@@ -2640,8 +2669,8 @@ export function App() {
           ...latest,
           startedAt: turnStartedAt,
           endedAt: undefined,
-          status: "starting",
-          statusSummary: "Starting turn…",
+          status: turnWasActive ? latest.status : "starting",
+          statusSummary: turnWasActive ? latest.statusSummary : "Starting turn…",
           turnStartLine: latest.protocolSequence ?? latest.structuredLines.length,
           messages: mergeAgentMessages(latest.messages, [userMessage]),
         },
@@ -2650,7 +2679,7 @@ export function App() {
     try {
       const baseProfile = agentProfiles.find((candidate) => candidate.adapterId === runtime.adapterId);
       const profile = botProfileForLaunch(baseProfile, snapshot);
-      await callCore("session_prompt_send", {
+      const promptPayload = {
         sessionId: runtime.sessionId,
         nodeId: runtime.nodeId,
         adapterId: runtime.adapterId,
@@ -2661,8 +2690,16 @@ export function App() {
         workspacePath: project.path,
         taskId: stringValue(agentNode?.data ?? {}, "taskId") || undefined,
         ...(profile ? { provider: profile.provider, model: profile.model, thinking: profile.thinking } : {}),
-        ...agentProjectAccessConfig(profile, project.agentAccess),
-      });
+        ...agentProjectAccessConfig(profile, project.agentAccess, runtime.intent ?? "code"),
+      };
+      const delivery = runtime.structured
+        ? await callCore<PromptDelivery>("session_prompt_submit", {
+            ...promptPayload,
+            clientPromptId: crypto.randomUUID(),
+            mode: turnWasActive ? "next" : "auto",
+          })
+        : undefined;
+      if (!runtime.structured) await callCore("session_prompt_send", promptPayload);
       setRuntimes((current) => {
         const latest = current[runtime.nodeId];
         if (!latest) return current;
@@ -2671,11 +2708,14 @@ export function App() {
           [runtime.nodeId]: {
             ...latest,
             endedAt: undefined,
-            status: ["needs_input", "canceling", "failed", "completed", "canceled"].includes(latest.status)
+            status: turnWasActive ? latest.status
+              : ["needs_input", "canceling", "failed", "completed", "canceled"].includes(latest.status)
               ? latest.status
               : "running",
             messages: mergeAgentMessages(latest.messages, nextMessages),
-            statusSummary: latest.status === "needs_input"
+            statusSummary: turnWasActive && delivery
+              ? `Prompt #${delivery.seq} queued for the next turn.`
+              : latest.status === "needs_input"
               ? latest.statusSummary
               : undefined,
           },
@@ -2927,7 +2967,8 @@ export function App() {
     const snapshot = node ? botSnapshotFromNode(node.data) : undefined;
     const baseProfile = agentProfiles.find((candidate) => candidate.adapterId === runtime.adapterId);
     const profile = botProfileForLaunch(baseProfile, snapshot);
-    const launchConfig = agentLaunchConfig(profile, project.agentAccess);
+    const intent = runtime.intent ?? "code";
+    const launchConfig = agentLaunchConfig(profile, project.agentAccess, intent);
     let adapter = adapters.find((candidate) => candidate.id === runtime.adapterId);
     if (adapter && snapshot) {
       const probe = await callCore<AdapterProbe>("adapter_probe", {
@@ -2936,7 +2977,7 @@ export function App() {
       }).catch(() => undefined);
       if (probe) adapter = { ...adapter, probe };
     }
-    if (adapter && !isAdapterReady(adapter, launchConfig.args)) adapter = undefined;
+    if (adapter && !isAdapterReady(adapter, intent === "ask" ? agentLaunchArgs(profile) : launchConfig.args)) adapter = undefined;
     if (!node || !adapter) {
       setError(`${runtime.adapterId} is not ready. Open Settings and rescan adapters.`);
       return false;
@@ -2980,6 +3021,7 @@ export function App() {
               nodeId: runtime.nodeId,
               nodeTitle: node.title,
               adapterId: runtime.adapterId,
+              intent,
               canvasId: canvas.id,
               taskId: task?.id,
               parentSessionId: stringValue(node.data, "parentSessionId") || undefined,
@@ -3006,6 +3048,7 @@ export function App() {
             protocol: spawned.protocol ?? runtime.protocol,
             runtimeCapabilities: spawned.capabilities,
             runtimeInstanceId: spawned.runtimeInstanceId ?? spawned.id,
+            intent: spawned.intent ?? intent,
             specialistRolePending: rolePending ? false : node.data.specialistRolePending,
             chatPreview: [...nextMessages].reverse().find((message) => message.text.trim())?.text.trim().slice(0, 320),
           },
@@ -3025,6 +3068,7 @@ export function App() {
           protocol: spawned!.protocol ?? runtime.protocol,
           capabilities: spawned!.capabilities,
           runtimeInstanceId: spawned!.runtimeInstanceId ?? spawned!.id,
+          intent: spawned!.intent ?? intent,
           protocolSequence: 0,
           status: submittedPrompt || images.length ? "running" : "ready",
           statusSummary: submittedPrompt || images.length
@@ -7097,17 +7141,19 @@ export function App() {
                         const task = agentTask;
                         const taskRole = agentTaskRole;
                         const draftPrompt = agentPrompt;
+                        const draftIntent = agentIntent;
                         const focusComposer = !agentPrompt.trim();
                         focusCreatedAgentRef.current = focusComposer;
                         setAgentCreatorOpen(false);
                         setAgentTask(undefined);
                         setAgentTaskRole("worker");
-                        void spawnAgent(draftPrompt, task, draftPrompt, taskRole, undefined, undefined, undefined, agentPlacement).then((started) => {
+                        void spawnAgent(draftPrompt, task, draftPrompt, taskRole, undefined, undefined, undefined, agentPlacement, undefined, false, draftIntent).then((started) => {
                           if (started) return;
                           focusCreatedAgentRef.current = false;
                           setAgentPrompt(draftPrompt);
                           setAgentTask(task);
                           setAgentTaskRole(taskRole);
+                          setAgentIntent(draftIntent);
                           setAgentCreatorOpen(true);
                         });
                       }}>
@@ -7130,6 +7176,14 @@ export function App() {
                             <SelectTrigger aria-label="Structured agent adapter"><SelectValue placeholder="Choose an adapter" /></SelectTrigger>
                             <SelectContent>{adapters.filter((adapter) => adapter.id !== "generic-shell").map((adapter) => <SelectItem disabled={!isAdapterReady(adapter, adapterArgsById[adapter.id] ?? [])} key={adapter.id} value={adapter.id}><span className="wj-provider-label"><ProviderMark adapterId={adapter.id} /><span>{adapter.displayName} · {adapterReadinessLabel(adapter, adapterArgsById[adapter.id] ?? [])}</span></span></SelectItem>)}</SelectContent>
                           </Select>
+                          <Select value={agentIntent} onValueChange={(value) => setAgentIntent(value as AgentSessionIntent)}>
+                            <SelectTrigger aria-label="Agent session intent"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="code">Code · may change the project</SelectItem>
+                              <SelectItem value="ask" disabled={!supportsAskIntent(selectedAdapterId)}>Ask · enforced read-only</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          {agentIntent === "ask" && !supportsAskIntent(selectedAdapterId) && <p className="text-sm text-muted-foreground" role="status">Ask mode requires a verified Codex or Claude adapter.</p>}
                           <div className="wj-agent-placement" role="group" aria-label="Agent placement">
                             <Button type="button" variant={agentPlacement === "auto" ? "secondary" : "ghost"} size="icon-xs" aria-label="Arrange agent automatically" title="Smart layout" aria-pressed={agentPlacement === "auto"} onClick={() => setAgentPlacement("auto")}><LayoutDashboard /></Button>
                             <Button type="button" variant={agentPlacement === "columns" ? "secondary" : "ghost"} size="icon-xs" aria-label="Split agent right" title="Split right" aria-pressed={agentPlacement === "columns"} onClick={() => setAgentPlacement("columns")}><Columns2 /></Button>
@@ -7148,7 +7202,7 @@ export function App() {
                             setAgentCreatorOpen(false);
                             openCreateBot(launch);
                           }}>Create bot</Button>
-                          <Button type="submit" aria-label="Create agent" size="sm" disabled={!selectedAdapterReady}>{agentPrompt.trim() ? "Create & start" : "Create & focus"}</Button>
+                          <Button type="submit" aria-label="Create agent" size="sm" disabled={!selectedAdapterReady || (agentIntent === "ask" && !supportsAskIntent(selectedAdapterId))}>{agentPrompt.trim() ? "Create & start" : "Create & focus"}</Button>
                         </div>
                       </form>
                       </PopoverContent>
@@ -7225,6 +7279,7 @@ export function App() {
                       runtimes={runtimes}
                       agentContexts={terminalAgentContexts}
                       agentProfiles={agentProfiles}
+                      projectId={project?.id}
                       projectRoot={project?.path}
                       agentAccess={project?.agentAccess}
                       focusedPaneId={focusedPaneId}
@@ -7892,6 +7947,7 @@ async function persistNode(
       protocol: input.protocol,
       runtimeCapabilities: input.session.capabilities,
       runtimeInstanceId: input.session.runtimeInstanceId ?? input.session.id,
+      intent: input.session.intent ?? "code",
       taskId: input.taskId,
       taskRole: input.taskRole,
       autoCloseTaskAgent: input.autoCloseTaskAgent,
@@ -8061,8 +8117,13 @@ export function agentLaunchArgs(profile?: AgentProfile): string[] {
   }
 }
 
-export function agentProjectAccessConfig(profile: AgentProfile | undefined, agentAccess: AgentAccessMode): { approvalPolicy?: string; sandbox?: string } {
+export function agentProjectAccessConfig(profile: AgentProfile | undefined, agentAccess: AgentAccessMode, intent: AgentSessionIntent = "code"): { approvalPolicy?: string; sandbox?: string } {
   if (!profile) return {};
+  if (intent === "ask") {
+    if (profile.adapterId === "codex-cli") return { approvalPolicy: "never", sandbox: "read-only" };
+    if (profile.adapterId === "claude-code") return { approvalPolicy: "plan" };
+    return {};
+  }
   const approvalPolicy = agentAccess === "full"
     ? profile.adapterId === "codex-cli" ? "never"
       : profile.adapterId === "claude-code" ? "bypassPermissions"
@@ -8075,6 +8136,10 @@ export function agentProjectAccessConfig(profile: AgentProfile | undefined, agen
       ? { sandbox: agentAccess === "full" ? "danger-full-access" : "workspace-write" }
       : {}),
   };
+}
+
+export function supportsAskIntent(adapterId: string): boolean {
+  return adapterId === "codex-cli" || adapterId === "claude-code";
 }
 
 export function defaultAgentAutonomyPolicy(): AgentAutonomyPolicy {
@@ -8123,8 +8188,8 @@ export function agentAutonomyPolicyFromSettings(settings: JsonObject): AgentAuto
   });
 }
 
-export function agentLaunchConfig(profile?: AgentProfile, agentAccess?: AgentAccessMode) {
-  const access = agentAccess ? agentProjectAccessConfig(profile, agentAccess) : {};
+export function agentLaunchConfig(profile?: AgentProfile, agentAccess?: AgentAccessMode, intent: AgentSessionIntent = "code") {
+  const access = agentAccess ? agentProjectAccessConfig(profile, agentAccess, intent) : {};
   const launchProfile = profile && typeof access.approvalPolicy === "string"
     ? { ...profile, approvalPolicy: access.approvalPolicy }
     : profile;
