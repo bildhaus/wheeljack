@@ -674,7 +674,7 @@ function BrowserPane({ node, projectId, projectRoot, onSave }: { node: CanvasNod
       setManifest(nextManifest);
       setRun(currentRun ?? undefined);
       if (currentRun) {
-        const nextData = { ...nodeDataRef.current, lifecycleRunId: currentRun.id };
+        const nextData: JsonObject = { ...nodeDataRef.current, lifecycleRunId: currentRun.id };
         if (currentRun.kind === "preview" && currentRun.url) {
           setDraft(currentRun.url);
           setUrl(currentRun.url);
@@ -732,7 +732,7 @@ function BrowserPane({ node, projectId, projectRoot, onSave }: { node: CanvasNod
     try {
       const next = await callCore<LifecycleRun>("project_lifecycle_start", { projectId, projectPath: projectRoot, kind });
       setRun(next);
-      const nextData = { ...nodeDataRef.current, lifecycleRunId: next.id };
+      const nextData: JsonObject = { ...nodeDataRef.current, lifecycleRunId: next.id };
       if (kind === "preview" && next.url) {
         setDraft(next.url);
         setUrl(next.url);

@@ -1341,11 +1341,16 @@ test("migrates legacy verification state without starting redundant verification
     appSource.indexOf("const activateCanvas"),
     appSource.indexOf("const refreshProjectData"),
   );
-  expect(activationSource).toContain('"session_statuses"');
+  const hydrationSource = appSource.slice(
+    appSource.indexOf("const hydrateRuntimes"),
+    appSource.indexOf("const pickProject"),
+  );
+  expect(activationSource).toContain("hydrateRuntimes(runtimeNodes, sessions)");
+  expect(hydrationSource).toContain('"session_statuses"');
   expect(activationSource).toContain("const recoveredVerification =");
   expect(activationSource).toContain("await persistOpsQueued(nextOps, nextCanvas");
   expect(activationSource).toContain("recoverOpsVerificationRuns(");
-  expect(activationSource).toContain("normalizedOps,\n      new Set(),\n      new Set(),");
+  expect(activationSource).toMatch(/normalizedOps,\s+new Set\(\),\s+new Set\(\),/);
   expect(appSource).not.toContain("const _runOpsVerification");
 
   const merged = mergeProjectDocuments(state, {
