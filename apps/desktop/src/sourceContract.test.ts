@@ -367,10 +367,13 @@ test("quick starts the last-used agent with smart placement and keeps manual dir
   expect(launcherSource).toContain("onCloseAutoFocus=");
   expect(launcherSource).toContain("focusCreatedAgentRef.current = focusComposer");
   expect(launcherSource).toContain("event.currentTarget.form?.requestSubmit()");
-  expect(launcherSource).toContain('"Create & start" : "Create & focus"');
+  expect(launcherSource).toContain('"Start agent" : "Open agent"');
   expect(launcherSource).toContain('aria-label="Arrange agent automatically"');
   expect(launcherSource).toContain('aria-label="Split agent right"');
   expect(launcherSource).toContain('aria-label="Split agent down"');
+  expect(launcherSource).not.toContain("Ad hoc agent");
+  expect(stylesSource).toContain('.wj-agent-creator-field [data-slot="select-trigger"] { width: 100%; min-width: 0; }');
+  expect(stylesSource).toContain(".wj-agent-creator-behavior { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto;");
   expect(stylesSource).toContain(".wj-agent-launch-primary { border-radius: 6px 0 0 6px");
   expect(stylesSource).toContain(".wj-provider-mark { display: inline-block; width: 16px; height: 16px; flex: 0 0 auto; color: inherit;");
 });

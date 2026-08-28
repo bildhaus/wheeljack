@@ -5700,6 +5700,7 @@ export function App() {
       agentIntent,
     ),
   );
+  const agentCreatorChecking = selectedAdapter?.probe?.verificationStatus === "verifying";
 
   const reconcileReportedTask = async (reportedCard: OpsCard) => {
     const activeProject = projectRef.current;
@@ -7305,40 +7306,42 @@ export function App() {
                           setAgentCreatorOpen(true);
                         });
                       }}>
-                        <div><strong>{agentTask ? `New task ${agentTaskRole}` : "Agent options"}</strong><p>{agentTask ? "Choose a ready adapter. wheeljack will open a fresh dedicated agent in this task’s workspace." : "Leave the prompt blank to open a focused composer, or add one to start immediately."}</p></div>
+                        <div><strong>{agentTask ? `New task ${agentTaskRole}` : "New agent"}</strong><p>{agentTask ? "Choose a ready agent. wheeljack will open it in this task’s workspace." : "Choose how it should open, then optionally give it a first task."}</p></div>
                         <div className="wj-agent-creator-options">
-                          <Select value="ad-hoc" onValueChange={(value) => {
-                            if (value === "ad-hoc") return;
-                            const bot = bots.find((candidate) => candidate.id === value);
-                            if (!bot) return;
-                            setAgentCreatorOpen(false);
-                            void startSavedBot(bot);
-                          }}>
-                            <SelectTrigger aria-label="Agent or bot"><SelectValue /></SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="ad-hoc">Ad hoc agent</SelectItem>
-                              {bots.map((bot) => <SelectItem key={bot.id} value={bot.id}>{bot.name} · {bot.scope === "global" ? "Global" : "Project"}</SelectItem>)}
-                            </SelectContent>
-                          </Select>
-                          <Select value={selectedAdapterId} onValueChange={selectAgentAdapter}>
-                            <SelectTrigger aria-label="Structured agent adapter"><SelectValue placeholder="Choose an adapter" /></SelectTrigger>
-                            <SelectContent>{adapters.filter((adapter) => adapter.id !== "generic-shell").map((adapter) => <SelectItem disabled={!isAdapterReady(adapter, adapterArgsById[adapter.id] ?? [])} key={adapter.id} value={adapter.id}><span className="wj-provider-label"><ProviderMark adapterId={adapter.id} /><span>{adapter.displayName} · {adapterReadinessLabel(adapter, adapterArgsById[adapter.id] ?? [])}</span></span></SelectItem>)}</SelectContent>
-                          </Select>
-                          <Select value={agentIntent} onValueChange={(value) => setAgentIntent(value as AgentSessionIntent)}>
-                            <SelectTrigger aria-label="Agent session intent"><SelectValue /></SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="code">Code · may change the project</SelectItem>
-                              <SelectItem value="ask" disabled={!supportsAskIntent(selectedAdapterId)}>Ask · enforced read-only</SelectItem>
-                            </SelectContent>
-                          </Select>
-                          {agentIntent === "ask" && !supportsAskIntent(selectedAdapterId) && <p className="text-sm text-muted-foreground" role="status">Ask mode requires a verified Codex or Claude adapter.</p>}
-                          <div className="wj-agent-placement" role="group" aria-label="Agent placement">
-                            <Button type="button" variant={agentPlacement === "auto" ? "secondary" : "ghost"} size="icon-xs" aria-label="Arrange agent automatically" title="Smart layout" aria-pressed={agentPlacement === "auto"} onClick={() => setAgentPlacement("auto")}><LayoutDashboard /></Button>
-                            <Button type="button" variant={agentPlacement === "columns" ? "secondary" : "ghost"} size="icon-xs" aria-label="Split agent right" title="Split right" aria-pressed={agentPlacement === "columns"} onClick={() => setAgentPlacement("columns")}><Columns2 /></Button>
-                            <Button type="button" variant={agentPlacement === "rows" ? "secondary" : "ghost"} size="icon-xs" aria-label="Split agent down" title="Split down" aria-pressed={agentPlacement === "rows"} onClick={() => setAgentPlacement("rows")}><Columns2 className="rotate-90" /></Button>
+                          <div className="wj-agent-creator-target">
+                            <div className="wj-agent-creator-field">
+                              <span>Agent</span>
+                              <Select value={selectedAdapterId} onValueChange={selectAgentAdapter}>
+                                <SelectTrigger aria-label="Structured agent adapter"><SelectValue placeholder="Choose an adapter" /></SelectTrigger>
+                                <SelectContent>{adapters.filter((adapter) => adapter.id !== "generic-shell").map((adapter) => <SelectItem disabled={!isAdapterReady(adapter, adapterArgsById[adapter.id] ?? [])} key={adapter.id} value={adapter.id}><span className="wj-provider-label"><ProviderMark adapterId={adapter.id} /><span>{adapter.displayName} · {adapterReadinessLabel(adapter, adapterArgsById[adapter.id] ?? [])}</span></span></SelectItem>)}</SelectContent>
+                              </Select>
+                            </div>
                           </div>
+                          <div className="wj-agent-creator-behavior">
+                            <div className="wj-agent-creator-field">
+                              <span>Access</span>
+                              <Select value={agentIntent} onValueChange={(value) => setAgentIntent(value as AgentSessionIntent)}>
+                                <SelectTrigger aria-label="Agent session intent"><SelectValue /></SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="code">Code · may change files</SelectItem>
+                                  <SelectItem value="ask" disabled={!supportsAskIntent(selectedAdapterId)}>Ask · read-only</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div className="wj-agent-creator-field">
+                              <span>Placement</span>
+                              <div className="wj-agent-placement" role="group" aria-label="Agent placement">
+                                <Button type="button" variant={agentPlacement === "auto" ? "secondary" : "ghost"} size="icon-xs" aria-label="Arrange agent automatically" title="Smart layout" aria-pressed={agentPlacement === "auto"} onClick={() => setAgentPlacement("auto")}><LayoutDashboard /></Button>
+                                <Button type="button" variant={agentPlacement === "columns" ? "secondary" : "ghost"} size="icon-xs" aria-label="Split agent right" title="Split right" aria-pressed={agentPlacement === "columns"} onClick={() => setAgentPlacement("columns")}><Columns2 /></Button>
+                                <Button type="button" variant={agentPlacement === "rows" ? "secondary" : "ghost"} size="icon-xs" aria-label="Split agent down" title="Split down" aria-pressed={agentPlacement === "rows"} onClick={() => setAgentPlacement("rows")}><Columns2 className="rotate-90" /></Button>
+                              </div>
+                            </div>
+                          </div>
+                          {agentIntent === "ask" && !supportsAskIntent(selectedAdapterId) && <p className="text-sm text-muted-foreground" role="status">Ask mode requires Codex or Claude Code.</p>}
                         </div>
-                        {readyCodingAdapters.length === 0 && <p className="text-sm text-muted-foreground" role="status">No verified coding agent is available. Rescan adapters, then verify the launch profile in Settings.</p>}
+                        {!selectedIntentReady && <div className="wj-agent-creator-status">
+                          <span role="status">{agentCreatorChecking && <DotMatrixLoader size={14} />}{agentCreatorChecking ? `Checking ${selectedAdapter?.displayName ?? "coding agent"}…` : `${selectedAdapter?.displayName ?? "Coding agent"} is not ready. Verify it in Settings.`}</span>
+                        </div>}
                         <Textarea ref={agentPromptRef} className="min-h-24 resize-none" aria-label="Initial agent prompt" value={agentPrompt} onChange={(event) => setAgentPrompt(event.target.value)} onKeyDown={(event) => {
                           if (event.nativeEvent.isComposing || event.key !== "Enter" || event.shiftKey) return;
                           event.preventDefault();
@@ -7349,8 +7352,8 @@ export function App() {
                             const launch = { initialPrompt: agentPrompt, displayPrompt: agentPrompt, opsTask: agentTask, opsRole: agentTaskRole, placement: agentPlacement };
                             setAgentCreatorOpen(false);
                             openCreateBot(launch);
-                          }}>Create bot</Button>
-                          <Button type="submit" aria-label="Create agent" size="sm" disabled={!selectedIntentReady || (agentIntent === "ask" && !supportsAskIntent(selectedAdapterId))}>{agentPrompt.trim() ? "Create & start" : "Create & focus"}</Button>
+                          }}>Save as bot</Button>
+                          <Button type="submit" aria-label="Create agent" size="sm" disabled={!selectedIntentReady || (agentIntent === "ask" && !supportsAskIntent(selectedAdapterId))}>{agentPrompt.trim() ? "Start agent" : "Open agent"}</Button>
                         </div>
                       </form>
                       </PopoverContent>
