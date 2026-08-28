@@ -3341,6 +3341,13 @@ fn structured_opencode_sse_driver_posts_prompt_and_emits_events() {
         );
         thread::sleep(Duration::from_millis(5));
     }
+    // The fake SSE endpoint intentionally closes after its idle event. Stop the
+    // reconnecting reader before exercising interaction bookkeeping directly;
+    // otherwise a fast reconnect can deliver another idle event and clear the
+    // synthetic pending interactions below.
+    driver.cancellation.shutdown.store(true, Ordering::SeqCst);
+    sse_reader.join().unwrap();
+    driver.cancellation.shutdown.store(false, Ordering::SeqCst);
 
     let messages = posted_messages.lock().unwrap().clone();
     assert_eq!(messages.len(), 2);
@@ -3522,8 +3529,6 @@ fn structured_opencode_sse_driver_posts_prompt_and_emits_events() {
         .opencode
         .pending_interactions
         .is_empty());
-    driver.cancellation.shutdown.store(true, Ordering::SeqCst);
-    sse_reader.join().unwrap();
 }
 
 #[test]
