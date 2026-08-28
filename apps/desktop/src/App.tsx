@@ -1016,9 +1016,16 @@ export function App() {
           const deliveries = (runtime.promptDeliveries ?? []).filter((item) => item.id !== delivery.id);
           if (!["delivered", "canceled"].includes(delivery.state)) deliveries.push(delivery);
           deliveries.sort((left, right) => left.seq - right.seq);
+          const messages = runtime.messages.map((item) => item.deliveryId === delivery.id
+            ? {
+                ...item,
+                text: delivery.payload?.historyText ?? item.text,
+                deliveryState: delivery.state,
+              }
+            : item);
           return {
             ...current,
-            [runtime.nodeId]: { ...runtime, promptDeliveries: deliveries },
+            [runtime.nodeId]: { ...runtime, promptDeliveries: deliveries, messages },
           };
         });
       } else if (envelope.event === "terminal:frame") {
@@ -1316,6 +1323,8 @@ export function App() {
       return false;
     }
     if (activatingProjectIdRef.current) return false;
+    const previousProject = projectRef.current;
+    const previousCanvases = canvasesRef.current;
     activatingProjectIdRef.current = nextProject.id;
     setActivatingProjectId(nextProject.id);
     setBusy(true);
@@ -1336,22 +1345,26 @@ export function App() {
         });
         projectCanvases = [created];
       }
+      const targetCanvasSummary = projectCanvases.find((candidate) => candidate.nodes.some((node) => node.id === targetNodeId))
+        ?? projectCanvases.find((candidate) => candidate.id === preferencesRef.current.lastCanvasByProject[nextProject.id])
+        ?? projectCanvases[0];
+      if (!targetCanvasSummary) throw new Error("The project has no canvas to open.");
+      const targetCanvas = await callCore<Canvas>("canvas_get", { canvasId: targetCanvasSummary.id });
       setProject(nextProject);
-      setPlanActive(false);
+      setCanvases(projectCanvases);
+      await activateCanvas(targetCanvas, true);
       projectDocumentsRef.current = undefined;
       setProjectDocuments(undefined);
       setDocumentConflict(undefined);
       setDocumentSaveStatus("idle");
-      setCanvases(projectCanvases);
-      await activateCanvas(
-        projectCanvases.find((candidate) => candidate.nodes.some((node) => node.id === targetNodeId))
-          ?? projectCanvases.find((candidate) => candidate.id === preferencesRef.current.lastCanvasByProject[nextProject.id])
-          ?? projectCanvases[0],
-      );
       await Promise.all([refreshProjectData(nextProject), refreshProjectDocuments(nextProject, true)]);
       setTaskWorkspaceSweepVersion((current) => current + 1);
       return true;
     } catch (cause) {
+      if (canvasRef.current?.projectId !== nextProject.id) {
+        setProject(previousProject);
+        setCanvases(previousCanvases);
+      }
       setError(message(cause));
       return false;
     } finally {
@@ -1361,20 +1374,15 @@ export function App() {
     }
   };
 
-  const activateCanvas = async (canvasSummary: Canvas) => {
+  const activateCanvas = async (canvasSummary: Canvas, authoritative = false) => {
+    const nextCanvas = authoritative
+      ? canvasSummary
+      : await callCore<Canvas>("canvas_get", { canvasId: canvasSummary.id });
     if (canvasRef.current && canvasRef.current.id !== canvasSummary.id) {
       await flushPendingSavesRef.current();
     }
     await flushAgentCompositions();
-    await Promise.all(Object.values(currentRuntimes()).flatMap((runtime) =>
-      runtime.terminalSessionId
-        ? [callCore("pty_kill", { sessionId: runtime.terminalSessionId }).catch(() => undefined)]
-        : [],
-    ));
-    const nextCanvas = await callCore<Canvas>("canvas_get", {
-      canvasId: canvasSummary.id,
-    }).catch(() => canvasSummary);
-    setCanvases((current) => current.map((item) => item.id === nextCanvas.id ? nextCanvas : item));
+    const degraded: string[] = [];
     const visibleNodes = nextCanvas.nodes.filter((node) => node.kind !== "ops_state");
     const projectAgentNodes = canvasesRef.current
       .flatMap((candidate) => candidate.id === nextCanvas.id ? nextCanvas.nodes : candidate.nodes)
@@ -1384,19 +1392,6 @@ export function App() {
       callCore<ProjectOpsStateRecord | null>("ops_project_state_get", { projectId: nextCanvas.projectId }),
       callCore<OpsSchedulerConfig | null>("ops_scheduler_status", { projectId: nextCanvas.projectId }),
     ]);
-    const activeSchedulerConfig = schedulerConfig?.enabled && schedulerConfig.canvasId !== nextCanvas.id
-      ? await callCore<OpsSchedulerConfig>("ops_scheduler_configure", {
-          projectId: nextCanvas.projectId,
-          canvasId: nextCanvas.id,
-          enabled: true,
-          paused: schedulerConfig.paused,
-          concurrencyLimit: schedulerConfig.concurrencyLimit,
-          adapterId: schedulerConfig.adapterId,
-        }).catch(() => schedulerConfig)
-      : schedulerConfig;
-    opsRevisionByProjectRef.current.set(nextCanvas.projectId, canonicalOps?.revision ?? 0);
-    setAutonomousPickup(Boolean(activeSchedulerConfig?.enabled && !activeSchedulerConfig.paused));
-    setAutonomousConcurrency(activeSchedulerConfig?.concurrencyLimit ?? 4);
     const storedOps = parseOpsState(canonicalOps ? canonicalOps.state as unknown as JsonObject : opsNode?.data);
     const documents = projectDocumentsRef.current;
     const mergedOps = !canonicalOps && documents && documents.projectPath === projectRef.current?.path
@@ -1405,18 +1400,21 @@ export function App() {
     const nextPlanActive = planActiveCanvasIdsRef.current.has(nextCanvas.id)
       || hasMeaningfulPlanState(mergedOps)
       || (documents?.projectPath === projectRef.current?.path && hasProjectPlanDocuments(documents));
-    if (nextPlanActive) planActiveCanvasIdsRef.current.add(nextCanvas.id);
-    setPlanActive(nextPlanActive);
     const normalizedOps = normalizeOpsAgentIdentities(
       mergedOps,
       opsAgentAliases(projectAgentNodes),
     );
-    opsBaseByProjectRef.current.set(nextCanvas.projectId, normalizedOps);
     const [savedLayout, sessions] = await Promise.all([
       callCore<{ mode?: LayoutMode; root?: unknown } | null>("canvas_layout_get", {
         canvasId: nextCanvas.id,
-      }).catch(() => null),
-      callCore<Session[]>("session_list", { limit: 100 }).catch(() => []),
+      }).catch((cause) => {
+        degraded.push(`layout: ${message(cause)}`);
+        return null;
+      }),
+      callCore<Session[]>("session_list", { limit: 100 }).catch((cause) => {
+        degraded.push(`recent sessions: ${message(cause)}`);
+        return [];
+      }),
     ]);
     const runtimeNodes = [...new Map(
       [...visibleNodes, ...projectAgentNodes].map((node) => [node.id, node]),
@@ -1425,7 +1423,6 @@ export function App() {
     const reconciledRoot = reconcileLayout(savedLayout?.root, visibleNodes.map((node) => node.id));
     const nextLayoutMode: LayoutMode = savedLayout ? savedLayout.mode === "auto" ? "auto" : "manual" : "auto";
     const nextViewport = readLayoutViewport(stageRef.current, layoutViewportRef.current);
-    layoutViewportRef.current = nextViewport;
     const root = nextLayoutMode === "auto"
       ? buildSmartLayout(leaves(reconciledRoot), nextViewport)
       : reconciledRoot;
@@ -1443,6 +1440,31 @@ export function App() {
       }
       await persistOpsQueued(nextOps, nextCanvas, activeProject, hydrated, visibleNodes, opsNode);
     }
+    const activeSchedulerConfig = schedulerConfig?.enabled && schedulerConfig.canvasId !== nextCanvas.id
+      ? await callCore<OpsSchedulerConfig>("ops_scheduler_configure", {
+          projectId: nextCanvas.projectId,
+          canvasId: nextCanvas.id,
+          enabled: true,
+          paused: schedulerConfig.paused,
+          concurrencyLimit: schedulerConfig.concurrencyLimit,
+          adapterId: schedulerConfig.adapterId,
+        }).catch((cause) => {
+          degraded.push(`scheduler: ${message(cause)}`);
+          return schedulerConfig;
+        })
+      : schedulerConfig;
+    await Promise.all(Object.values(currentRuntimes()).flatMap((runtime) =>
+      runtime.terminalSessionId
+        ? [callCore("pty_kill", { sessionId: runtime.terminalSessionId }).catch(() => undefined)]
+        : [],
+    ));
+    setCanvases((current) => current.map((item) => item.id === nextCanvas.id ? nextCanvas : item));
+    opsRevisionByProjectRef.current.set(nextCanvas.projectId, canonicalOps?.revision ?? 0);
+    opsBaseByProjectRef.current.set(nextCanvas.projectId, normalizedOps);
+    if (nextPlanActive) planActiveCanvasIdsRef.current.add(nextCanvas.id);
+    setPlanActive(nextPlanActive);
+    setAutonomousPickup(Boolean(activeSchedulerConfig?.enabled && !activeSchedulerConfig.paused));
+    setAutonomousConcurrency(activeSchedulerConfig?.concurrencyLimit ?? 4);
     setCanvas(nextCanvas);
     if (preferencesRef.current.lastCanvasByProject[nextCanvas.projectId] !== nextCanvas.id) {
       updatePreferences({
@@ -1457,6 +1479,7 @@ export function App() {
     setSessions(sessions);
     setNodes(visibleNodes);
     setRuntimes(hydrated);
+    layoutViewportRef.current = nextViewport;
     const initialFocus = leaves(root)[0] ?? null;
     setLayout(root);
     setLayoutMode(nextLayoutMode);
@@ -1471,6 +1494,9 @@ export function App() {
     if (canonicalOps && nextPlanActive && projectRef.current?.id === nextCanvas.projectId) {
       void queueOpsProjection(nextOps, projectRef.current, hydrated, visibleNodes)
         .catch((cause) => setError(`Could not refresh task projections: ${message(cause)}`));
+    }
+    if (degraded.length > 0) {
+      setError(`Canvas opened with degraded state (${degraded.join("; ")}). Retry the canvas to restore it.`);
     }
     queueMicrotask(() => {
       if (activeSchedulerConfig?.enabled && !activeSchedulerConfig.paused) schedulerLeaseHandlerRef.current?.();
@@ -1541,6 +1567,14 @@ export function App() {
     sessions: Session[],
   ): Promise<Record<string, PaneRuntime>> => {
     const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+    const referencedSessionIds = [...new Set(visibleNodes.flatMap((node) => {
+      const sessionId = stringValue(node.data, "sessionId");
+      const historySessionId = nodeHistorySessionId(node.data);
+      return [sessionId, historySessionId].filter((id): id is string => Boolean(id));
+    }))];
+    const sessionStatuses = referencedSessionIds.length
+      ? await callCore<Record<string, { status: string; exitCode?: number; startedAt?: string; endedAt?: string }>>("session_statuses", { sessionIds: referencedSessionIds })
+      : {};
     const pairs = await Promise.all(
       visibleNodes
         .filter((node) => node.kind === "shell_terminal" || node.kind === "agent_terminal")
@@ -1554,12 +1588,25 @@ export function App() {
           let frame: TerminalFrame | undefined;
           const protocol = stringValue(node.data, "protocol");
           const session = sessionsById.get(sessionId) ?? sessionsById.get(historySessionId);
+          const authoritativeSession = sessionStatuses[sessionId] ?? sessionStatuses[historySessionId];
           const savedIntent = stringValue(node.data, "intent") ?? session?.intent;
           const intent: AgentSessionIntent = savedIntent === "ask" ? "ask" : "code";
           const promptDeliveries = structured && sessionId
-            ? await callCore<PromptDelivery[]>("session_prompt_list", { sessionId }).catch(() => [])
+            ? await callCore<PromptDelivery[]>("session_prompt_list", { sessionId })
             : [];
           let messages = agentMessages(node.data);
+          for (const delivery of promptDeliveries) {
+            if (messages.some((item) => item.deliveryId === delivery.id)) continue;
+            messages.push({
+              id: `delivery:${delivery.id}`,
+              role: "user",
+              kind: "message",
+              text: delivery.payload?.historyText ?? "",
+              images: delivery.payload?.imagePaths.map(deliveryImageAttachment),
+              deliveryId: delivery.id,
+              deliveryState: delivery.state,
+            });
+          }
           let parsedStatus: string | undefined;
           let structuredLines: string[] = [];
           let historyBeforeSeq: number | undefined;
@@ -1609,13 +1656,13 @@ export function App() {
               protocol,
               capabilities: agentRuntimeCapabilities(node.data.runtimeCapabilities),
               runtimeInstanceId: stringValue(node.data, "runtimeInstanceId") ?? sessionId,
-              startedAt: session?.startedAt,
-              endedAt: session?.endedAt,
+              startedAt: authoritativeSession?.startedAt ?? session?.startedAt,
+              endedAt: authoritativeSession?.endedAt ?? session?.endedAt,
               protocolSequence: historyEndSeq ?? structuredLines.length,
               status: hydratedRuntimeStatus(
                 structured,
                 messages.length > 0,
-                sessionsById.get(historySessionId)?.status,
+                authoritativeSession?.status ?? sessionsById.get(historySessionId)?.status,
                 parsedStatus ?? stringValue(node.data, "status"),
               ),
               intent,
@@ -2521,6 +2568,7 @@ export function App() {
         selectedNodeIds: [],
         focusedNodeId: null,
       });
+      void callCore("attachment_gc", {}).catch(() => undefined);
       const prunedRoot = removePane(layoutRef.current, nodeId);
       const nextRoot = layoutModeRef.current === "auto"
         ? buildSmartLayout(
@@ -2648,12 +2696,15 @@ export function App() {
     const snapshot = agentNode ? botSnapshotFromNode(agentNode.data) : undefined;
     const rolePending = Boolean(agentNode?.data.specialistRolePending && snapshot);
     const submittedPrompt = rolePending ? botStandingPrompt(prompt, snapshot) : prompt;
+    const clientPromptId = runtime.structured ? crypto.randomUUID() : undefined;
     const userMessage: AgentMessage = {
       id: crypto.randomUUID(),
       role: "user",
       kind: "message",
       text: displayPrompt.trim(),
       images,
+      deliveryId: clientPromptId,
+      deliveryState: clientPromptId ? "queued" : undefined,
     };
     const nextMessages = [...runtime.messages, userMessage];
     const previousStartedAt = runtime.startedAt;
@@ -2684,6 +2735,8 @@ export function App() {
         nodeId: runtime.nodeId,
         adapterId: runtime.adapterId,
         prompt: submittedPrompt.trim(),
+        historyText: displayPrompt.trim(),
+        standingRoleApplied: rolePending,
         imagePaths: images.map((image) => image.path),
         terminalText: runtime.transcript,
         canvasId: canvas.id,
@@ -2695,7 +2748,7 @@ export function App() {
       const delivery = runtime.structured
         ? await callCore<PromptDelivery>("session_prompt_submit", {
             ...promptPayload,
-            clientPromptId: crypto.randomUUID(),
+            clientPromptId,
             mode: turnWasActive ? "next" : "auto",
           })
         : undefined;
@@ -5346,6 +5399,90 @@ export function App() {
     if (nextGit) setGit(nextGit);
   };
 
+  const editAgentPromptDelivery = async (runtime: PaneRuntime, delivery: PromptDelivery, prompt: string, images: AgentImageAttachment[]) => {
+    if (!project || !canvas || (!prompt.trim() && !images.length)) return false;
+    const agentNode = nodesRef.current.find((node) => node.id === runtime.nodeId);
+    const snapshot = agentNode ? botSnapshotFromNode(agentNode.data) : undefined;
+    const submittedPrompt = snapshot && delivery.payload?.standingRoleApplied
+      ? botStandingPrompt(prompt, snapshot)
+      : prompt;
+    try {
+      const updated = await callCore<PromptDelivery>("session_prompt_edit", {
+        deliveryId: delivery.id,
+        sessionId: runtime.sessionId,
+        nodeId: runtime.nodeId,
+        adapterId: runtime.adapterId,
+        prompt: submittedPrompt.trim(),
+        historyText: prompt.trim(),
+        standingRoleApplied: Boolean(snapshot && delivery.payload?.standingRoleApplied),
+        imagePaths: images.map((image) => image.path),
+        terminalText: runtime.transcript,
+        canvasId: canvas.id,
+        workspacePath: project.path,
+        taskId: stringValue(agentNode?.data ?? {}, "taskId") || undefined,
+      });
+      void callCore("attachment_gc", {}).catch(() => undefined);
+      setRuntimes((current) => {
+        const latest = current[runtime.nodeId];
+        if (!latest) return current;
+        return {
+          ...current,
+          [runtime.nodeId]: {
+            ...latest,
+            messages: latest.messages.map((item) => item.deliveryId === delivery.id
+              ? { ...item, text: prompt.trim(), images, deliveryState: updated.state }
+              : item),
+          },
+        };
+      });
+      return true;
+    } catch (cause) {
+      setError(`Could not edit queued prompt: ${message(cause)}`);
+      return false;
+    }
+  };
+
+  const retryAgentPromptDelivery = async (runtime: PaneRuntime, delivery: PromptDelivery) => {
+    try {
+      const updated = await callCore<PromptDelivery>("session_prompt_retry", { deliveryId: delivery.id });
+      setRuntimes((current) => {
+        const latest = current[runtime.nodeId];
+        return latest ? {
+          ...current,
+          [runtime.nodeId]: {
+            ...latest,
+            messages: latest.messages.map((item) => item.deliveryId === delivery.id ? { ...item, deliveryState: updated.state } : item),
+          },
+        } : current;
+      });
+      return true;
+    } catch (cause) {
+      setError(`Could not retry queued prompt: ${message(cause)}`);
+      return false;
+    }
+  };
+
+  const cancelAgentPromptDelivery = async (runtime: PaneRuntime, delivery: PromptDelivery) => {
+    try {
+      const updated = await callCore<PromptDelivery>("session_prompt_cancel", { deliveryId: delivery.id });
+      void callCore("attachment_gc", {}).catch(() => undefined);
+      setRuntimes((current) => {
+        const latest = current[runtime.nodeId];
+        return latest ? {
+          ...current,
+          [runtime.nodeId]: {
+            ...latest,
+            messages: latest.messages.map((item) => item.deliveryId === delivery.id ? { ...item, deliveryState: updated.state } : item),
+          },
+        } : current;
+      });
+      return true;
+    } catch (cause) {
+      setError(`Could not cancel queued prompt: ${message(cause)}`);
+      return false;
+    }
+  };
+
   useEffect(() => {
     const activeProject = projectRef.current;
     if (!startupReady || safeStartupActive || !activeProject || canvas?.projectId !== activeProject.id) return;
@@ -7313,6 +7450,9 @@ export function App() {
                       onPaint={recordPaint}
                       onResizePaint={recordResizePaint}
                       onPrompt={(runtime, prompt, images) => sendAgentPrompt(runtime, prompt, prompt, images)}
+                      onPromptEdit={editAgentPromptDelivery}
+                      onPromptRetry={retryAgentPromptDelivery}
+                      onPromptCancel={cancelAgentPromptDelivery}
                       onRespond={respondToAgent}
                       onCancel={cancelAgentTurn}
                       onAgentAccess={saveProjectAgentAccess}
@@ -8146,11 +8286,11 @@ export function defaultAgentAutonomyPolicy(): AgentAutonomyPolicy {
   return {
     enabled: true,
     listAgents: "allow",
-    sendMessage: "allow",
-    spawnAgent: "allow",
-    handoffTask: "allow",
-    requestReview: "allow",
-    resolveFileConflict: "allow",
+    sendMessage: "ask",
+    spawnAgent: "ask",
+    handoffTask: "ask",
+    requestReview: "ask",
+    resolveFileConflict: "ask",
     maxDepth: 2,
     maxChildrenPerAgent: 3,
     maxConcurrentAgents: 8,
@@ -8273,6 +8413,11 @@ function agentMessages(data: JsonObject): AgentMessage[] {
           ? [{ path: image.path, fileName: image.fileName, mimeType: image.mimeType }]
           : [];
       }) : undefined,
+      deliveryId: typeof item.deliveryId === "string" ? item.deliveryId : undefined,
+      deliveryState: typeof item.deliveryState === "string"
+        && ["queued", "dispatching", "delivered", "failed", "indeterminate", "blocked", "canceled"].includes(item.deliveryState)
+        ? item.deliveryState as AgentMessage["deliveryState"]
+        : undefined,
       tool: typeof item.tool === "string" ? item.tool : undefined,
       status: typeof item.status === "string" ? item.status : undefined,
       interactionId: typeof item.interactionId === "string" ? item.interactionId : undefined,
@@ -8282,6 +8427,18 @@ function agentMessages(data: JsonObject): AgentMessage[] {
         : undefined,
     }];
   });
+}
+
+function deliveryImageAttachment(path: string): AgentImageAttachment {
+  return {
+    path,
+    fileName: path.split(/[\\/]/).at(-1) ?? "image",
+    mimeType: /\.png$/i.test(path) ? "image/png"
+      : /\.gif$/i.test(path) ? "image/gif"
+      : /\.webp$/i.test(path) ? "image/webp"
+      : /\.bmp$/i.test(path) ? "image/bmp"
+      : "image/jpeg",
+  };
 }
 
 export function nodeTranscript(data: JsonObject): string {

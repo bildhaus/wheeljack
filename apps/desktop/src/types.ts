@@ -133,6 +133,7 @@ export interface PromptDelivery {
   payload?: {
     prompt: string;
     historyText: string;
+    standingRoleApplied?: boolean;
     imagePaths: string[];
     provider?: string;
     model?: string;
@@ -838,6 +839,8 @@ export interface AgentMessage {
   imageHeight?: number;
   imageMimeType?: string;
   images?: AgentImageAttachment[];
+  deliveryId?: string;
+  deliveryState?: PromptDeliveryState;
   tool?: string;
   status?: string;
   interactionId?: string;

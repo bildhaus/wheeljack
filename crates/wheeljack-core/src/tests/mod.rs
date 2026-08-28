@@ -3,6 +3,7 @@ mod support;
 mod adapters;
 mod agent_control;
 mod agent_protocol;
+mod attachment_storage;
 mod bento;
 mod bots;
 mod canvas;

@@ -58,6 +58,7 @@ import type {
   AgentModelOption,
   AgentProfile,
   PaneRuntime,
+  PromptDelivery,
   ProjectFileCatalog,
 } from "./types";
 
@@ -460,6 +461,9 @@ function AgentChatComponent({
   agentProfile,
   shortcuts,
   onPrompt,
+  onPromptEdit,
+  onPromptRetry,
+  onPromptCancel,
   onRespond,
   onCancel,
   onLoadOlderHistory,
@@ -477,6 +481,9 @@ function AgentChatComponent({
   agentProfile?: AgentProfile;
   shortcuts: ShortcutBindings;
   onPrompt: (prompt: string, images?: AgentImageAttachment[]) => Promise<boolean>;
+  onPromptEdit: (delivery: PromptDelivery, prompt: string, images: AgentImageAttachment[]) => Promise<boolean>;
+  onPromptRetry: (delivery: PromptDelivery) => Promise<boolean>;
+  onPromptCancel: (delivery: PromptDelivery) => Promise<boolean>;
   onRespond: (approved: boolean, response?: string) => Promise<boolean>;
   onCancel: () => Promise<boolean>;
   onLoadOlderHistory: () => Promise<void>;
@@ -500,6 +507,8 @@ function AgentChatComponent({
   const [dismissedFileMention, setDismissedFileMention] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [editingDeliveryId, setEditingDeliveryId] = useState<string>();
+  const [deliveryPendingId, setDeliveryPendingId] = useState<string>();
   const [interactionDraft, setInteractionDraft] = useState("");
   const [visibleMessageLimit, setVisibleMessageLimit] = useState(80);
   const composerRef = useRef<HTMLFormElement>(null);
@@ -520,6 +529,12 @@ function AgentChatComponent({
   useEffect(() => {
     scheduleComposition({ ...compositionRef.current, draft: prompt, attachments });
   }, [attachments, prompt, scheduleComposition]);
+  useEffect(() => {
+    if (!editingDeliveryId || runtime.promptDeliveries?.some((delivery) => delivery.id === editingDeliveryId)) return;
+    setEditingDeliveryId(undefined);
+    setPrompt("");
+    setAttachments([]);
+  }, [editingDeliveryId, runtime.promptDeliveries]);
   useEffect(() => () => {
     window.clearTimeout(compositionTimerRef.current);
     compositionCallbackRef.current?.(compositionRef.current);
@@ -685,14 +700,55 @@ function AgentChatComponent({
     const draftAttachments = attachments;
     setSubmitting(true);
     try {
-      const accepted = await onPrompt(draft, draftAttachments);
+      const editingDelivery = runtime.promptDeliveries?.find((delivery) => delivery.id === editingDeliveryId);
+      const accepted = editingDelivery
+        ? await onPromptEdit(editingDelivery, draft, draftAttachments)
+        : await onPrompt(draft, draftAttachments);
       if (accepted) {
+        setEditingDeliveryId(undefined);
         setPrompt((current) => current === draft ? "" : current);
         const sentPaths = new Set(draftAttachments.map((attachment) => attachment.path));
         setAttachments((current) => current.filter((attachment) => !sentPaths.has(attachment.path)));
       }
     } finally {
       setSubmitting(false);
+    }
+  };
+  const queuedAttachments = (delivery: PromptDelivery): AgentImageAttachment[] => {
+    const messageImages = runtime.messages.find((item) => item.deliveryId === delivery.id)?.images ?? [];
+    const byPath = new Map(messageImages.map((attachment) => [attachment.path, attachment]));
+    return (delivery.payload?.imagePaths ?? []).map((path) => byPath.get(path) ?? {
+      path,
+      fileName: path.split(/[\\/]/).at(-1) ?? "image",
+      mimeType: /\.png$/i.test(path) ? "image/png"
+        : /\.gif$/i.test(path) ? "image/gif"
+        : /\.webp$/i.test(path) ? "image/webp"
+        : /\.bmp$/i.test(path) ? "image/bmp"
+        : "image/jpeg",
+    });
+  };
+  const beginPromptEdit = (delivery: PromptDelivery) => {
+    setEditingDeliveryId(delivery.id);
+    setPrompt(delivery.payload?.historyText ?? "");
+    setAttachments(queuedAttachments(delivery));
+    setAttachmentError("");
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  };
+  const mutateDelivery = async (delivery: PromptDelivery, action: "retry" | "cancel") => {
+    if (deliveryPendingId) return;
+    setDeliveryPendingId(delivery.id);
+    setAttachmentError("");
+    try {
+      const accepted = action === "retry" ? await onPromptRetry(delivery) : await onPromptCancel(delivery);
+      if (accepted && editingDeliveryId === delivery.id) {
+        setEditingDeliveryId(undefined);
+        setPrompt("");
+        setAttachments([]);
+      }
+    } catch (cause) {
+      setAttachmentError(errorMessage(cause));
+    } finally {
+      setDeliveryPendingId(undefined);
     }
   };
   const respond = async (approved: boolean, response?: string) => {
@@ -769,11 +825,12 @@ function AgentChatComponent({
                   onRespond={(approved, response) => void respond(approved, response)}
                 />
               ) : (
-                <div className={`message ${entry.role} ${entry.kind}${entry.streaming ? " streaming" : ""}`} data-live={entry.streaming || undefined}>
+                <div className={`message ${entry.role} ${entry.kind}${entry.streaming ? " streaming" : ""}`} data-live={entry.streaming || undefined} data-delivery-state={entry.deliveryState}>
                   {(entry.title || entry.label || !["user", "assistant"].includes(entry.role)) && <span>{entry.title ?? entry.label ?? entry.role}</span>}
                   {entry.code && <AgentCodeBlock code={entry.code} language={entry.label ?? "Code"} />}
                   {entry.text && <AgentMessageContent text={entry.text} streaming={entry.streaming && entry.role === "assistant"} />}
                   {entry.interactionState && entry.interactionState !== "pending" && <small>{entry.interactionState}</small>}
+                  {entry.deliveryState && entry.deliveryState !== "delivered" && <small className="chat-delivery-state">{entry.deliveryState === "indeterminate" ? "Delivery unconfirmed" : entry.deliveryState}</small>}
                   {entry.imagePath && <ImageAttachment message={entry} projectRoot={projectRoot} />}
                   {entry.images?.length ? <div className="chat-image-list">{entry.images.map((attachment) => <ChatImage key={attachment.path} attachment={attachment} projectRoot={projectRoot} />)}</div> : null}
                 </div>
@@ -846,13 +903,9 @@ function AgentChatComponent({
             <span><strong>#{delivery.seq}</strong> {delivery.state === "dispatching" ? "Sending…" : delivery.state}</span>
             <small>{delivery.errorMessage ?? delivery.payload?.historyText ?? "Queued prompt"}</small>
             <div>
-              {["failed", "indeterminate", "blocked"].includes(delivery.state) && <Button type="button" size="xs" variant="ghost" onClick={() => void callCore("session_prompt_retry", { deliveryId: delivery.id })}>Retry</Button>}
-              {["queued", "failed", "blocked"].includes(delivery.state) && <Button type="button" size="xs" variant="ghost" onClick={() => {
-                setPrompt(delivery.payload?.historyText ?? "");
-                void callCore("session_prompt_cancel", { deliveryId: delivery.id });
-                requestAnimationFrame(() => composerInputRef.current?.focus());
-              }}>Edit</Button>}
-              {["queued", "failed", "indeterminate", "blocked"].includes(delivery.state) && <Button type="button" size="xs" variant="ghost" onClick={() => void callCore("session_prompt_cancel", { deliveryId: delivery.id })}>{delivery.state === "indeterminate" ? "Don't resend" : "Cancel"}</Button>}
+              {["failed", "indeterminate", "blocked"].includes(delivery.state) && <Button type="button" size="xs" variant="ghost" disabled={Boolean(deliveryPendingId)} onClick={() => void mutateDelivery(delivery, "retry")}>Retry</Button>}
+              {["queued", "failed", "blocked"].includes(delivery.state) && <Button type="button" size="xs" variant="ghost" disabled={Boolean(deliveryPendingId || (editingDeliveryId && editingDeliveryId !== delivery.id))} onClick={() => beginPromptEdit(delivery)}>Edit</Button>}
+              {["queued", "failed", "indeterminate", "blocked"].includes(delivery.state) && <Button type="button" size="xs" variant="ghost" disabled={Boolean(deliveryPendingId)} onClick={() => void mutateDelivery(delivery, "cancel")}>{deliveryPendingId === delivery.id ? "Working…" : delivery.state === "indeterminate" ? "Don't resend" : "Cancel"}</Button>}
             </div>
           </div>)}
         </div>}
@@ -899,6 +952,7 @@ function AgentChatComponent({
           </div>
           <footer><span>↑↓ navigate</span><span>Enter add</span><span>Esc close</span></footer>
         </div>}
+        {editingDeliveryId && <div className="chat-editing-prompt" role="status"><span>Editing queued prompt</span><Button type="button" size="xs" variant="ghost" disabled={submitting} onClick={() => { setEditingDeliveryId(undefined); setPrompt(""); setAttachments([]); }}>Stop editing</Button></div>}
         <Textarea
           ref={composerInputRef}
           autoFocus={autoFocusComposer}
@@ -987,12 +1041,12 @@ function AgentChatComponent({
               className="chat-composer-primary"
               type="submit"
               size="icon-sm"
-              aria-label={submitting ? "Sending prompt" : turnActive ? "Queue prompt" : "Send prompt"}
-              title={turnActive ? "Queue for next turn (Enter)" : "Send (Enter)"}
+              aria-label={submitting ? "Saving prompt" : editingDeliveryId ? "Save queued prompt" : turnActive ? "Queue prompt" : "Send prompt"}
+              title={editingDeliveryId ? "Save queued prompt (Enter)" : turnActive ? "Queue for next turn (Enter)" : "Send (Enter)"}
               disabled={(!prompt.trim() && (!attachments.length || answeringQuestion)) || submitting}
             >
               {submitting ? <DotMatrixLoader variant="loading" size={18} /> : <ArrowUpIcon />}
-              <span className="sr-only">{turnActive ? "Queue" : "Send"}</span>
+              <span className="sr-only">{editingDeliveryId ? "Save" : turnActive ? "Queue" : "Send"}</span>
             </Button>
           </div>
         </div>

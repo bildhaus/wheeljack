@@ -29,7 +29,10 @@ in **Settings → Application → Storage** so you do not need to guess a
 platform-specific path.
 
 The directory contains the SQLite database and local subdirectories for items
-such as attachments, cache, updates, recovery, and crash diagnostics.
+such as attachments, cache, updates, recovery, and crash diagnostics. Settings
+shows attachment count and disk usage. The core removes image copies only when
+they are no longer referenced by a saved draft, unresolved prompt delivery, or
+durable transcript; cleanup runs at startup and can be requested manually.
 
 :::caution
 Do not edit or copy the live SQLite files while wheeljack is running. Use the

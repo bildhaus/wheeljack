@@ -111,10 +111,11 @@ pub(crate) fn sanitize_setting_value(key: &str, value: &Value) -> Option<Value> 
 
 fn sanitize_agent_autonomy_policy(value: &Value) -> Option<Value> {
     let source = value.as_object()?;
-    let mode = |key: &str| match source.get(key).and_then(Value::as_str) {
-        Some("allow") | None => "allow",
+    let mode = |key: &str, fallback: &'static str| match source.get(key).and_then(Value::as_str) {
+        Some("allow") => "allow",
         Some("ask") => "ask",
         Some("deny") => "deny",
+        None => fallback,
         _ => "deny",
     };
     let bounded = |key: &str, fallback: u64, max: u64| {
@@ -126,12 +127,12 @@ fn sanitize_agent_autonomy_policy(value: &Value) -> Option<Value> {
     };
     Some(json!({
         "enabled": source.get("enabled").and_then(Value::as_bool).unwrap_or(true),
-        "listAgents": mode("listAgents"),
-        "sendMessage": mode("sendMessage"),
-        "spawnAgent": mode("spawnAgent"),
-        "handoffTask": mode("handoffTask"),
-        "requestReview": mode("requestReview"),
-        "resolveFileConflict": mode("resolveFileConflict"),
+        "listAgents": mode("listAgents", "allow"),
+        "sendMessage": mode("sendMessage", "ask"),
+        "spawnAgent": mode("spawnAgent", "ask"),
+        "handoffTask": mode("handoffTask", "ask"),
+        "requestReview": mode("requestReview", "ask"),
+        "resolveFileConflict": mode("resolveFileConflict", "ask"),
         "maxDepth": bounded("maxDepth", 2, 4),
         "maxChildrenPerAgent": bounded("maxChildrenPerAgent", 3, 8),
         "maxConcurrentAgents": bounded("maxConcurrentAgents", 8, 16),

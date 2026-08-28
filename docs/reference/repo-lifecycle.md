@@ -41,6 +41,12 @@ bounded local log, records run state in SQLite, and terminates active lifecycle
 processes during shutdown. Runs that were active during an unclean stop are
 marked interrupted on the next launch rather than presented as live.
 
+Only one active run of each kind is allowed per project. Browser panes recover
+the current durable run after remounting instead of starting a duplicate. An
+exact trusted loopback preview may use same-origin browser APIs in the embedded
+frame; arbitrary URLs keep the stricter sandbox and can be opened externally
+when a site refuses embedding.
+
 Setup and preview are deliberately the only lifecycle kinds. This contract is
 not a general automation runner, remote execution service, or package-manager
 replacement.

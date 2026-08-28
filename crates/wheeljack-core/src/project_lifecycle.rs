@@ -212,6 +212,40 @@ pub(crate) fn load_lifecycle_runs(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+pub(crate) fn load_active_lifecycle_runs(
+    db: &Connection,
+    project_id: &str,
+) -> Result<Vec<LifecycleRunDto>> {
+    let mut statement = db.prepare(
+        "SELECT id, project_id, kind, state, command_json, url, pid, exit_code,
+                error_message, started_at, updated_at, ended_at
+         FROM project_lifecycle_runs
+         WHERE project_id = ?1 AND state IN ('starting', 'running', 'ready', 'stopping')
+         ORDER BY updated_at DESC",
+    )?;
+    let rows = statement.query_map(params![project_id], |row| {
+        let command_json: String = row.get(4)?;
+        let pid = row
+            .get::<_, Option<i64>>(6)?
+            .and_then(|value| u32::try_from(value).ok());
+        Ok(LifecycleRunDto {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            kind: row.get(2)?,
+            state: row.get(3)?,
+            command: serde_json::from_str(&command_json).unwrap_or_default(),
+            url: row.get(5)?,
+            pid,
+            exit_code: row.get(7)?,
+            error_message: row.get(8)?,
+            started_at: row.get(9)?,
+            updated_at: row.get(10)?,
+            ended_at: row.get(11)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub(crate) fn load_lifecycle_logs(db: &Connection, run_id: &str) -> Result<String> {
     let mut statement = db.prepare(
         "SELECT data FROM (

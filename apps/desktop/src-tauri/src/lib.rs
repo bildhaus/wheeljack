@@ -623,7 +623,6 @@ fn store_image_attachment(
     let sequence = IMAGE_ATTACHMENT_SEQUENCE.fetch_add(1, Ordering::SeqCst);
     let path = directory.join(format!("image-{nonce}-{sequence}.{extension}"));
     fs::write(&path, bytes).map_err(|error| error.to_string())?;
-    // ponytail: attachment copies favor durable transcripts; add garbage collection if storage growth becomes material.
     Ok(StoredImageAttachment {
         path: path.to_string_lossy().to_string(),
         file_name: Path::new(original_name)
@@ -1126,6 +1125,40 @@ fn open_devtools(window: tauri::WebviewWindow) {
     let _ = window;
 }
 
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if url.len() > 8192 || url.chars().any(char::is_control) {
+        return Err("External URL is invalid.".to_string());
+    }
+    let remainder = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .ok_or_else(|| "Only HTTP and HTTPS URLs can be opened externally.".to_string())?;
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() || authority.starts_with('@') {
+        return Err("External URL must include a host.".to_string());
+    }
+
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("rundll32.exe");
+        command.args(["url.dll,FileProtocolHandler", &url]);
+        command.creation_flags(0x0800_0000);
+        command.spawn().map_err(|error| error.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    Command::new("open")
+        .args(["--", &url])
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Command::new("xdg-open")
+        .arg(&url)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn canonical_update_source(update_dir: &Path, source: &Path) -> Result<PathBuf, String> {
     let root = fs::canonicalize(update_dir).map_err(|error| error.to_string())?;
     let source = fs::canonicalize(source).map_err(|error| error.to_string())?;
@@ -1162,6 +1195,7 @@ pub fn run() {
             write_theme_document,
             apply_downloaded_update,
             close_after_flush,
+            open_external_url,
             open_devtools
         ])
         .build(tauri::generate_context!())

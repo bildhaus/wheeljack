@@ -56,6 +56,10 @@ after a provider may have received a prompt but before delivery was recorded,
 the prompt is marked **indeterminate** and is never replayed automatically.
 Choose Retry only after checking the conversation for a duplicate.
 
+Queued edits preserve the prompt's images and launch policy and replace the
+same durable delivery record. Canceled and indeterminate prompts remain visibly
+marked in the conversation so the UI does not imply confirmed delivery.
+
 ## Stop, resume, and repair
 
 - **Stop** cancels the current turn while keeping the session and transcript.

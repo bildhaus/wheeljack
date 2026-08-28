@@ -64,7 +64,9 @@ Managed agents can autonomously list workspace agents, message a peer, start a
 bounded child agent, hand off a task, or request review. Configure each action
 as **Allow automatically**, **Ask every time**, or **Deny** under Settings →
 Agents. wheeljack enforces workspace, depth, child, concurrency, and rate limits
-in the Rust core and records every request and result in Autonomy history.
+in the Rust core and records every request and result in Autonomy history. New
+profiles allow discovery and ask before every action that can mutate work or
+create additional provider usage.
 
 ## Local data and permissions
 

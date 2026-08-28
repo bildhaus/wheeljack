@@ -1490,6 +1490,25 @@ test("replaces parsed streaming responses with Codex working commentary", () => 
   expect(reconcileParsedAgentMessages([user, streamed], [working], "node-1")).toEqual([user, working]);
 });
 
+test("reconciles a delivered optimistic prompt with durable parsed history", () => {
+  const optimistic = {
+    id: "optimistic-user",
+    role: "user",
+    kind: "message",
+    text: "Inspect the repo",
+    deliveryId: "delivery-1",
+    deliveryState: "delivered",
+  } as const;
+  const parsed = {
+    id: "node-1-agent-1-user",
+    role: "user",
+    kind: "message",
+    text: "Inspect the repo",
+  } as const;
+
+  expect(reconcileParsedAgentMessages([optimistic], [parsed], "node-1")).toEqual([optimistic]);
+});
+
 test("merges agent messages only by stable id and preserves resolved interactions", () => {
   const repeated = { role: "assistant", kind: "message", text: "Same answer" };
   const approval = {

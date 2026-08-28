@@ -2,6 +2,32 @@ use super::support::*;
 use crate::*;
 
 #[test]
+fn autonomy_default_migration_preserves_existing_profiles() {
+    let db = Connection::open_in_memory().unwrap();
+    run_migrations(&db).unwrap();
+    db.pragma_update(None, "user_version", 20).unwrap();
+    db.execute(
+        "INSERT INTO settings (key, value_json, updated_at) VALUES ('agentAutonomyPolicy', ?1, 'now')",
+        params![json!({ "enabled": true, "spawnAgent": "ask" }).to_string()],
+    ).unwrap();
+
+    run_migrations(&db).unwrap();
+    let value: String = db
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = 'agentAutonomyPolicy'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let value: Value = serde_json::from_str(&value).unwrap();
+    assert_eq!(value["spawnAgent"], "ask");
+    assert_eq!(value["sendMessage"], "allow");
+    assert_eq!(value["handoffTask"], "allow");
+    assert_eq!(value["requestReview"], "allow");
+    assert_eq!(value["resolveFileConflict"], "allow");
+}
+
+#[test]
 fn recovers_running_sessions_as_disconnected() {
     let init = test_init("recover");
     fs::create_dir_all(&init.app_data_dir).unwrap();

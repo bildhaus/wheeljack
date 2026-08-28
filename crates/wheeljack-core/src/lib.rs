@@ -40,6 +40,7 @@ use uuid::Uuid;
 mod adapters;
 mod agent_control;
 mod agent_protocol;
+mod attachment_storage;
 mod bento_layout;
 mod bots;
 mod canvas_store;
@@ -81,6 +82,7 @@ use agent_protocol::{
     apply_agent_stream_events, has_active_agent_turn, parse_agent_protocol_line,
     parse_agent_protocol_request, reduce_agent_stream_events, AgentProtocolStreamState,
 };
+use attachment_storage::{gc_image_attachments, image_attachment_storage_status};
 use bento_layout::build_bento_layout;
 use bots::{delete_bot, list_bots, upsert_bot};
 #[cfg(test)]
@@ -839,6 +841,7 @@ pub struct Core {
     structured_agent_sessions: Arc<Mutex<HashMap<String, StructuredAgentSessionHandle>>>,
     prompt_drainers: Arc<Mutex<HashSet<String>>>,
     lifecycle_processes: Arc<Mutex<HashMap<String, LifecycleProcessHandle>>>,
+    lifecycle_start_lock: Mutex<()>,
     paths: CorePaths,
     platform: String,
     version: String,
@@ -873,6 +876,7 @@ impl Core {
         let recovered_sessions = recover_interrupted_sessions(&connection)?;
         recover_prompt_deliveries(&connection)?;
         recover_lifecycle_runs(&connection)?;
+        let _ = gc_image_attachments(&connection, &paths.app_data_dir);
         let (startup_recovery, startup_run) = begin_startup_run(
             &paths.app_data_dir,
             &init.version,
@@ -904,6 +908,7 @@ impl Core {
             structured_agent_sessions: Arc::new(Mutex::new(HashMap::new())),
             prompt_drainers: Arc::new(Mutex::new(HashSet::new())),
             lifecycle_processes: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle_start_lock: Mutex::new(()),
             paths,
             platform: init.platform,
             version: init.version,
@@ -1237,6 +1242,9 @@ impl Core {
             "project_lifecycle_runs" => self
                 .project_lifecycle_runs(payload)
                 .map_err(CommandError::failed),
+            "project_lifecycle_current" => self
+                .project_lifecycle_current(payload)
+                .map_err(CommandError::failed),
             "project_lifecycle_logs" => self
                 .project_lifecycle_logs(payload)
                 .map_err(CommandError::failed),
@@ -1337,6 +1345,10 @@ impl Core {
             "session_clear_transcripts" => self
                 .session_clear_transcripts()
                 .map_err(CommandError::failed),
+            "attachment_storage_status" => self
+                .attachment_storage_status()
+                .map_err(CommandError::failed),
+            "attachment_gc" => self.attachment_gc().map_err(CommandError::failed),
             "usage_dashboard" => self.usage_dashboard(payload).map_err(CommandError::failed),
             "usage_billing_override_set" => self
                 .usage_billing_override_set(payload)
@@ -2469,6 +2481,10 @@ impl Core {
             .get("prompt")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let history_text = payload
+            .get("historyText")
+            .and_then(Value::as_str)
+            .unwrap_or(raw_prompt);
         if raw_prompt.trim().is_empty() && image_paths.is_empty() {
             bail!("prompt text or an image is required");
         }
@@ -2493,7 +2509,7 @@ impl Core {
             self.agent_structured_prompt(json!({
                 "sessionId": session_id,
                 "prompt": prompt,
-                "historyText": raw_prompt,
+                "historyText": history_text,
                 "imagePaths": image_paths,
                 "provider": payload.get("provider"),
                 "model": payload.get("model"),
@@ -2597,6 +2613,10 @@ impl Core {
             .get("prompt")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let history_text = payload
+            .get("historyText")
+            .and_then(Value::as_str)
+            .unwrap_or(raw_prompt);
         if raw_prompt.trim().is_empty() && image_paths.is_empty() {
             bail!("prompt text or an image is required");
         }
@@ -2628,7 +2648,11 @@ impl Core {
             mode,
             payload: PromptDeliveryPayload {
                 prompt: effective_prompt,
-                history_text: raw_prompt.to_string(),
+                history_text: history_text.to_string(),
+                standing_role_applied: payload
+                    .get("standingRoleApplied")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 image_paths,
                 provider: optional_agent_profile_value(&payload, "provider", 64)?,
                 model: optional_agent_profile_value(&payload, "model", 128)?,
@@ -2681,12 +2705,98 @@ impl Core {
 
     fn session_prompt_edit(&self, payload: Value) -> Result<Value> {
         let delivery_id = required_str(&payload, "deliveryId")?;
-        let prompt_payload = serde_json::from_value::<PromptDeliveryPayload>(
-            payload
-                .get("payload")
+        let prompt_payload = if let Some(value) = payload.get("payload") {
+            serde_json::from_value::<PromptDeliveryPayload>(value.clone())?
+        } else {
+            let session_id = required_str(&payload, "sessionId")?.to_string();
+            let existing = {
+                let db = self.lock_db()?;
+                load_prompt_delivery(&db, delivery_id)?
+                    .ok_or_else(|| anyhow!("prompt delivery is missing"))?
+            };
+            if existing.session_id != session_id {
+                bail!("prompt delivery belongs to a different session");
+            }
+            let image_paths = serde_json::from_value::<Vec<String>>(
+                payload
+                    .get("imagePaths")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            )
+            .context("payload.imagePaths must be an array of paths")?;
+            let raw_prompt = payload
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let history_text = payload
+                .get("historyText")
+                .and_then(Value::as_str)
+                .unwrap_or(raw_prompt);
+            if raw_prompt.trim().is_empty() && image_paths.is_empty() {
+                bail!("prompt text or an image is required");
+            }
+            let session = self
+                .lock_structured_sessions()?
+                .get(&session_id)
                 .cloned()
-                .ok_or_else(|| anyhow!("payload.payload is required"))?,
-        )?;
+                .ok_or_else(|| anyhow!("unknown structured agent session: {session_id}"))?;
+            let coordinated_prompt = self.coordinated_session_prompt(&payload, raw_prompt)?;
+            let effective_prompt = if payload.get("canvasId").and_then(Value::as_str).is_some()
+                && payload.get("nodeId").and_then(Value::as_str).is_some()
+            {
+                let db = self.lock_db()?;
+                append_agent_control_instructions(
+                    &coordinated_prompt,
+                    &load_agent_autonomy_policy(&db)?,
+                    payload.get("taskId").and_then(Value::as_str),
+                )
+            } else {
+                coordinated_prompt
+            };
+            let prior = existing.payload.unwrap_or(PromptDeliveryPayload {
+                prompt: String::new(),
+                history_text: String::new(),
+                standing_role_applied: false,
+                image_paths: vec![],
+                provider: None,
+                model: None,
+                thinking: None,
+                approval_policy: None,
+                sandbox: None,
+            });
+            PromptDeliveryPayload {
+                prompt: effective_prompt,
+                history_text: history_text.to_string(),
+                standing_role_applied: payload
+                    .get("standingRoleApplied")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(prior.standing_role_applied),
+                image_paths,
+                provider: optional_agent_profile_value(&payload, "provider", 64)?
+                    .or(prior.provider),
+                model: optional_agent_profile_value(&payload, "model", 128)?.or(prior.model),
+                thinking: optional_agent_profile_value(&payload, "thinking", 32)?
+                    .or(prior.thinking),
+                approval_policy: if session.intent == "ask" {
+                    session.approval_policy.clone()
+                } else {
+                    payload
+                        .get("approvalPolicy")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or(prior.approval_policy)
+                },
+                sandbox: if session.intent == "ask" {
+                    session.sandbox.clone()
+                } else {
+                    payload
+                        .get("sandbox")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or(prior.sandbox)
+                },
+            }
+        };
         let delivery = {
             let db = self.lock_db()?;
             edit_prompt_delivery(&db, delivery_id, &prompt_payload)?
@@ -2725,11 +2835,29 @@ impl Core {
     }
 
     fn project_lifecycle_start(&self, payload: Value) -> Result<Value> {
+        let _start_guard = self
+            .lifecycle_start_lock
+            .lock()
+            .map_err(|error| anyhow!(error.to_string()))?;
         let project_id = required_str(&payload, "projectId")?.to_string();
         let project_path = required_str(&payload, "projectPath")?.to_string();
         let kind = required_str(&payload, "kind")?.to_string();
         if !matches!(kind.as_str(), "setup" | "preview") {
             bail!("lifecycle kind must be setup or preview");
+        }
+        if let Some(active) = {
+            let db = self.lock_db()?;
+            load_active_lifecycle_runs(&db, &project_id)?
+                .into_iter()
+                .find(|run| {
+                    run.kind == kind
+                        && matches!(
+                            run.state.as_str(),
+                            "starting" | "running" | "ready" | "stopping"
+                        )
+                })
+        } {
+            return Ok(serde_json::to_value(active)?);
         }
         let (manifest_dto, manifest) = {
             let db = self.lock_db()?;
@@ -2905,6 +3033,25 @@ impl Core {
         Ok(serde_json::to_value(load_lifecycle_runs(
             &db, project_id, limit,
         )?)?)
+    }
+
+    fn project_lifecycle_current(&self, payload: Value) -> Result<Value> {
+        let project_id = required_str(&payload, "projectId")?;
+        let requested_id = payload.get("runId").and_then(Value::as_str);
+        let requested_kind = payload.get("kind").and_then(Value::as_str);
+        let db = self.lock_db()?;
+        let runs = load_active_lifecycle_runs(&db, project_id)?;
+        let active = |run: &&LifecycleRunDto| {
+            matches!(
+                run.state.as_str(),
+                "starting" | "running" | "ready" | "stopping"
+            ) && requested_kind.map_or(true, |kind| run.kind == kind)
+        };
+        let current = requested_id
+            .and_then(|id| runs.iter().find(|run| run.id == id && active(run)))
+            .or_else(|| runs.iter().find(active))
+            .cloned();
+        Ok(serde_json::to_value(current)?)
     }
 
     fn project_lifecycle_logs(&self, payload: Value) -> Result<Value> {
@@ -4954,8 +5101,9 @@ impl Core {
                 .ok_or_else(|| anyhow!("payload.sessionIds is required"))?,
         )?;
         let db = self.lock_db()?;
-        let mut statement =
-            db.prepare_cached("SELECT status, exit_code FROM sessions WHERE id = ?1")?;
+        let mut statement = db.prepare_cached(
+            "SELECT status, exit_code, started_at, ended_at FROM sessions WHERE id = ?1",
+        )?;
         let mut statuses = serde_json::Map::new();
         for session_id in session_ids
             .into_iter()
@@ -4964,13 +5112,18 @@ impl Core {
         {
             let status = statement
                 .query_row(params![session_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<i32>>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i32>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
                 })
                 .optional()?;
-            if let Some((status, exit_code)) = status {
+            if let Some((status, exit_code, started_at, ended_at)) = status {
                 statuses.insert(
                     session_id,
-                    json!({ "status": status, "exitCode": exit_code }),
+                    json!({ "status": status, "exitCode": exit_code, "startedAt": started_at, "endedAt": ended_at }),
                 );
             }
         }
@@ -5239,7 +5392,25 @@ impl Core {
     fn session_clear_transcripts(&self) -> Result<Value> {
         let db = self.lock_db()?;
         let _ = db.execute("DELETE FROM session_chunks_fts", []);
-        Ok(json!(db.execute("DELETE FROM session_chunks", [])?))
+        let deleted = db.execute("DELETE FROM session_chunks", [])?;
+        let _ = gc_image_attachments(&db, &self.paths.app_data_dir);
+        Ok(json!(deleted))
+    }
+
+    fn attachment_storage_status(&self) -> Result<Value> {
+        let db = self.lock_db()?;
+        Ok(serde_json::to_value(image_attachment_storage_status(
+            &db,
+            &self.paths.app_data_dir,
+        )?)?)
+    }
+
+    fn attachment_gc(&self) -> Result<Value> {
+        let db = self.lock_db()?;
+        Ok(serde_json::to_value(gc_image_attachments(
+            &db,
+            &self.paths.app_data_dir,
+        )?)?)
     }
 
     fn usage_dashboard(&self, payload: Value) -> Result<Value> {

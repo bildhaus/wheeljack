@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) const LATEST_SCHEMA_VERSION: i32 = 20;
+pub(crate) const LATEST_SCHEMA_VERSION: i32 = 21;
 type Migration = (i32, fn(&Connection) -> Result<()>);
 const SQLITE_WRITE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(25),
@@ -264,7 +264,8 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
         (17, add_session_node_title),
         (18, add_project_ops_state),
         (19, repair_legacy_recovery_state),
-        (LATEST_SCHEMA_VERSION, add_durable_agent_workflows),
+        (20, add_durable_agent_workflows),
+        (LATEST_SCHEMA_VERSION, preserve_legacy_autonomy_defaults),
     ];
     for (version, migration) in migrations {
         if current_version >= *version {
@@ -275,6 +276,25 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
     }
+    Ok(())
+}
+
+fn preserve_legacy_autonomy_defaults(connection: &Connection) -> Result<()> {
+    connection.execute(
+        "UPDATE settings
+         SET value_json = json_set(
+             value_json,
+             '$.sendMessage', COALESCE(json_extract(value_json, '$.sendMessage'), 'allow'),
+             '$.spawnAgent', COALESCE(json_extract(value_json, '$.spawnAgent'), 'allow'),
+             '$.handoffTask', COALESCE(json_extract(value_json, '$.handoffTask'), 'allow'),
+             '$.requestReview', COALESCE(json_extract(value_json, '$.requestReview'), 'allow'),
+             '$.resolveFileConflict', COALESCE(json_extract(value_json, '$.resolveFileConflict'), 'allow')
+         )
+         WHERE key = 'agentAutonomyPolicy'
+           AND json_valid(value_json)
+           AND json_type(value_json) = 'object'",
+        [],
+    )?;
     Ok(())
 }
 

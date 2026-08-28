@@ -9,6 +9,8 @@ pub(crate) struct PromptDeliveryPayload {
     pub(crate) prompt: String,
     pub(crate) history_text: String,
     #[serde(default)]
+    pub(crate) standing_role_applied: bool,
+    #[serde(default)]
     pub(crate) image_paths: Vec<String>,
     #[serde(default)]
     pub(crate) provider: Option<String>,
@@ -269,7 +271,7 @@ pub(crate) fn cancel_prompt_delivery(
         "UPDATE session_prompt_deliveries
          SET state = 'canceled', dispatch_token = NULL,
              error_code = NULL, error_message = NULL, updated_at = ?2
-         WHERE id = ?1 AND state IN ('queued', 'failed', 'blocked')",
+         WHERE id = ?1 AND state IN ('queued', 'failed', 'indeterminate', 'blocked')",
         params![delivery_id, now()],
     )?;
     if changed != 1 {

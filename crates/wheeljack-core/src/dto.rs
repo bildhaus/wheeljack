@@ -953,15 +953,15 @@ pub struct AgentAutonomyPolicyDto {
     pub enabled: bool,
     #[serde(default = "default_allow")]
     pub list_agents: String,
-    #[serde(default = "default_allow")]
+    #[serde(default = "default_ask")]
     pub send_message: String,
-    #[serde(default = "default_allow")]
+    #[serde(default = "default_ask")]
     pub spawn_agent: String,
-    #[serde(default = "default_allow")]
+    #[serde(default = "default_ask")]
     pub handoff_task: String,
-    #[serde(default = "default_allow")]
+    #[serde(default = "default_ask")]
     pub request_review: String,
-    #[serde(default = "default_allow")]
+    #[serde(default = "default_ask")]
     pub resolve_file_conflict: String,
     #[serde(default = "default_autonomy_depth")]
     pub max_depth: u8,
@@ -978,11 +978,11 @@ impl Default for AgentAutonomyPolicyDto {
         Self {
             enabled: true,
             list_agents: default_allow(),
-            send_message: default_allow(),
-            spawn_agent: default_allow(),
-            handoff_task: default_allow(),
-            request_review: default_allow(),
-            resolve_file_conflict: default_allow(),
+            send_message: default_ask(),
+            spawn_agent: default_ask(),
+            handoff_task: default_ask(),
+            request_review: default_ask(),
+            resolve_file_conflict: default_ask(),
             max_depth: default_autonomy_depth(),
             max_children_per_agent: default_autonomy_children(),
             max_concurrent_agents: default_autonomy_concurrency(),
@@ -997,6 +997,10 @@ fn default_true() -> bool {
 
 fn default_allow() -> String {
     "allow".to_string()
+}
+
+fn default_ask() -> String {
+    "ask".to_string()
 }
 
 fn default_autonomy_depth() -> u8 {

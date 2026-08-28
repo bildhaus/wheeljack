@@ -260,15 +260,15 @@ test("optimistically updates lightweight toggles and inbox actions", () => {
     .toBeLessThan(schedulerSource.lastIndexOf("saveSchedulerConfig"));
 });
 
-test("defaults autonomous collaboration on with bounded policy settings", () => {
+test("defaults autonomous collaboration mutations to ask with bounded policy settings", () => {
   expect(defaultAgentAutonomyPolicy()).toEqual({
     enabled: true,
     listAgents: "allow",
-    sendMessage: "allow",
-    spawnAgent: "allow",
-    handoffTask: "allow",
-    requestReview: "allow",
-    resolveFileConflict: "allow",
+    sendMessage: "ask",
+    spawnAgent: "ask",
+    handoffTask: "ask",
+    requestReview: "ask",
+    resolveFileConflict: "ask",
     maxDepth: 2,
     maxChildrenPerAgent: 3,
     maxConcurrentAgents: 8,
@@ -1341,10 +1341,11 @@ test("migrates legacy verification state without starting redundant verification
     appSource.indexOf("const activateCanvas"),
     appSource.indexOf("const refreshProjectData"),
   );
-  expect(activationSource).not.toContain('"session_statuses"');
+  expect(activationSource).toContain('"session_statuses"');
   expect(activationSource).toContain("const recoveredVerification =");
   expect(activationSource).toContain("await persistOpsQueued(nextOps, nextCanvas");
   expect(activationSource).toContain("recoverOpsVerificationRuns(");
+  expect(activationSource).toContain("normalizedOps,\n      new Set(),\n      new Set(),");
   expect(appSource).not.toContain("const _runOpsVerification");
 
   const merged = mergeProjectDocuments(state, {

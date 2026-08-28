@@ -143,6 +143,80 @@ fn trusted_lifecycle_process_runs_and_persists_logs() {
     core.shutdown();
 }
 
+#[test]
+fn lifecycle_start_reuses_the_active_project_kind_run() {
+    let root = temp_dir(&format!("lifecycle-singleton-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(root.join(".wheeljack")).unwrap();
+    #[cfg(windows)]
+    let command = vec!["cmd.exe", "/D", "/S", "/C", "ping 127.0.0.1 -n 4 >nul"];
+    #[cfg(not(windows))]
+    let command = vec!["sh", "-c", "sleep 3"];
+    std::fs::write(
+        root.join(LIFECYCLE_MANIFEST_PATH),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "preview": { "command": command, "url": "http://127.0.0.1:4173" }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let core = Core::new(test_init("lifecycle-singleton"), Arc::new(NullEventSink)).unwrap();
+    let opened = call(&core, "project_open", json!({ "path": root }));
+    let project_id = opened["id"].as_str().unwrap();
+    let project_path = opened["path"].as_str().unwrap();
+    let manifest = call(
+        &core,
+        "project_lifecycle_inspect",
+        json!({
+            "projectId": project_id,
+            "projectPath": project_path,
+        }),
+    );
+    call(
+        &core,
+        "project_lifecycle_trust",
+        json!({
+            "projectId": project_id,
+            "projectPath": project_path,
+            "hash": manifest["hash"],
+        }),
+    );
+    let first = call(
+        &core,
+        "project_lifecycle_start",
+        json!({
+            "projectId": project_id,
+            "projectPath": project_path,
+            "kind": "preview",
+        }),
+    );
+    let second = call(
+        &core,
+        "project_lifecycle_start",
+        json!({
+            "projectId": project_id,
+            "projectPath": project_path,
+            "kind": "preview",
+        }),
+    );
+    assert_eq!(first["id"], second["id"]);
+    let current = call(
+        &core,
+        "project_lifecycle_current",
+        json!({
+            "projectId": project_id,
+            "kind": "preview",
+        }),
+    );
+    assert_eq!(first["id"], current["id"]);
+    call(
+        &core,
+        "project_lifecycle_stop",
+        json!({ "runId": first["id"] }),
+    );
+    core.shutdown();
+}
+
 fn call(core: &Core, command: &str, payload: Value) -> Value {
     let response: Value = serde_json::from_str(
         &core.call_json(

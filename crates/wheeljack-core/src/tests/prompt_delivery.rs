@@ -32,6 +32,7 @@ fn request(id: &str) -> SubmitPromptDeliveryRequest {
         payload: PromptDeliveryPayload {
             prompt: "hello".to_string(),
             history_text: "hello".to_string(),
+            standing_role_applied: false,
             image_paths: vec![],
             provider: None,
             model: None,
@@ -92,6 +93,17 @@ fn queued_prompts_can_be_edited_and_canceled() {
     let edited = edit_prompt_delivery(&db, &id, &edited_payload).unwrap();
     assert_eq!(edited.revision, 2);
     assert_eq!(edited.payload.unwrap().prompt, "edited");
+    let canceled = cancel_prompt_delivery(&db, &id).unwrap();
+    assert_eq!(canceled.state, "canceled");
+}
+
+#[test]
+fn an_indeterminate_prompt_can_be_canceled_without_resending() {
+    let (_temp, db) = test_db();
+    let id = uuid::Uuid::now_v7().to_string();
+    submit_prompt_delivery(&db, &request(&id)).unwrap();
+    claim_next_prompt_delivery(&db, "session").unwrap().unwrap();
+    recover_prompt_deliveries(&db).unwrap();
     let canceled = cancel_prompt_delivery(&db, &id).unwrap();
     assert_eq!(canceled.state, "canceled");
 }
