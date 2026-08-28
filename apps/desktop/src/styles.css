@@ -45,6 +45,8 @@
   --wj-ui-font: "Geist Variable", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --wj-code-font: "JetBrains Mono Variable", "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
   --wj-ui-size: 13px;
+  --wj-ui-xs: max(11px, calc(var(--wj-ui-size) * .85));
+  --wj-ui-sm: max(12px, calc(var(--wj-ui-size) * .92));
   --wj-terminal-size: 13px;
   --wj-pane-header-height: 28px;
   --background: #0c0c0c;
@@ -1267,9 +1269,9 @@ button.wj-task-team:focus-visible { outline: 2px solid var(--ring); outline-offs
 .wj-orchestration-field { display: grid; gap: 7px; }
 .wj-orchestration-field label { color: var(--muted-foreground); font-size: 11px; }
 .wj-dependency-picker { display: grid; max-height: min(360px, 48vh); gap: 2px; overflow-y: auto; }
-.wj-dependency-picker label { display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; gap: 9px; border-radius: 5px; padding: 8px; }
-.wj-dependency-picker label:hover { background: var(--muted); }
-.wj-dependency-picker label[data-disabled="true"] { opacity: .46; }
+.wj-dependency-option { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 9px; border-radius: 5px; padding: 8px; }
+.wj-dependency-option:hover { background: var(--muted); }
+.wj-dependency-option[data-disabled="true"] { opacity: .46; }
 .wj-dependency-picker strong, .wj-dependency-picker small { display: block; }
 .wj-dependency-picker strong { font-size: 11px; font-weight: 580; }
 .wj-dependency-picker small { margin-top: 2px; color: var(--muted-foreground); font-size: 9px; }
@@ -1682,10 +1684,18 @@ html[data-dragging-pane] { cursor: grabbing; user-select: none; }
 .data-pane-checklist > div { display: grid; min-height: 32px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; font-size: 12px; }
 .data-pane-checklist > form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; margin-top: 6px; }
 .data-pane-checklist p, .data-pane-browser > p, .data-pane-empty { color: var(--muted-foreground); font-size: 11px; }
-.data-pane-browser { display: grid; height: 100%; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); background: var(--background); }
+.data-pane-browser { display: flex; height: 100%; min-height: 0; flex-direction: column; background: var(--background); }
 .data-pane-browser form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; padding: 7px; border-bottom: 1px solid var(--border); }
 .data-pane-browser > p { margin: 0; padding: 5px 8px; color: var(--destructive); }
+.browser-preview { display: grid; min-height: 0; flex: 1 1 auto; grid-template-rows: minmax(0, 1fr) auto; }
 .data-pane-browser iframe { width: 100%; height: 100%; border: 0; background: white; }
+.browser-external-fallback { display: flex; justify-content: flex-end; border-top: 1px solid var(--border); padding: 5px 8px; color: var(--muted-foreground); font-size: var(--wj-ui-xs); }
+.browser-external-fallback button { height: auto; padding: 1px 4px; color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.browser-lifecycle { display: grid; gap: 7px; max-height: 42%; padding: 9px; overflow: auto; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--card) 82%, var(--background)); }
+.browser-lifecycle > div { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 7px; }
+.browser-lifecycle small { color: var(--muted-foreground); font-size: 10px; }
+.browser-lifecycle code, .browser-lifecycle pre { max-height: 150px; margin: 0; padding: 7px; overflow: auto; border: 1px solid var(--border); border-radius: 5px; background: var(--background); white-space: pre-wrap; font: 10px/1.45 var(--wj-code-font); }
+.browser-lifecycle-actions { justify-content: flex-start !important; }
 .data-pane-empty { display: grid; place-items: center; }
 .chat { position: relative; display: grid; height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr) auto auto; background: var(--background); }
 .chat-transcript { min-height: 0; }
@@ -1830,6 +1840,18 @@ html[data-dragging-pane] { cursor: grabbing; user-select: none; }
 .chat-composer { position: relative; display: grid; width: min(calc(100% - 24px), 760px); grid-template-columns: minmax(0, 1fr); gap: 9px; margin: 0 auto 10px; padding: 10px 10px 9px; border: 1px solid color-mix(in srgb, var(--border) 88%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--card) 90%, var(--background)); box-shadow: 0 0 0 .5px color-mix(in srgb, var(--foreground) 5%, transparent), 0 1px 2px rgb(0 0 0 / .16), 0 8px 28px rgb(0 0 0 / .1); transition: border-color 160ms var(--wj-ease), box-shadow 160ms var(--wj-ease); }
 .chat-composer-attachments { display: flex; gap: 7px; overflow-x: auto; }
 .chat-composer-error { color: var(--destructive); font-size: 10px; }
+.chat-prompt-queue { display: grid; gap: 5px; max-height: 150px; overflow: auto; }
+.chat-prompt-queue > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 7px; align-items: center; padding: 6px 7px; border: 1px solid var(--border); border-radius: 6px; background: color-mix(in srgb, var(--muted) 55%, transparent); }
+.chat-prompt-queue span { font-size: 10px; text-transform: capitalize; }
+.chat-prompt-queue small { min-width: 0; overflow: hidden; color: var(--muted-foreground); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.chat-editing-prompt { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border); padding: 5px 9px; color: var(--warning); font-size: var(--wj-ui-xs); }
+.chat-delivery-state { display: block; margin-top: 6px; color: var(--warning); font-size: var(--wj-ui-xs); text-transform: capitalize; }
+.message.user[data-delivery-state="canceled"] { opacity: .68; text-decoration-color: color-mix(in srgb, currentColor 38%, transparent); }
+.message.user[data-delivery-state="indeterminate"] { border-color: color-mix(in srgb, var(--warning) 52%, var(--border)); }
+.wj-session-history-boundary { margin: 0; padding: 0 10px 8px; color: var(--muted-foreground); font-size: var(--wj-ui-xs); line-height: 1.45; }
+
+.chat-prompt-queue > div > div { display: flex; grid-row: 1 / span 2; grid-column: 2; gap: 2px; }
+.chat-prompt-queue [data-state="failed"], .chat-prompt-queue [data-state="indeterminate"], .chat-prompt-queue [data-state="blocked"] { border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); }
 .chat-file-mentions { position: absolute; z-index: 8; bottom: calc(100% + 7px); left: 0; display: grid; width: min(520px, 100%); overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--popover); box-shadow: var(--wj-shadow); }
 .chat-file-mentions-heading { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border); padding: 9px 10px 8px; }
 .chat-file-mentions-heading strong { font-size: 11px; font-weight: 620; }
@@ -2312,3 +2334,37 @@ html[data-dragging-pane] { cursor: grabbing; user-select: none; }
     opacity: 0.7;
   }
 }
+
+/* Operational labels scale with the configured UI type size and remain legible at 100%. */
+.wj-floor :is(small, p, code, dt, dd, strong, span, label),
+[class*="wj-task"] :is(small, p),
+[class*="wj-inspector"] :is(small, p, code, dt, dd),
+[class*="wj-recovery"] :is(small, p, code),
+.wj-task-team strong,
+.wj-task-unassigned,
+.wj-task-coordination > button,
+.wj-task-intervention strong,
+.wj-task-review-state,
+.wj-task-review-state strong,
+.wj-task-complete,
+.wj-agent-rail-header small,
+.wj-team-signals span,
+.wj-team-conflicts,
+.wj-team-dependencies,
+.wj-agent-status :is(span, small, p),
+.wj-terminal-agent-task,
+.wj-inspector-empty,
+.wj-transcript-meta,
+.wj-session-history-row :is(small, p),
+.pane-header :is(small, button),
+.browser-lifecycle :is(small, code, pre),
+.chat-prompt-queue :is(span, small),
+.chat-composer-error,
+.message > span,
+.chat-file-mentions :is(small, footer),
+.wj-usage-panel :is(small, p, th, td),
+.wj-usage-table,
+.wj-usage-status,
+.wj-usage-provenance,
+.wj-usage-session-status,
+.wj-usage-coverage span { font-size: var(--wj-ui-xs); }

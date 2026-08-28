@@ -1,6 +1,7 @@
-import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgentChat } from "./AgentChat";
+import { callCore } from "./core";
 import { botSnapshotFromNode } from "./bots";
 import { agentCompositionFromNode, type AgentCompositionState } from "./agentComposition";
 import { PaneAgentMenuItems, type TerminalAgentContext } from "./PaneAgentMenuItems";
@@ -35,8 +36,11 @@ import type {
   AgentProfile,
   CanvasNode,
   JsonObject,
+  LifecycleManifest,
+  LifecycleRun,
   OpsCard,
   PaneRuntime,
+  PromptDelivery,
   SplitAxis,
   SplitNode,
 } from "./types";
@@ -67,6 +71,7 @@ interface SplitViewProps {
   agentContexts: Record<string, TerminalAgentContext>;
   agentProfiles: AgentProfile[];
   projectRoot?: string;
+  projectId?: string;
   agentAccess?: AgentAccessMode;
   focusedPaneId: string | null;
   zoomedPaneId?: string | null;
@@ -89,6 +94,9 @@ interface SplitViewProps {
   onPaint: (runtime: PaneRuntime, milliseconds: number) => void;
   onResizePaint: (milliseconds: number) => void;
   onPrompt: (runtime: PaneRuntime, prompt: string, images?: AgentImageAttachment[]) => Promise<boolean>;
+  onPromptEdit: (runtime: PaneRuntime, delivery: PromptDelivery, prompt: string, images: AgentImageAttachment[]) => Promise<boolean>;
+  onPromptRetry: (runtime: PaneRuntime, delivery: PromptDelivery) => Promise<boolean>;
+  onPromptCancel: (runtime: PaneRuntime, delivery: PromptDelivery) => Promise<boolean>;
   onRespond: (runtime: PaneRuntime, approved: boolean, response?: string) => Promise<boolean>;
   onCancel: (runtime: PaneRuntime) => Promise<boolean>;
   onAgentAccess: (agentAccess: AgentAccessMode) => Promise<void>;
@@ -116,6 +124,7 @@ export function SplitView(props: SplitViewProps) {
         agentContext={props.agentContexts[pane.id]}
         agentProfile={props.agentProfiles.find((profile) => profile.adapterId === runtime?.adapterId)}
         projectRoot={props.projectRoot}
+        projectId={props.projectId}
         agentAccess={props.agentAccess}
         focused={props.focusedPaneId === pane.id}
         zoomed={props.zoomedPaneId === pane.id}
@@ -137,6 +146,9 @@ export function SplitView(props: SplitViewProps) {
         onPaint={(milliseconds) => runtime && props.onPaint(runtime, milliseconds)}
         onResizePaint={props.onResizePaint}
         onPrompt={(prompt, images) => runtime ? props.onPrompt(runtime, prompt, images) : Promise.resolve(false)}
+        onPromptEdit={(delivery, prompt, images) => runtime ? props.onPromptEdit(runtime, delivery, prompt, images) : Promise.resolve(false)}
+        onPromptRetry={(delivery) => runtime ? props.onPromptRetry(runtime, delivery) : Promise.resolve(false)}
+        onPromptCancel={(delivery) => runtime ? props.onPromptCancel(runtime, delivery) : Promise.resolve(false)}
         onRespond={(approved, response) => runtime ? props.onRespond(runtime, approved, response) : Promise.resolve(false)}
         onCancel={() => runtime ? props.onCancel(runtime) : Promise.resolve(false)}
         onAgentAccess={props.onAgentAccess}
@@ -239,6 +251,7 @@ function Pane({
   runtime,
   agentContext,
   agentProfile,
+  projectId,
   projectRoot,
   agentAccess,
   focused,
@@ -261,6 +274,9 @@ function Pane({
   onPaint,
   onResizePaint,
   onPrompt,
+  onPromptEdit,
+  onPromptRetry,
+  onPromptCancel,
   onRespond,
   onCancel,
   onLoadOlderHistory,
@@ -278,6 +294,7 @@ function Pane({
   agentContext?: TerminalAgentContext;
   agentProfile?: AgentProfile;
   projectRoot?: string;
+  projectId?: string;
   agentAccess?: AgentAccessMode;
   focused: boolean;
   zoomed: boolean;
@@ -299,6 +316,9 @@ function Pane({
   onPaint: (milliseconds: number) => void;
   onResizePaint: (milliseconds: number) => void;
   onPrompt: (prompt: string, images?: AgentImageAttachment[]) => Promise<boolean>;
+  onPromptEdit: (delivery: PromptDelivery, prompt: string, images: AgentImageAttachment[]) => Promise<boolean>;
+  onPromptRetry: (delivery: PromptDelivery) => Promise<boolean>;
+  onPromptCancel: (delivery: PromptDelivery) => Promise<boolean>;
   onRespond: (approved: boolean, response?: string) => Promise<boolean>;
   onCancel: () => Promise<boolean>;
   onLoadOlderHistory: () => Promise<void>;
@@ -482,7 +502,7 @@ function Pane({
       </header>
       <div className="pane-content">
         {runtime?.structured ? (chatView || !runtime.terminalSessionId ? (
-          <AgentChat autoFocusComposer={focused && runtime.status === "ready"} runtime={runtime} projectRoot={projectRoot} agentAccess={agentAccess} agentProfile={agentProfile} shortcuts={shortcuts} composition={agentCompositionFromNode(node.data)} onCompositionChange={onAgentComposition} onPrompt={promptAgent} onRespond={respondToAgent} onCancel={cancelAgent} onLoadOlderHistory={loadOlderAgentHistory} onAgentAccess={changeAgentAccess} onAgentProfile={changeAgentProfile} onRepair={repairAgent} onResume={resumeAgent} />
+          <AgentChat autoFocusComposer={focused && runtime.status === "ready"} runtime={runtime} projectRoot={projectRoot} agentAccess={agentAccess} agentProfile={agentProfile} shortcuts={shortcuts} composition={agentCompositionFromNode(node.data)} onCompositionChange={onAgentComposition} onPrompt={promptAgent} onPromptEdit={onPromptEdit} onPromptRetry={onPromptRetry} onPromptCancel={onPromptCancel} onRespond={respondToAgent} onCancel={cancelAgent} onLoadOlderHistory={loadOlderAgentHistory} onAgentAccess={changeAgentAccess} onAgentProfile={changeAgentProfile} onRepair={repairAgent} onResume={resumeAgent} />
         ) : (
           <TerminalSurface
             active={focused}
@@ -509,7 +529,7 @@ function Pane({
             onResizePaint={onResizePaint}
             onContextMenuSelection={setContextSelection}
           />
-        ) : <DataPane node={node} shortcuts={shortcuts} onSave={onSaveData} />}
+        ) : <DataPane node={node} shortcuts={shortcuts} projectId={projectId} projectRoot={projectRoot} onSave={onSaveData} />}
       </div>
         </article>
       </ContextMenuTrigger>
@@ -534,10 +554,10 @@ function Pane({
   );
 }
 
-function DataPane({ node, shortcuts, onSave }: { node: CanvasNode; shortcuts: ShortcutBindings; onSave: (data: JsonObject) => void }) {
+function DataPane({ node, shortcuts, projectId, projectRoot, onSave }: { node: CanvasNode; shortcuts: ShortcutBindings; projectId?: string; projectRoot?: string; onSave: (data: JsonObject) => void }) {
   if (node.kind === "markdown_note") return <MarkdownPane node={node} saveShortcut={shortcuts["pane.save"]} onSave={onSave} />;
   if (node.kind === "task_checklist" || node.kind === "checklist") return <ChecklistPane node={node} onSave={onSave} />;
-  if (node.kind === "browser_preview") return <BrowserPane node={node} onSave={onSave} />;
+  if (node.kind === "browser_preview") return <BrowserPane node={node} projectId={projectId} projectRoot={projectRoot} onSave={onSave} />;
   return <pre className="fallback-pane">{stringValue(node.data, "content") ?? "No content."}</pre>;
 }
 
@@ -628,31 +648,161 @@ function ChecklistPane({ node, onSave }: { node: CanvasNode; onSave: (data: Json
   );
 }
 
-function BrowserPane({ node, onSave }: { node: CanvasNode; onSave: (data: JsonObject) => void }) {
+function BrowserPane({ node, projectId, projectRoot, onSave }: { node: CanvasNode; projectId?: string; projectRoot?: string; onSave: (data: JsonObject) => void }) {
   const initial = stringValue(node.data, "url") ?? "";
+  const nodeDataRef = useRef(node.data);
+  nodeDataRef.current = node.data;
   const [draft, setDraft] = useState(initial);
   const [url, setUrl] = useState(initial);
   const [error, setError] = useState("");
+  const [manifest, setManifest] = useState<LifecycleManifest>();
+  const [run, setRun] = useState<LifecycleRun>();
+  const [logs, setLogs] = useState("");
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const runId = run?.id;
+  const runState = run?.state;
+  const activeRun = Boolean(run && ["running", "starting", "ready", "stopping"].includes(run.state));
+  useEffect(() => {
+    if (!projectId || !projectRoot) return;
+    let canceled = false;
+    const savedRunId = stringValue(node.data, "lifecycleRunId");
+    void Promise.all([
+      callCore<LifecycleManifest>("project_lifecycle_inspect", { projectId, projectPath: projectRoot }),
+      callCore<LifecycleRun | null>("project_lifecycle_current", { projectId, runId: savedRunId }),
+    ]).then(([nextManifest, currentRun]) => {
+      if (canceled) return;
+      setManifest(nextManifest);
+      setRun(currentRun ?? undefined);
+      if (currentRun) {
+        const nextData: JsonObject = { ...nodeDataRef.current, lifecycleRunId: currentRun.id };
+        if (currentRun.kind === "preview" && currentRun.url) {
+          setDraft(currentRun.url);
+          setUrl(currentRun.url);
+          nextData.url = currentRun.url;
+        }
+        if (savedRunId !== currentRun.id || nextData.url !== initial) onSave(nextData);
+      } else if (savedRunId) {
+        const { lifecycleRunId: _lifecycleRunId, ...nextData } = nodeDataRef.current;
+        onSave(nextData);
+      }
+    }).catch((cause) => {
+      if (!canceled) {
+        setManifest(undefined);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    });
+    return () => { canceled = true; };
+  }, [projectId, projectRoot]);
+  useEffect(() => {
+    if (!runId || !runState || !["running", "starting", "ready", "stopping"].includes(runState)) return;
+    const refresh = () => {
+      void callCore<{ text: string }>("project_lifecycle_logs", { runId }).then((value) => setLogs(value.text)).catch(() => undefined);
+      if (projectId) void callCore<LifecycleRun[]>("project_lifecycle_runs", { projectId, limit: 20 }).then((runs) => {
+        const latest = runs.find((candidate) => candidate.id === runId);
+        if (latest) {
+          setRun(latest);
+          if (!["running", "starting", "ready", "stopping"].includes(latest.state)
+            && stringValue(nodeDataRef.current, "lifecycleRunId") === latest.id) {
+            const { lifecycleRunId: _lifecycleRunId, ...nextData } = nodeDataRef.current;
+            onSave(nextData);
+          }
+        }
+      }).catch(() => undefined);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 500);
+    return () => window.clearInterval(timer);
+  }, [projectId, runId, runState]);
+  const trustManifest = async () => {
+    if (!manifest || !projectId || !projectRoot) return;
+    setLifecycleBusy(true);
+    try {
+      await callCore("project_lifecycle_trust", { projectId, projectPath: projectRoot, hash: manifest.hash });
+      setManifest({ ...manifest, trusted: true });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
+  const startLifecycle = async (kind: "setup" | "preview") => {
+    if (!projectId || !projectRoot) return;
+    setLifecycleBusy(true);
+    setLogs("");
+    try {
+      const next = await callCore<LifecycleRun>("project_lifecycle_start", { projectId, projectPath: projectRoot, kind });
+      setRun(next);
+      const nextData: JsonObject = { ...nodeDataRef.current, lifecycleRunId: next.id };
+      if (kind === "preview" && next.url) {
+        setDraft(next.url);
+        setUrl(next.url);
+        nextData.url = next.url;
+      }
+      onSave(nextData);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
+  const stopLifecycle = async () => {
+    if (!run || !activeRun) return;
+    setLifecycleBusy(true);
+    setError("");
+    try {
+      await callCore("project_lifecycle_stop", { runId: run.id });
+      setRun((current) => current?.id === run.id ? { ...current, state: "stopping" } : current);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
   const navigate = () => {
     try {
-      const parsed = new URL(draft.trim());
+      const candidate = draft.trim();
+      const withProtocol = /^[a-z][a-z\d+.-]*:/i.test(candidate)
+        ? candidate
+        : /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(candidate)
+          ? `http://${candidate}`
+          : `https://${candidate}`;
+      const parsed = new URL(withProtocol);
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error();
       setUrl(parsed.href);
       setDraft(parsed.href);
       setError("");
-      onSave({ ...node.data, url: parsed.href });
+      onSave({ ...nodeDataRef.current, url: parsed.href });
     } catch {
       setError("Enter an http or https URL.");
     }
   };
+  const trustedLocalPreview = Boolean(
+    manifest?.trusted
+    && run?.kind === "preview"
+    && run.url === url
+    && /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(url),
+  );
   return (
     <div className="data-pane-browser">
+      {manifest && <section className="browser-lifecycle" aria-label="Project lifecycle">
+        <div><strong>Project lifecycle</strong><small>{manifest.trusted ? "Trusted manifest" : "Review required"} · {manifest.hash.slice(0, 10)}</small></div>
+        {!manifest.trusted ? <>
+          <code>{JSON.stringify({ setup: manifest.setup, preview: manifest.preview }, null, 2)}</code>
+          <Button type="button" size="sm" variant="outline" disabled={lifecycleBusy} onClick={() => void trustManifest()}>Trust this manifest</Button>
+        </> : <div className="browser-lifecycle-actions">
+          {manifest.setup && <Button type="button" size="sm" variant="outline" disabled={lifecycleBusy || activeRun} onClick={() => void startLifecycle("setup")}>Run setup</Button>}
+          {manifest.preview && <Button type="button" size="sm" disabled={lifecycleBusy || activeRun} onClick={() => void startLifecycle("preview")}>Start preview</Button>}
+          {activeRun && <Button type="button" size="sm" variant="outline" disabled={lifecycleBusy || run?.state === "stopping"} onClick={() => void stopLifecycle()}>{run?.state === "stopping" ? "Stopping…" : "Stop"}</Button>}
+          {run && <small>{run.kind} · {run.state}{run.exitCode !== undefined ? ` · exit ${run.exitCode}` : ""}</small>}
+        </div>}
+        {logs && <pre aria-label="Lifecycle logs">{logs}</pre>}
+      </section>}
       <form onSubmit={(event) => { event.preventDefault(); navigate(); }}>
         <Input aria-label="Browser address" value={draft} onChange={(event) => setDraft(event.target.value)} aria-invalid={Boolean(error)} />
         <Button size="sm">Go</Button>
       </form>
       {error && <p role="alert">{error}</p>}
-      {url ? <iframe title={`Browser preview ${node.title}`} src={url} sandbox="allow-forms allow-scripts" /> : <div className="data-pane-empty">Enter a URL to preview it.</div>}
+      {url ? <div className="browser-preview"><iframe title={`Browser preview ${node.title}`} src={url} sandbox={trustedLocalPreview ? "allow-forms allow-scripts allow-same-origin" : "allow-forms allow-scripts"} /><div className="browser-external-fallback"><Button type="button" size="xs" variant="ghost" onClick={() => void invoke("open_external_url", { url }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}>Open externally</Button></div></div> : <div className="data-pane-empty">Enter a URL to preview it.</div>}
     </div>
   );
 }

@@ -15,6 +15,7 @@ pub(crate) fn load_session_history(
            s.adapter_id,
            s.cwd,
            s.status,
+           s.intent,
            s.started_at,
            s.ended_at,
            (
@@ -35,9 +36,10 @@ pub(crate) fn load_session_history(
             adapter_id: row.get(3)?,
             cwd: row.get(4)?,
             status: row.get(5)?,
-            started_at: row.get(6)?,
-            ended_at: row.get(7)?,
-            chunk_count: row.get(8)?,
+            intent: row.get(6)?,
+            started_at: row.get(7)?,
+            ended_at: row.get(8)?,
+            chunk_count: row.get(9)?,
             transcript_preview: String::new(),
         })
     })?;

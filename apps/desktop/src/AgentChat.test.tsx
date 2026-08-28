@@ -45,6 +45,9 @@ function runtime(overrides: Partial<PaneRuntime> = {}): PaneRuntime {
 function actions() {
   return {
     onPrompt: vi.fn(async () => true),
+    onPromptEdit: vi.fn(async () => true),
+    onPromptRetry: vi.fn(async () => true),
+    onPromptCancel: vi.fn(async () => true),
     onRespond: vi.fn(async () => true),
     onCancel: vi.fn(async () => true),
     onLoadOlderHistory: vi.fn(async () => undefined),
@@ -145,6 +148,66 @@ test("keeps the active turn visible and makes stop a distinct action", async () 
   expect(stop.querySelector('[data-sargam-icon="stop"]')).not.toBeNull();
   await user.click(stop);
   expect(callbacks.onCancel).toHaveBeenCalledOnce();
+
+  const composer = screen.getByRole("textbox", { name: "Agent prompt" });
+  await user.type(composer, "Check the tests next{Enter}");
+  await waitFor(() => expect(callbacks.onPrompt).toHaveBeenCalledWith("Check the tests next", []));
+  expect(screen.getByRole("button", { name: "Queue prompt" })).toBeTruthy();
+});
+
+test("shows durable prompt recovery actions", async () => {
+  const user = userEvent.setup();
+  const { callbacks } = renderChat({
+    promptDeliveries: [{
+      id: "delivery-one",
+      sessionId: "session-one",
+      seq: 2,
+      mode: "next",
+      state: "indeterminate",
+      payload: { prompt: "Check again", historyText: "Check again", imagePaths: [] },
+      revision: 1,
+      attempts: 1,
+      errorMessage: "Delivery could not be confirmed.",
+      createdAt: "2026-08-28T00:00:00Z",
+      updatedAt: "2026-08-28T00:00:01Z",
+    }],
+  });
+  expect(screen.getByText("Delivery could not be confirmed.")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  expect(callbacks.onPromptRetry).toHaveBeenCalledWith(expect.objectContaining({ id: "delivery-one" }));
+});
+
+test("edits a queued prompt atomically and preserves its images", async () => {
+  const user = userEvent.setup();
+  coreMocks.readImageAttachment.mockResolvedValue({ dataUrl: "data:image/png;base64,AA==" });
+  const attachment = { path: "C:\\data\\queued.png", fileName: "queued.png", mimeType: "image/png" };
+  const delivery = {
+    id: "delivery-edit",
+    sessionId: "session-one",
+    seq: 3,
+    mode: "next" as const,
+    state: "queued" as const,
+    payload: { prompt: "Old prompt", historyText: "Old prompt", imagePaths: [attachment.path] },
+    revision: 1,
+    attempts: 0,
+    createdAt: "2026-08-28T00:00:00Z",
+    updatedAt: "2026-08-28T00:00:00Z",
+  };
+  const { callbacks } = renderChat({
+    status: "running",
+    promptDeliveries: [delivery],
+    messages: [{ id: "queued-user", role: "user", kind: "message", text: "Old prompt", images: [attachment], deliveryId: delivery.id, deliveryState: "queued" }],
+  });
+
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  const composer = screen.getByRole("textbox", { name: "Agent prompt" });
+  expect((composer as HTMLTextAreaElement).value).toBe("Old prompt");
+  expect(screen.getByRole("button", { name: "Remove queued.png" })).toBeTruthy();
+  await user.clear(composer);
+  await user.type(composer, "Updated prompt{Enter}");
+
+  await waitFor(() => expect(callbacks.onPromptEdit).toHaveBeenCalledWith(delivery, "Updated prompt", [attachment]));
+  expect((composer as HTMLTextAreaElement).value).toBe("");
 });
 
 test("uses the latest progress update instead of a generic working fallback", () => {

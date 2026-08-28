@@ -55,11 +55,18 @@ Open a project folder from Home, then create a shell or structured-agent pane
 in Work. Panes can be split recursively; project tasks and agent routing
 live in the Plan board alongside the workspace.
 
+Structured sessions support durable follow-up queues and explicit **Ask**
+(enforced read-only) or **Code** intent. Browser panes can review and run a
+repo-local `.wheeljack/lifecycle.json` setup or preview workflow without moving
+process ownership out of the native core.
+
 Managed agents can autonomously list workspace agents, message a peer, start a
 bounded child agent, hand off a task, or request review. Configure each action
 as **Allow automatically**, **Ask every time**, or **Deny** under Settings →
 Agents. wheeljack enforces workspace, depth, child, concurrency, and rate limits
-in the Rust core and records every request and result in Autonomy history.
+in the Rust core and records every request and result in Autonomy history. New
+profiles allow discovery and ask before every action that can mutate work or
+create additional provider usage.
 
 ## Local data and permissions
 

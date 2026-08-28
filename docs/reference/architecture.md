@@ -92,6 +92,8 @@ It is a flat `match` grouped by command prefix:
 | `canvas_*` | canvases, nodes, layout |
 | `coordination_*`, `ops_*` | Plan board, task lanes, scheduler leases |
 | `session_*`, `terminal_*` | PTY sessions, transcripts, viewport |
+| `project_lifecycle_*` | trusted repo setup and preview processes |
+| `system_diagnostics_run` | native database, directory, and runtime checks |
 | `git_*` | status, diff, worktrees |
 | `settings_*`, `state_backup_export` | preferences and durable state |
 | `updater_*` | check, download, recovery |

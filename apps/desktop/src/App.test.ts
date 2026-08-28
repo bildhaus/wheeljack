@@ -3,6 +3,7 @@ import {
   agentLaunchArgs,
   agentLaunchConfig,
   agentProjectAccessConfig,
+  supportsAskIntent,
   agentStatusAfterInteraction,
   agentRuntimeCapabilities,
   agentTaskCardsFromProposal,
@@ -1034,6 +1035,19 @@ test("holds verified and approved legacy review cards for one project recovery p
   });
 });
 
+test("maps Ask intent only to enforceable read-only adapter profiles", () => {
+  const profiles = defaultAgentProfiles();
+  const codex = profiles.find((profile) => profile.adapterId === "codex-cli");
+  const claude = profiles.find((profile) => profile.adapterId === "claude-code");
+  expect(agentProjectAccessConfig(codex, "full", "ask"))
+    .toEqual({ approvalPolicy: "never", sandbox: "read-only" });
+  expect(agentLaunchConfig(claude, "full", "ask").args)
+    .toContain("plan");
+  expect(supportsAskIntent("codex-cli")).toBe(true);
+  expect(supportsAskIntent("claude-code")).toBe(true);
+  expect(supportsAskIntent("opencode")).toBe(false);
+});
+
 test("recovers interrupted reconciliation as a safe retry", () => {
   const state = parseOpsState({
     version: 2,
@@ -1474,6 +1488,25 @@ test("replaces parsed streaming responses with Codex working commentary", () => 
   const working = { id: "node-1-agent-3-commentary", role: "system", kind: "commentary", title: "Working", text: "Reading files" } as const;
 
   expect(reconcileParsedAgentMessages([user, streamed], [working], "node-1")).toEqual([user, working]);
+});
+
+test("reconciles a delivered optimistic prompt with durable parsed history", () => {
+  const optimistic = {
+    id: "optimistic-user",
+    role: "user",
+    kind: "message",
+    text: "Inspect the repo",
+    deliveryId: "delivery-1",
+    deliveryState: "delivered",
+  } as const;
+  const parsed = {
+    id: "node-1-agent-1-user",
+    role: "user",
+    kind: "message",
+    text: "Inspect the repo",
+  } as const;
+
+  expect(reconcileParsedAgentMessages([optimistic], [parsed], "node-1")).toEqual([optimistic]);
 });
 
 test("merges agent messages only by stable id and preserves resolved interactions", () => {

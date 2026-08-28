@@ -104,7 +104,7 @@ test("makes startup usable before probing adapters and verifies exact profile ar
   );
   expect(probeSource).toContain("...agentLaunchConfig(profile)");
   expect(appSource.match(/\.\.\.agentLaunchConfig\(profile\)/g)).toHaveLength(2);
-  expect(appSource.match(/agentLaunchConfig\(profile, project\.agentAccess\)/g)).toHaveLength(2);
+  expect(appSource.match(/agentLaunchConfig\(profile, project\.agentAccess, intent\)/g)).toHaveLength(2);
 });
 
 test("waits for a structured payload instead of treating shell preamble as agent output", () => {
@@ -260,15 +260,15 @@ test("optimistically updates lightweight toggles and inbox actions", () => {
     .toBeLessThan(schedulerSource.lastIndexOf("saveSchedulerConfig"));
 });
 
-test("defaults autonomous collaboration on with bounded policy settings", () => {
+test("defaults autonomous collaboration mutations to ask with bounded policy settings", () => {
   expect(defaultAgentAutonomyPolicy()).toEqual({
     enabled: true,
     listAgents: "allow",
-    sendMessage: "allow",
-    spawnAgent: "allow",
-    handoffTask: "allow",
-    requestReview: "allow",
-    resolveFileConflict: "allow",
+    sendMessage: "ask",
+    spawnAgent: "ask",
+    handoffTask: "ask",
+    requestReview: "ask",
+    resolveFileConflict: "ask",
     maxDepth: 2,
     maxChildrenPerAgent: 3,
     maxConcurrentAgents: 8,
@@ -1341,10 +1341,16 @@ test("migrates legacy verification state without starting redundant verification
     appSource.indexOf("const activateCanvas"),
     appSource.indexOf("const refreshProjectData"),
   );
-  expect(activationSource).not.toContain('"session_statuses"');
+  const hydrationSource = appSource.slice(
+    appSource.indexOf("const hydrateRuntimes"),
+    appSource.indexOf("const pickProject"),
+  );
+  expect(activationSource).toContain("hydrateRuntimes(runtimeNodes, sessions)");
+  expect(hydrationSource).toContain('"session_statuses"');
   expect(activationSource).toContain("const recoveredVerification =");
   expect(activationSource).toContain("await persistOpsQueued(nextOps, nextCanvas");
   expect(activationSource).toContain("recoverOpsVerificationRuns(");
+  expect(activationSource).toMatch(/normalizedOps,\s+new Set\(\),\s+new Set\(\),/);
   expect(appSource).not.toContain("const _runOpsVerification");
 
   const merged = mergeProjectDocuments(state, {

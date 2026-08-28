@@ -149,10 +149,29 @@ export function reconcileParsedAgentMessages(
   parsed: AgentMessage[],
   nodeId: string,
 ): AgentMessage[] {
-  const parsedIds = new Set(parsed.map((message) => message.id));
+  const normalizedParsed = parsed.map((message) => {
+    if (message.role !== "user") return message;
+    const imagePaths = message.images?.map((image) => image.path) ?? [];
+    const optimistic = [...existing].reverse().find((candidate) => {
+      const candidatePaths = candidate.images?.map((image) => image.path) ?? [];
+      return candidate.role === "user"
+        && Boolean(candidate.deliveryId)
+        && candidate.deliveryState === "delivered"
+        && candidate.text === message.text
+        && candidatePaths.length === imagePaths.length
+        && candidatePaths.every((path, index) => path === imagePaths[index]);
+    });
+    return optimistic ? {
+      ...message,
+      id: optimistic.id,
+      deliveryId: optimistic.deliveryId,
+      deliveryState: optimistic.deliveryState,
+    } : message;
+  });
+  const parsedIds = new Set(normalizedParsed.map((message) => message.id));
   return mergeAgentMessages(
     existing.filter((message) => !message.id.startsWith(`${nodeId}-agent-`) || parsedIds.has(message.id)),
-    parsed,
+    normalizedParsed,
   );
 }
 

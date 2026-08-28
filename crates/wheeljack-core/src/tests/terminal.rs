@@ -1011,8 +1011,12 @@ fn blocked_pty_writer_does_not_block_another_session() {
     let second_id = spawn("second");
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    {
+    let retained_pty_writers = {
         let mut sessions = core.lock_pty_sessions().unwrap();
+        let retained = [
+            sessions.get(&first_id).unwrap().writer.clone(),
+            sessions.get(&second_id).unwrap().writer.clone(),
+        ];
         sessions.get_mut(&first_id).unwrap().writer =
             Arc::new(Mutex::new(Box::new(BlockingWriter {
                 entered: Some(entered_tx),
@@ -1020,7 +1024,8 @@ fn blocked_pty_writer_does_not_block_another_session() {
             })));
         sessions.get_mut(&second_id).unwrap().writer =
             Arc::new(Mutex::new(Box::new(std::io::sink())));
-    }
+        retained
+    };
 
     let (first_done_tx, first_done_rx) = std::sync::mpsc::channel();
     let first_core = core.clone();
@@ -1068,6 +1073,7 @@ fn blocked_pty_writer_does_not_block_another_session() {
     first.join().unwrap();
     second.join().unwrap();
     core.shutdown();
+    drop(retained_pty_writers);
 
     assert!(isolated, "first writer held the global PTY map");
     assert_eq!(

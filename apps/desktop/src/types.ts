@@ -14,6 +14,8 @@ export interface CoreConnection {
   appDataDir: string;
   version: string;
   reused: boolean;
+  protocolVersion?: number;
+  capabilities?: string[];
 }
 
 export interface CoreStatus {
@@ -82,6 +84,7 @@ export interface Session {
   adapterId: string;
   cwd: string;
   status: string;
+  intent?: AgentSessionIntent;
   startedAt: string;
   nodeTitle?: string;
   endedAt?: string;
@@ -100,6 +103,7 @@ export interface ProjectFileCatalog {
 }
 
 export type AgentAccessMode = "default" | "full";
+export type AgentSessionIntent = "ask" | "code";
 
 export type AgentEffort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
@@ -115,6 +119,70 @@ export interface AgentRuntimeCapabilities {
   resume: boolean;
   attachedTerminal: boolean;
   imageInput?: boolean;
+  steer?: boolean;
+}
+
+export type PromptDeliveryState = "queued" | "dispatching" | "delivered" | "failed" | "indeterminate" | "blocked" | "canceled";
+
+export interface PromptDelivery {
+  id: string;
+  sessionId: string;
+  seq: number;
+  mode: "auto" | "next" | "steer";
+  state: PromptDeliveryState;
+  payload?: {
+    prompt: string;
+    historyText: string;
+    standingRoleApplied?: boolean;
+    imagePaths: string[];
+    provider?: string;
+    model?: string;
+    thinking?: string;
+    approvalPolicy?: string;
+    sandbox?: string;
+  };
+  revision: number;
+  attempts: number;
+  errorCode?: string;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+  deliveredAt?: string;
+}
+
+export interface LifecycleTask {
+  command?: string[];
+  windows?: string[];
+  macos?: string[];
+  linux?: string[];
+  cwd?: string;
+  env: Record<string, string>;
+  url?: string;
+  timeoutSeconds?: number;
+}
+
+export interface LifecycleManifest {
+  path: string;
+  hash: string;
+  trusted: boolean;
+  version: number;
+  setup?: LifecycleTask;
+  preview?: LifecycleTask;
+}
+
+export interface LifecycleRun {
+  id: string;
+  projectId: string;
+  kind: "setup" | "preview";
+  state: string;
+  command: string[];
+  url?: string;
+  pid?: number;
+  exitCode?: number;
+  errorMessage?: string;
+  startedAt: string;
+  updatedAt: string;
+  endedAt?: string;
 }
 
 export interface SessionTranscript {
@@ -771,6 +839,8 @@ export interface AgentMessage {
   imageHeight?: number;
   imageMimeType?: string;
   images?: AgentImageAttachment[];
+  deliveryId?: string;
+  deliveryState?: PromptDeliveryState;
   tool?: string;
   status?: string;
   interactionId?: string;
@@ -854,6 +924,8 @@ export interface PaneRuntime {
   startedAt?: string;
   endedAt?: string;
   status: string;
+  intent?: AgentSessionIntent;
+  promptDeliveries?: PromptDelivery[];
   frame?: TerminalFrame;
   frameReceivedAt?: number;
   transcript: string;

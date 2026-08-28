@@ -2318,6 +2318,7 @@ fn structured_process_tree_kills_descendant_after_direct_child_exits() {
             stdin: None,
             protocol: "plain-argv".to_string(),
             cwd: ".".to_string(),
+            intent: "code".to_string(),
             http_port: None,
             rpc_state: Some(rpc_state.clone()),
             provider: None,
@@ -2331,6 +2332,7 @@ fn structured_process_tree_kills_descendant_after_direct_child_exits() {
                 resume: false,
                 attached_terminal: false,
                 image_input: false,
+                steer: false,
             },
             seq: Arc::new(AtomicU64::new(0)),
         },
@@ -3332,6 +3334,20 @@ fn structured_opencode_sse_driver_posts_prompt_and_emits_events() {
         assert!(Instant::now() < deadline, "timed out waiting for SSE event");
         thread::sleep(Duration::from_millis(20));
     }
+    while driver.rpc_state.lock().unwrap().turn_active {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for SSE turn completion"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    // The fake SSE endpoint intentionally closes after its idle event. Stop the
+    // reconnecting reader before exercising interaction bookkeeping directly;
+    // otherwise a fast reconnect can deliver another idle event and clear the
+    // synthetic pending interactions below.
+    driver.cancellation.shutdown.store(true, Ordering::SeqCst);
+    sse_reader.join().unwrap();
+    driver.cancellation.shutdown.store(false, Ordering::SeqCst);
 
     let messages = posted_messages.lock().unwrap().clone();
     assert_eq!(messages.len(), 2);
@@ -3513,8 +3529,6 @@ fn structured_opencode_sse_driver_posts_prompt_and_emits_events() {
         .opencode
         .pending_interactions
         .is_empty());
-    driver.cancellation.shutdown.store(true, Ordering::SeqCst);
-    sse_reader.join().unwrap();
 }
 
 #[test]
@@ -3834,6 +3848,7 @@ fn blocked_structured_http_session_does_not_block_another_session() {
             stdin: None,
             protocol: "opencode-sse".to_string(),
             cwd: ".".to_string(),
+            intent: "code".to_string(),
             http_port: Some(port),
             rpc_state: Some(Arc::new(Mutex::new(StructuredAgentRpcState {
                 opencode: OpenCodeRpcState {

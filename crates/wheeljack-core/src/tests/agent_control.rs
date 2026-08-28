@@ -65,8 +65,47 @@ fn request(id: &str, action: &str) -> AgentControlRequestDto {
 }
 
 #[test]
+fn ask_sessions_can_inspect_agents_but_cannot_delegate() {
+    let core = control_fixture("agent-control-ask", 0);
+    {
+        let db = core.lock_db().unwrap();
+        db.execute(
+            "UPDATE sessions SET intent = 'ask' WHERE id = 'session_source'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let listed = {
+        let db = core.lock_db().unwrap();
+        authorize_agent_control(&db, request("ask-list", "list_agents")).unwrap()
+    };
+    assert_eq!(listed.decision, "allow");
+
+    let mut delegated = request("ask-message", "send_message");
+    delegated.target = Some("Peer".to_string());
+    delegated.message = Some("Make this change for me.".to_string());
+    let denied = {
+        let db = core.lock_db().unwrap();
+        authorize_agent_control(&db, delegated).unwrap()
+    };
+    assert_eq!(denied.decision, "deny");
+    assert_eq!(
+        denied.reason,
+        "Ask sessions cannot delegate or mutate workspace state."
+    );
+}
+
+#[test]
 fn agent_control_authorizes_workspace_messages_and_deduplicates_requests() {
     let core = control_fixture("agent-control-message", 0);
+    core.lock_db()
+        .unwrap()
+        .execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES ('agentAutonomyPolicy', ?1, ?2)",
+            params![json!({ "sendMessage": "allow" }).to_string(), now()],
+        )
+        .unwrap();
     let mut req = request("message-1", "send_message");
     req.target = Some("Peer".to_string());
     req.message = Some("Please inspect the parser.".to_string());
@@ -271,6 +310,16 @@ fn agent_control_prompt_advertises_all_tools_only_when_enabled() {
 #[test]
 fn agent_control_authorizes_claim_releases_with_an_explicit_remaining_file_set() {
     let core = control_fixture("agent-control-resolve-file-conflict", 0);
+    core.lock_db()
+        .unwrap()
+        .execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES ('agentAutonomyPolicy', ?1, ?2)",
+            params![
+                json!({ "resolveFileConflict": "allow" }).to_string(),
+                now()
+            ],
+        )
+        .unwrap();
     let mut req = request("resolve-1", "resolve_file_conflict");
     req.task_id = Some("task-1".to_string());
     req.files = Some(vec!["src/owned.rs".to_string()]);

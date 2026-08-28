@@ -26,6 +26,9 @@ The last active canvas is remembered per project.
 - **Checklist:** a lightweight list for temporary workspace tracking.
 - **Browser preview:** a URL preview alongside the work that produced it.
 
+Browser panes can also run a trusted repo-local lifecycle manifest for setup and
+preview commands. See [Repo lifecycle manifests](/reference/repo-lifecycle/).
+
 ## Arrange panes
 
 Use the pane toolbar, context menu, or shortcuts to:

@@ -142,7 +142,7 @@ type OpsTaskEditablePatch = Partial<Pick<OpsCard, "title" | "detail" | "definiti
 const OpsArchiveDialogs = lazy(() => import("./OpsArchiveDialogs"));
 const TaskWorktreeList = lazy(() => import("./TaskWorktreeList"));
 import { activeVsCodeThemeName, parseImportedThemeDocument, type ThemeImportResult } from "./themeImport";
-import { discoverVsCodeThemes, readThemeDocument, writeThemeDocument, type VsCodeThemeSource } from "./core";
+import { callCore, discoverVsCodeThemes, readThemeDocument, writeThemeDocument, type VsCodeThemeSource } from "./core";
 import type { UpdateController } from "./updater";
 import {
   formatUpdateDate,
@@ -222,6 +222,27 @@ function ReviewPolicyOptions() {
 const uiFontPresets = ["Geist Variable", "Open Sans Variable", "Inter Variable", "system-ui", "Segoe UI Variable Text", "Segoe UI", "SF Pro Text", "Helvetica Neue", "Arial"];
 const headingFontPresets = ["Geist Pixel", ...uiFontPresets];
 const codeFontPresets = ["JetBrains Mono Variable", "Cascadia Mono", "monospace", "Cascadia Code", "JetBrains Mono", "Fira Code", "Iosevka", "SFMono-Regular", "Menlo", "Consolas"];
+
+interface AttachmentStorageStatus {
+  fileCount: number;
+  totalBytes: number;
+  referencedCount: number;
+  unreferencedCount: number;
+  removedCount: number;
+  removedBytes: number;
+}
+
+function formatStorageBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let index = 1; index < units.length && value >= 1024; index += 1) {
+    value /= 1024;
+    unit = units[index];
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${unit}`;
+}
 
 interface PendingOpsAction {
   card: OpsCard;
@@ -1141,6 +1162,13 @@ export function OnboardingSurface({
             )}
             {step === 3 && (
               <>
+                <div className="wj-onboarding-trust">
+                  <MonitorCog aria-hidden />
+                  <div>
+                    <strong>Agent coordination stays under your control.</strong>
+                    <p>wheeljack lets agents discover peers automatically, but asks before messaging, spawning children, handing off work, requesting review, or resolving conflicts. Approved actions can create additional provider usage; limits and policies are available in Settings → Agents.</p>
+                  </div>
+                </div>
                 <form className="wj-onboarding-agent-form" onSubmit={startAgent}>
                   <Label htmlFor="onboarding-prompt">First prompt</Label>
                   <Textarea id="onboarding-prompt" rows={5} disabled={busy} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
@@ -2369,8 +2397,9 @@ export function OpsSurface({
             {dependencyCard && state.cards.filter((card) => card.id !== dependencyCard.id).map((card) => {
               const disabled = opsWouldCreateDependencyCycle(state.cards, dependencyCard.id, card.id);
               const checked = dependencyDraft.has(card.id);
-              return <label data-disabled={disabled || undefined} key={card.id}>
+              return <div className="wj-dependency-option" data-disabled={disabled || undefined} key={card.id}>
                 <Checkbox
+                  aria-label={`Dependency on ${card.title}`}
                   checked={checked}
                   disabled={disabled}
                   onCheckedChange={(value) => setDependencyDraft((current) => {
@@ -2384,8 +2413,8 @@ export function OpsSurface({
                   })}
                 />
                 <span><strong>{card.title}</strong><small>{state.columns.find((column) => column.id === card.columnId)?.title}</small></span>
-                {checked && <span role="button" tabIndex={0} aria-label={`${dependencyHardDraft.has(card.id) ? "Make soft" : "Make hard"} relationship with ${card.title}`} onClick={(event) => { event.preventDefault(); event.stopPropagation(); setDependencyHardDraft((current) => { const next = new Set(current); if (next.has(card.id)) next.delete(card.id); else next.add(card.id); return next; }); }} onKeyDown={(event) => { if (event.key !== "Enter" && event.key !== " ") return; event.preventDefault(); event.currentTarget.click(); }}><Badge variant="outline">{dependencyHardDraft.has(card.id) ? "Hard" : "Soft"}</Badge></span>}
-              </label>;
+                {checked && <Button type="button" variant="ghost" size="xs" aria-label={`${dependencyHardDraft.has(card.id) ? "Make soft" : "Make hard"} relationship with ${card.title}`} onClick={() => setDependencyHardDraft((current) => { const next = new Set(current); if (next.has(card.id)) next.delete(card.id); else next.add(card.id); return next; })}>{dependencyHardDraft.has(card.id) ? "Hard" : "Soft"}</Button>}
+              </div>;
             })}
             {dependencyCard && state.cards.length === 1 && <p>No other tasks can be linked yet.</p>}
           </div>
@@ -2980,12 +3009,22 @@ export function SettingsSurface({
   const [vsCodeThemeQuery, setVsCodeThemeQuery] = useState("");
   const [fontFamilies, setFontFamilies] = useState<string[]>([]);
   const [storageStatus, setStorageStatus] = useState("");
+  const [attachmentStorage, setAttachmentStorage] = useState<AttachmentStorageStatus>();
+  const [attachmentCleanupBusy, setAttachmentCleanupBusy] = useState(false);
+  const [systemCheck, setSystemCheck] = useState("");
+  const [systemCheckBusy, setSystemCheckBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
   useEffect(() => {
     void invoke<string[]>("system_font_families")
       .then(setFontFamilies)
       .catch(() => setFontFamilies([]));
   }, []);
+  useEffect(() => {
+    if (page !== "application") return;
+    void callCore<AttachmentStorageStatus>("attachment_storage_status", {})
+      .then(setAttachmentStorage)
+      .catch((cause) => setStorageStatus(cause instanceof Error ? cause.message : String(cause)));
+  }, [page]);
   const themes = [...builtInThemes, ...preferences.customThemes];
   const activeThemeId = preferences.appearanceMode === "fixed"
     ? preferences.fixedThemeId
@@ -3415,8 +3454,35 @@ export function SettingsSurface({
                       .then(() => setStorageStatus("Diagnostics copied."))
                       .catch(() => setStorageStatus("Could not copy diagnostics."));
                   }}>Copy diagnostics</Button>
+                  <Button variant="outline" disabled={systemCheckBusy} onClick={() => {
+                    setSystemCheckBusy(true);
+                    void callCore<Record<string, unknown>>("system_diagnostics_run", {})
+                      .then((report) => {
+                        setSystemCheck(JSON.stringify(report, null, 2));
+                        setStorageStatus(report.ok === true ? "System check passed." : "System check found an issue.");
+                      })
+                      .catch((cause) => setStorageStatus(cause instanceof Error ? cause.message : String(cause)))
+                      .finally(() => setSystemCheckBusy(false));
+                  }}>{systemCheckBusy ? <><DotMatrixLoader size={16} />Checking…</> : "Run system check"}</Button>
+                  <Button variant="outline" disabled={attachmentCleanupBusy} onClick={() => {
+                    setAttachmentCleanupBusy(true);
+                    void callCore<AttachmentStorageStatus>("attachment_gc", {})
+                      .then((status) => {
+                        setAttachmentStorage(status);
+                        setStorageStatus(status.removedCount > 0
+                          ? `Removed ${status.removedCount} unused image${status.removedCount === 1 ? "" : "s"} (${formatStorageBytes(status.removedBytes)}).`
+                          : "No unused image attachments found.");
+                      })
+                      .catch((cause) => setStorageStatus(cause instanceof Error ? cause.message : String(cause)))
+                      .finally(() => setAttachmentCleanupBusy(false));
+                  }}>{attachmentCleanupBusy ? <><DotMatrixLoader size={16} />Cleaning…</> : "Clean attachments"}</Button>
                 </div>
+                {attachmentStorage && <p className="mt-2 text-xs text-muted-foreground">
+                  Image attachments: {attachmentStorage.fileCount} · {formatStorageBytes(attachmentStorage.totalBytes)}
+                  {attachmentStorage.unreferencedCount > 0 ? ` · ${attachmentStorage.unreferencedCount} unused` : ""}
+                </p>}
                 <p className="mt-2 text-xs text-muted-foreground">Backups stay local. Diagnostics exclude credentials and transcript content.</p>
+                {systemCheck && <pre className="mt-3 max-h-64 overflow-auto rounded-md border p-3 text-xs" aria-label="System check results">{systemCheck}</pre>}
                 {storageStatus && <p className="mt-3 text-sm text-muted-foreground" role="status">{storageStatus}</p>}
               </SettingsCard>
               <SettingsCard danger title="Reset preferences" description="Restore appearance, workspace, shortcuts, and coding-agent profiles to their defaults.">
@@ -3861,6 +3927,7 @@ export function UtilityPanelSurface({
                   <span className="wj-inline-status" aria-live="polite">{sessionSearchBusy && <DotMatrixLoader size={16} />}{sessionSearchBusy ? "Searching sessions…" : `${sessionRows.length} ${searchingSessions ? "matches" : "sessions"}`}</span>
                   <Button size="xs" variant="ghost" disabled={!sessions.some((session) => Boolean(session.chunkCount))} onClick={() => setClearTranscriptsOpen(true)}><Trash2 />Clear transcripts</Button>
                 </div>
+                {!searchingSessions && sessions.length >= 100 && <p className="wj-session-history-boundary">Showing the latest 100 sessions. Transcript search includes older sessions.</p>}
                 {sessionRows.length ? <div className="wj-session-history-list">{sessionRows.map((item) => {
                   const sessionId = "sessionId" in item ? item.sessionId : item.id;
                   const preview = "snippet" in item ? item.snippet : item.transcriptPreview;

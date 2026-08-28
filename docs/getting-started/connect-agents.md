@@ -61,4 +61,6 @@ Managed agents can request bounded coordination actions such as messaging a
 peer, starting a child, handing off work, or requesting review. Configure each
 action as **Allow automatically**, **Ask every time**, or **Deny** in agent
 settings. wheeljack enforces the selected policy and records the request and
-result in Autonomy history.
+result in Autonomy history. New profiles allow agent discovery automatically;
+messaging, spawning children, handoff, review, and conflict resolution default
+to **Ask every time** because approved actions can create provider usage.
