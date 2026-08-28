@@ -71,7 +71,7 @@ test("reloads the sticker lens only when entering a project surface after Home",
 test("makes startup usable before probing adapters and verifies exact profile args", () => {
   const startupReady = "setStartupReady(true)";
   const startupProject = "activateProject(startupProject)";
-  const startupProbe = "probeAdapters(detectedAdapters, savedProfiles)";
+  const startupProbe = "probeAdapters(detectedAdapters, savedProfiles, startupProject?.agentAccess)";
   expect(appSource.indexOf("setProjects(existingProjects)"))
     .toBeLessThan(appSource.indexOf(startupReady));
   expect(appSource.indexOf(startupReady)).toBeLessThan(appSource.indexOf(startupProject));
@@ -95,15 +95,16 @@ test("makes startup usable before probing adapters and verifies exact profile ar
     appSource.indexOf("const verifyAdapter"),
     appSource.indexOf("const repairAdapter"),
   );
-  expect(verifySource).toContain("...agentLaunchConfig(profile)");
+  expect(verifySource).toContain("...agentLaunchConfig(profile, project?.agentAccess)");
   expect(appSource).toContain("attempt.attempts >= 2");
-  expect(appSource).toContain("...agentLaunchConfig(target.profile)");
+  expect(appSource).toContain("...target.launchConfig");
   const probeSource = appSource.slice(
     appSource.indexOf("async function probeAdapters"),
     appSource.indexOf("function percentile"),
   );
-  expect(probeSource).toContain("...agentLaunchConfig(profile)");
-  expect(appSource.match(/\.\.\.agentLaunchConfig\(profile\)/g)).toHaveLength(2);
+  expect(probeSource).toContain("...agentLaunchConfig(profile, agentAccess)");
+  expect(appSource).toContain("agentReadinessArgs(profile, project.agentAccess, intent)");
+  expect(appSource).toContain("agentReadinessArgs(profile, project?.agentAccess)");
   expect(appSource.match(/agentLaunchConfig\(profile, project\.agentAccess, intent\)/g)).toHaveLength(2);
 });
 

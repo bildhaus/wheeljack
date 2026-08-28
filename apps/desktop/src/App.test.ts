@@ -3,6 +3,7 @@ import {
   agentLaunchArgs,
   agentLaunchConfig,
   agentProjectAccessConfig,
+  agentReadinessArgs,
   supportsAskIntent,
   agentStatusAfterInteraction,
   agentRuntimeCapabilities,
@@ -280,6 +281,9 @@ test("maps project full access to each agent's native permission policy", () => 
     .toContain("--approve");
   expect(agentLaunchConfig(profiles.find((profile) => profile.adapterId === "pi-coding-agent"), "default").args)
     .toContain("--no-approve");
+  const claude = profiles.find((profile) => profile.adapterId === "claude-code");
+  expect(agentReadinessArgs(claude, "full")).toContain("bypassPermissions");
+  expect(agentReadinessArgs(claude, "full", "ask")).toEqual(agentLaunchArgs(claude));
 });
 
 test("marks every effective OpenCode profile change stale immediately", () => {

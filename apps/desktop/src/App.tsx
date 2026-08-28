@@ -1281,7 +1281,7 @@ export function App() {
           activateProject(startupProject);
         }
         if (!safeStartup) {
-          probeAdapters(detectedAdapters, savedProfiles).then(setAdapters);
+          probeAdapters(detectedAdapters, savedProfiles, startupProject?.agentAccess).then(setAdapters);
         }
       })
       .catch((cause) => {
@@ -2051,8 +2051,7 @@ export function App() {
       ?? defaultAgentProfiles().find((candidate) => candidate.adapterId === launchAdapterId);
     const profile = botProfileForLaunch(baseProfile, bot?.snapshot);
     const launchConfig = agentLaunchConfig(profile, project.agentAccess, intent);
-    const launchArgs = launchConfig.args;
-    const readinessArgs = intent === "ask" ? agentLaunchArgs(profile) : launchArgs;
+    const readinessArgs = agentReadinessArgs(profile, project.agentAccess, intent);
     if (adapter && bot) {
       try {
         const probe = await callCore<AdapterProbe>("adapter_probe", {
@@ -3030,7 +3029,7 @@ export function App() {
       }).catch(() => undefined);
       if (probe) adapter = { ...adapter, probe };
     }
-    if (adapter && !isAdapterReady(adapter, intent === "ask" ? agentLaunchArgs(profile) : launchConfig.args)) adapter = undefined;
+    if (adapter && !isAdapterReady(adapter, agentReadinessArgs(profile, project.agentAccess, intent))) adapter = undefined;
     if (!node || !adapter) {
       setError(`${runtime.adapterId} is not ready. Open Settings and rescan adapters.`);
       return false;
@@ -3419,7 +3418,7 @@ export function App() {
       return;
     }
     if (safeStartupActive) {
-      const probedAdapters = await probeAdapters(adapters, agentProfiles);
+      const probedAdapters = await probeAdapters(adapters, agentProfiles, nextProject.agentAccess);
       setAdapters(probedAdapters);
       selectAgentAdapter(preferredCodingAdapterId(probedAdapters, agentProfiles, selectedAdapterId));
       setSafeStartupActive(false);
@@ -3653,7 +3652,7 @@ export function App() {
     setError("");
     try {
       const detected = await callCore<Adapter[]>("adapter_detect", {});
-      const probed = await probeAdapters(detected, agentProfiles);
+      const probed = await probeAdapters(detected, agentProfiles, project?.agentAccess);
       setAdapters(probed);
       selectAgentAdapter(preferredCodingAdapterId(probed, agentProfiles, selectedAdapterId));
     } catch (cause) {
@@ -3675,7 +3674,7 @@ export function App() {
       const result = await callCore<AdapterProbe>("adapter_verify", {
         adapterId: selectedAdapterId,
         cwd: project?.path,
-        ...agentLaunchConfig(profile),
+        ...agentLaunchConfig(profile, project?.agentAccess),
       });
       setAdapters((current) => current.map((adapter) =>
         adapter.id === selectedAdapterId ? { ...adapter, probe: result } : adapter));
@@ -5683,12 +5682,23 @@ export function App() {
   };
 
   const adapterArgsById = useMemo(() => Object.fromEntries(
-    agentProfiles.map((profile) => [profile.adapterId, agentLaunchArgs(profile)]),
-  ), [agentProfiles]);
+    agentProfiles.map((profile) => [
+      profile.adapterId,
+      agentReadinessArgs(profile, project?.agentAccess),
+    ]),
+  ), [agentProfiles, project?.agentAccess]);
   const selectedAdapter = adapters.find((adapter) => adapter.id === selectedAdapterId);
   const selectedAdapterReady = isAdapterReady(
     selectedAdapter,
     adapterArgsById[selectedAdapterId] ?? [],
+  );
+  const selectedIntentReady = isAdapterReady(
+    selectedAdapter,
+    agentReadinessArgs(
+      agentProfiles.find((profile) => profile.adapterId === selectedAdapterId),
+      project?.agentAccess,
+      agentIntent,
+    ),
   );
 
   const reconcileReportedTask = async (reportedCard: OpsCard) => {
@@ -6240,11 +6250,12 @@ export function App() {
     if (!startupReady || safeStartupActive) return;
     const targets = adapters.flatMap((adapter) => {
       const profile = agentProfiles.find((candidate) => candidate.adapterId === adapter.id);
-      if (!shouldAutoVerifyAdapter(adapter, agentLaunchArgs(profile))) return [];
-      const key = JSON.stringify(agentVerificationConfig(profile));
+      const launchConfig = agentLaunchConfig(profile, project?.agentAccess);
+      if (!shouldAutoVerifyAdapter(adapter, launchConfig.args)) return [];
+      const key = JSON.stringify(agentVerificationConfig(profile, project?.agentAccess));
       const attempt = automaticAdapterVerificationRef.current.get(adapter.id);
       if (attempt?.pending || (attempt?.key === key && attempt.attempts >= 2)) return [];
-      return [{ adapter, profile, key }];
+      return [{ adapter, profile, key, launchConfig }];
     });
     if (!targets.length) return;
     const timer = window.setTimeout(() => {
@@ -6267,7 +6278,7 @@ export function App() {
             probe = await callCore<AdapterProbe>("adapter_verify", {
               adapterId: target.adapter.id,
               cwd: project?.path,
-              ...agentLaunchConfig(target.profile),
+              ...target.launchConfig,
             });
           } catch (cause) {
             probe = {
@@ -6278,7 +6289,7 @@ export function App() {
             };
           }
           const currentProfile = agentProfilesRef.current.find((candidate) => candidate.adapterId === target.adapter.id);
-          if (JSON.stringify(agentVerificationConfig(currentProfile)) !== target.key) {
+          if (JSON.stringify(agentVerificationConfig(currentProfile, projectRef.current?.agentAccess)) !== target.key) {
             probe = {
               ...probe,
               verificationStatus: "stale",
@@ -6292,7 +6303,7 @@ export function App() {
       }
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [adapters, agentProfiles, project?.path, safeStartupActive, startupReady]);
+  }, [adapters, agentProfiles, project?.agentAccess, project?.path, safeStartupActive, startupReady]);
   const saveSchedulerConfig = async (enabled: boolean, paused: boolean, concurrencyLimit: number) => {
     const activeProject = projectRef.current;
     const activeCanvas = canvasRef.current;
@@ -7274,7 +7285,7 @@ export function App() {
                       }}>
                       <form className="wj-agent-creator-form" aria-busy={busy} onSubmit={(event) => {
                         event.preventDefault();
-                        if (!selectedAdapterReady) return;
+                        if (!selectedIntentReady) return;
                         const task = agentTask;
                         const taskRole = agentTaskRole;
                         const draftPrompt = agentPrompt;
@@ -7339,7 +7350,7 @@ export function App() {
                             setAgentCreatorOpen(false);
                             openCreateBot(launch);
                           }}>Create bot</Button>
-                          <Button type="submit" aria-label="Create agent" size="sm" disabled={!selectedAdapterReady || (agentIntent === "ask" && !supportsAskIntent(selectedAdapterId))}>{agentPrompt.trim() ? "Create & start" : "Create & focus"}</Button>
+                          <Button type="submit" aria-label="Create agent" size="sm" disabled={!selectedIntentReady || (agentIntent === "ask" && !supportsAskIntent(selectedAdapterId))}>{agentPrompt.trim() ? "Create & start" : "Create & focus"}</Button>
                         </div>
                       </form>
                       </PopoverContent>
@@ -8345,10 +8356,16 @@ export function agentLaunchConfig(profile?: AgentProfile, agentAccess?: AgentAcc
   };
 }
 
-function agentVerificationConfig(profile?: AgentProfile) {
+export function agentReadinessArgs(profile?: AgentProfile, agentAccess?: AgentAccessMode, intent: AgentSessionIntent = "code"): string[] {
+  return intent === "ask"
+    ? agentLaunchArgs(profile)
+    : agentLaunchConfig(profile, agentAccess, intent).args;
+}
+
+function agentVerificationConfig(profile?: AgentProfile, agentAccess?: AgentAccessMode) {
   return profile?.adapterId === "opencode"
-    ? agentLaunchConfig(profile)
-    : { args: agentLaunchArgs(profile) };
+    ? agentLaunchConfig(profile, agentAccess)
+    : { args: agentReadinessArgs(profile, agentAccess) };
 }
 
 export function staleAdapterAfterProfileChange(
@@ -8839,7 +8856,7 @@ function message(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-async function probeAdapters(adapters: Adapter[], profiles: AgentProfile[]): Promise<Adapter[]> {
+async function probeAdapters(adapters: Adapter[], profiles: AgentProfile[], agentAccess?: AgentAccessMode): Promise<Adapter[]> {
   return Promise.all(adapters.map(async (adapter) => {
     if (!adapter.enabled || adapter.id === "generic-shell" || !adapter.supportsStructured) {
       return adapter;
@@ -8848,7 +8865,7 @@ async function probeAdapters(adapters: Adapter[], profiles: AgentProfile[]): Pro
       const profile = profiles.find((candidate) => candidate.adapterId === adapter.id);
       const probe = await callCore<AdapterProbe>("adapter_probe", {
         adapterId: adapter.id,
-        ...agentLaunchConfig(profile),
+        ...agentLaunchConfig(profile, agentAccess),
       });
       return { ...adapter, probe };
     } catch {
