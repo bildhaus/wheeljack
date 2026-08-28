@@ -1166,7 +1166,7 @@ export function OnboardingSurface({
                   <MonitorCog aria-hidden />
                   <div>
                     <strong>Agent coordination stays under your control.</strong>
-                    <p>Wheeljack lets agents discover peers automatically, but asks before messaging, spawning children, handing off work, requesting review, or resolving conflicts. Approved actions can create additional provider usage; limits and policies are available in Settings → Agents.</p>
+                    <p>wheeljack lets agents discover peers automatically, but asks before messaging, spawning children, handing off work, requesting review, or resolving conflicts. Approved actions can create additional provider usage; limits and policies are available in Settings → Agents.</p>
                   </div>
                 </div>
                 <form className="wj-onboarding-agent-form" onSubmit={startAgent}>

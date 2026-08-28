@@ -374,13 +374,13 @@ fn add_durable_agent_workflows(connection: &Connection) -> Result<()> {
         UPDATE session_prompt_deliveries
         SET state = 'indeterminate',
             error_code = 'interrupted_dispatch',
-            error_message = 'Wheeljack stopped before prompt delivery could be confirmed.',
+            error_message = 'wheeljack stopped before prompt delivery could be confirmed.',
             updated_at = datetime('now')
         WHERE state = 'dispatching';
 
         UPDATE project_lifecycle_runs
         SET state = 'interrupted',
-            error_message = 'Wheeljack stopped while this process was running.',
+            error_message = 'wheeljack stopped while this process was running.',
             updated_at = datetime('now'),
             ended_at = datetime('now')
         WHERE state IN ('starting', 'running', 'ready', 'stopping');

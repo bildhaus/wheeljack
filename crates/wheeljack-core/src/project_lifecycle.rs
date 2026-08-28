@@ -266,7 +266,7 @@ pub(crate) fn recover_lifecycle_runs(db: &Connection) -> Result<()> {
     db.execute(
         "UPDATE project_lifecycle_runs
          SET state = 'interrupted',
-             error_message = 'Wheeljack stopped while this process was running.',
+             error_message = 'wheeljack stopped while this process was running.',
              updated_at = ?1, ended_at = ?1
          WHERE state IN ('starting', 'running', 'ready', 'stopping')",
         params![timestamp],
@@ -384,7 +384,7 @@ pub(crate) fn spawn_lifecycle_waiter(
                 break (
                     "interrupted",
                     None,
-                    Some("Wheeljack is shutting down.".to_string()),
+                    Some("wheeljack is shutting down.".to_string()),
                 );
             }
             let status = handle

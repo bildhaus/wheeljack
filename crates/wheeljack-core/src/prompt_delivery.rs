@@ -286,7 +286,7 @@ pub(crate) fn recover_prompt_deliveries(db: &Connection) -> Result<()> {
         "UPDATE session_prompt_deliveries
          SET state = 'indeterminate', dispatch_token = NULL,
              error_code = 'interrupted_dispatch',
-             error_message = 'Wheeljack stopped before prompt delivery could be confirmed.',
+             error_message = 'wheeljack stopped before prompt delivery could be confirmed.',
              updated_at = ?1
          WHERE state = 'dispatching'",
         params![timestamp],
