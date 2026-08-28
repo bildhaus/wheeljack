@@ -2957,8 +2957,9 @@ impl Core {
             .map_err(|error| anyhow!(error.to_string()))?
             .insert(run_id.clone(), handle.clone());
         let seq = Arc::new(AtomicU64::new(0));
+        let mut log_readers = Vec::with_capacity(2);
         if let Some(stdout) = stdout {
-            self.register_worker(spawn_lifecycle_log_reader(
+            log_readers.push(spawn_lifecycle_log_reader(
                 self.paths.db_path(),
                 run_id.clone(),
                 "stdout",
@@ -2969,7 +2970,7 @@ impl Core {
             ));
         }
         if let Some(stderr) = stderr {
-            self.register_worker(spawn_lifecycle_log_reader(
+            log_readers.push(spawn_lifecycle_log_reader(
                 self.paths.db_path(),
                 run_id.clone(),
                 "stderr",
@@ -2985,6 +2986,7 @@ impl Core {
             project_id.clone(),
             kind.clone(),
             handle,
+            log_readers,
             self.lifecycle_processes.clone(),
             task.timeout_seconds,
             self.events.clone(),

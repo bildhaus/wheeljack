@@ -372,6 +372,7 @@ pub(crate) fn spawn_lifecycle_waiter(
     project_id: String,
     kind: String,
     handle: LifecycleProcessHandle,
+    log_readers: Vec<JoinHandle<()>>,
     processes: Arc<Mutex<HashMap<String, LifecycleProcessHandle>>>,
     timeout_seconds: Option<u64>,
     events: Arc<dyn EventSink>,
@@ -416,6 +417,12 @@ pub(crate) fn spawn_lifecycle_waiter(
             }
             thread::sleep(Duration::from_millis(50));
         };
+        // A terminal run state is the durable completion boundary. Drain both
+        // output pipes first so callers that observe completion can also read
+        // every log chunk produced by the process.
+        for reader in log_readers {
+            let _ = reader.join();
+        }
         if let Ok(mut processes) = processes.lock() {
             processes.remove(&run_id);
         }
