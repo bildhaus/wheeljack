@@ -3045,7 +3045,7 @@ impl Core {
             matches!(
                 run.state.as_str(),
                 "starting" | "running" | "ready" | "stopping"
-            ) && requested_kind.map_or(true, |kind| run.kind == kind)
+            ) && requested_kind.is_none_or(|kind| run.kind == kind)
         };
         let current = requested_id
             .and_then(|id| runs.iter().find(|run| run.id == id && active(run)))

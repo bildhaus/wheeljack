@@ -280,6 +280,9 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
 }
 
 fn preserve_legacy_autonomy_defaults(connection: &Connection) -> Result<()> {
+    if !table_exists(connection, "settings")? {
+        return Ok(());
+    }
     connection.execute(
         "UPDATE settings
          SET value_json = json_set(

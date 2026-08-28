@@ -19,7 +19,7 @@ argument arrays; wheeljack does not pass them through a shell.
   "preview": {
     "command": ["pnpm", "dev", "--", "--host", "127.0.0.1", "--port", "{port}"],
     "windows": ["pnpm.cmd", "dev", "--", "--host", "127.0.0.1", "--port", "{port}"],
-    "url": "http://127.0.0.1:{port}"
+    "url": "http:\/\/127.0.0.1:{port}"
   }
 }
 ```
