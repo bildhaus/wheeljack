@@ -8,6 +8,39 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 PROFILE="$(mktemp -d "${TMPDIR:-/tmp}/wheeljack-tauri-ui-smoke-XXXXXX")"
+FIXTURE_HOME="$PROFILE/home"
+FIXTURE_PREFIX="$PROFILE/npm-prefix"
+FIXTURE_BIN="$FIXTURE_PREFIX/bin"
+FIXTURE_SHELL="$PROFILE/login-shell"
+FIXTURE_PACKAGE_ROOT="$FIXTURE_PREFIX/lib/node_modules/@anthropic-ai/claude-code"
+mkdir -p "$FIXTURE_HOME" "$FIXTURE_BIN" "$FIXTURE_PACKAGE_ROOT"
+printf '%s\n' '{"name":"@anthropic-ai/claude-code","version":"1.0.0","bin":{"claude":"cli.js"}}' > "$FIXTURE_PACKAGE_ROOT/package.json"
+cat > "$FIXTURE_SHELL" <<'EOF'
+#!/bin/sh
+export PATH="$WHEELJACK_ADAPTER_SMOKE_BIN:/usr/bin:/bin"
+exec /bin/sh -c "$4"
+EOF
+cat > "$FIXTURE_BIN/claude" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  printf '%s\n' 'wheeljack adapter fixture 1.0.0'
+elif [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
+  printf '%s\n' '{"loggedIn":true}'
+else
+  printf '%s\n' '{"result":"WHEELJACK_READY"}'
+fi
+EOF
+cat > "$FIXTURE_BIN/npm" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "root" ] && [ "${2:-}" = "--global" ]; then
+  printf '%s\n' "$WHEELJACK_ADAPTER_SMOKE_PREFIX/lib/node_modules"
+elif [ "${1:-}" = "prefix" ] && [ "${2:-}" = "--global" ]; then
+  printf '%s\n' "$WHEELJACK_ADAPTER_SMOKE_PREFIX"
+else
+  exit 1
+fi
+EOF
+chmod +x "$FIXTURE_SHELL" "$FIXTURE_BIN/claude" "$FIXTURE_BIN/npm"
 cleanup() {
   if [[ "$PROFILE" != "${TMPDIR:-/tmp}"/wheeljack-tauri-ui-smoke-* ]]; then
     echo "Refusing unsafe smoke cleanup path: $PROFILE" >&2
@@ -23,7 +56,14 @@ run_smoke() {
   WHEELJACK_DESKTOP_DATA_DIR="$PROFILE" \
     WHEELJACK_UI_SMOKE=1 \
     WHEELJACK_UI_SMOKE_AUTO_CLOSE=1 \
+    WHEELJACK_ADAPTER_SMOKE_BIN="$FIXTURE_BIN" \
+    WHEELJACK_ADAPTER_SMOKE_ID="claude-code" \
+    WHEELJACK_ADAPTER_SMOKE_PREFIX="$FIXTURE_PREFIX" \
+    WHEELJACK_ADAPTER_UPDATE_SMOKE_MANAGER="npm" \
     WHEELJACK_UPDATE_FEED_URL="http://127.0.0.1:1/offline" \
+    HOME="$FIXTURE_HOME" \
+    PATH="/usr/bin:/bin" \
+    SHELL="$FIXTURE_SHELL" \
     "$BIN" --ui-smoke --ui-smoke-auto-close &
   local pid=$!
   for _ in $(seq 1 150); do

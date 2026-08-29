@@ -164,6 +164,7 @@ import { agentEffortOptions } from "./types";
 import type {
   ActivityEvent,
   Adapter,
+  AdapterEnvironment,
   AgentAccessMode,
   AgentAutonomyPolicy,
   AgentControlAudit,
@@ -1153,10 +1154,10 @@ export function OnboardingSurface({
                       ? <Button disabled={busy || !canVerifyAdapter(selectedAdapter)} onClick={onVerify}><RefreshCw />Retry</Button>
                       : ["Verify", "Reverify"].includes(readiness)
                         ? <Button disabled={busy || !canVerifyAdapter(selectedAdapter)} onClick={onVerify}><CheckIcon />Verify</Button>
-                        : <Button disabled={busy} onClick={onRescan}><RefreshCw />Rescan</Button>}
+                        : <Button disabled={busy} onClick={onRescan}><RefreshCw />Scan all</Button>}
                   <Button variant="outline" disabled={busy} onClick={onAgentSettings}><Settings />Agent Settings</Button>
                 </div>
-                {readiness === "Sign in" && repairCommand && <p className="wj-onboarding-note">Sign-in opens in Work. Return Home and rescan when it finishes.</p>}
+                {readiness === "Sign in" && repairCommand && <p className="wj-onboarding-note">Sign-in opens in Work. Return Home and scan again when it finishes.</p>}
                 <OnboardingShellAction working={busy} onStartShell={startShell} />
               </>
             )}
@@ -2937,6 +2938,8 @@ export function SettingsSurface({
   coreVersion,
   platform,
   appDataDir,
+  adapterEnvironment,
+  adapterUpdateStatus,
   diagnosticsReport,
   systemUsesLight,
   onBack,
@@ -2952,6 +2955,8 @@ export function SettingsSurface({
   onRefreshAgentControlAudit,
   onRescan,
   onVerify,
+  onVerifyAll,
+  onUpdateAll,
   onExportBackup,
   repairCommand,
   onRepair,
@@ -2971,6 +2976,8 @@ export function SettingsSurface({
   coreVersion?: string;
   platform?: string;
   appDataDir?: string;
+  adapterEnvironment?: AdapterEnvironment;
+  adapterUpdateStatus: string;
   diagnosticsReport: string;
   systemUsesLight: boolean;
   onBack: () => void;
@@ -2986,6 +2993,8 @@ export function SettingsSurface({
   onRefreshAgentControlAudit: () => void;
   onRescan: () => void;
   onVerify: () => void;
+  onVerifyAll: () => void;
+  onUpdateAll: () => void;
   onExportBackup: (path: string) => Promise<void>;
   repairCommand?: string;
   onRepair: () => void;
@@ -3305,7 +3314,12 @@ export function SettingsSurface({
           {page === "shortcuts" && <ShortcutSettings bindings={shortcuts} onBindings={onShortcuts} />}
           {page === "agents" && (
             <>
-              <SettingsCard title="Coding agents" description="wheeljack checks installed CLIs without exposing credentials." action={<div className="flex gap-2">{repairCommand && <Button variant="outline" size="sm" disabled={busy} title={repairCommand} onClick={onRepair}><Terminal />Sign in</Button>}<Button variant="ghost" size="sm" disabled={busy} onClick={onRescan}><RefreshCw />Rescan</Button><Button size="sm" disabled={busy || !canVerifyAdapter(selectedAdapter)} onClick={onVerify}><CheckIcon />Verify</Button></div>}>
+              <SettingsCard title="Coding agents" description="Scan every installed CLI, preview provenance-aware updates, then verify real agent turns explicitly." action={<div className="flex flex-wrap gap-2">{repairCommand && <Button variant="outline" size="sm" disabled={busy} title={repairCommand} onClick={onRepair}><Terminal />Sign in</Button>}<Button variant="ghost" size="sm" disabled={busy} onClick={onRescan}><RefreshCw />Scan all</Button><Button variant="outline" size="sm" disabled={busy || !codingAdapters.some((adapter) => adapter.enabled)} onClick={onUpdateAll}><RefreshCw />Update all</Button><Button variant="outline" size="sm" disabled={busy || !codingAdapters.some((adapter) => canVerifyAdapter(adapter))} onClick={onVerifyAll}><CheckIcon />Verify all</Button><Button size="sm" disabled={busy || !canVerifyAdapter(selectedAdapter)} onClick={onVerify}><CheckIcon />Verify selected</Button></div>}>
+                {platform === "macos" && adapterEnvironment && <div className={`mb-3 rounded border p-2 text-xs ${adapterEnvironment.warning ? "border-destructive/40 bg-destructive/5 text-destructive" : "border-border bg-muted/30 text-muted-foreground"}`}>
+                  <span>CLI search path: {adapterEnvironment.pathEntryCount} locations via {adapterEnvironment.source === "login-shell" ? "your login shell" : "safe fallback paths"}.</span>
+                  {adapterEnvironment.warning && <p className="mt-1" role="alert">{adapterEnvironment.warning}</p>}
+                </div>}
+                {adapterUpdateStatus && <p className="mb-3 text-xs text-muted-foreground" role="status">{adapterUpdateStatus}</p>}
                 <Select value={selectedAdapterId} onValueChange={onAdapter}><SelectTrigger aria-label="Coding agent"><SelectValue placeholder="Agent adapter" /></SelectTrigger><SelectContent>{codingAdapters.map((adapter) => <SelectItem key={adapter.id} value={adapter.id}><span className="wj-provider-label"><ProviderMark adapterId={adapter.id} /><span>{adapter.displayName} · {adapterReadinessLabel(adapter, adapterArgsById[adapter.id] ?? [])}</span></span></SelectItem>)}</SelectContent></Select>
                 {selectedAdapter && <div className={`mt-3 rounded border p-3 text-sm ${selectedAdapterFailed ? "border-destructive/40 bg-destructive/5" : "border-border bg-muted/30"}`}>
                   <div className="flex items-center justify-between gap-3"><strong className="wj-provider-label"><ProviderMark adapterId={selectedAdapter.id} /><span>{selectedAdapter.displayName}</span></strong><Badge variant={selectedAdapterFailed ? "destructive" : adapterReadinessLabel(selectedAdapter, selectedArgs) === "Ready" ? "secondary" : "outline"}>{adapterReadinessLabel(selectedAdapter, selectedArgs)}</Badge></div>

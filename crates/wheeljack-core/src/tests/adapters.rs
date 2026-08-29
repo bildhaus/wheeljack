@@ -250,6 +250,55 @@ fn adapter_probe_reports_missing_without_launching() {
 }
 
 #[test]
+fn adapter_updates_require_a_preview_confirmation_token() {
+    let core = Core::new(
+        test_init("adapter-update-confirmation"),
+        Arc::new(NullEventSink),
+    )
+    .unwrap();
+    let preview: Value = serde_json::from_str(
+        &core.call_json(r#"{"id":"preview","command":"adapter_update_preview","payload":{}}"#),
+    )
+    .unwrap();
+    assert_eq!(preview["ok"], true, "{preview}");
+    assert!(preview["payload"]["updates"].is_array());
+    assert!(preview["payload"]["skipped"].is_array());
+
+    let rejected: Value = serde_json::from_str(&core.call_json(
+        r#"{"id":"execute","command":"adapter_update_execute","payload":{"confirmationToken":"not-a-preview-token"}}"#,
+    ))
+    .unwrap();
+    assert_eq!(rejected["ok"], false);
+    assert!(rejected["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("invalid or already used"));
+}
+
+#[test]
+fn adapter_updates_exclude_new_session_spawns() {
+    let core = Core::new(
+        test_init("adapter-update-session-lock"),
+        Arc::new(NullEventSink),
+    )
+    .unwrap();
+    let _update_guard = core.adapter_updates.lock().unwrap();
+
+    for command in ["pty_spawn", "agent_structured_spawn"] {
+        let response: Value =
+            serde_json::from_str(&core.call_json(
+                &json!({ "id": command, "command": command, "payload": {} }).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(response["ok"], false);
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("updates are in progress"));
+    }
+}
+
+#[test]
 fn adapter_probe_does_not_hold_sqlite_while_waiting_for_the_cli() {
     let fixture_dir = temp_dir("adapter-probe-db-release");
     let (script_path, started_path) = slow_probe_fixture(&fixture_dir);

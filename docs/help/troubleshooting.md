@@ -19,6 +19,26 @@ On Windows, command shims may use `.cmd` or `.bat`; wheeljack resolves these
 through `PATHEXT` and wraps them for launch. Report a detection bug if the same
 command works in a newly opened terminal but remains missing after restart.
 
+On macOS, wheeljack imports the login-shell `PATH` before adapter detection and
+adds fallback locations used by Homebrew, MacPorts, Nix, npm/Bun/pnpm, common
+Node version managers, mise/asdf, Cargo, and standalone user binaries. Settings →
+Agents reports whether the login-shell path or safe fallbacks were used. If an
+adapter remains missing, confirm that `command -v claude`, `command -v codex`,
+`command -v opencode`, or `command -v pi` returns a real executable path; shell-only
+aliases and functions are not executable adapters.
+
+## An adapter cannot be updated from wheeljack
+
+Open **Settings → Agents** and choose **Update all**. The preview reports which
+installer owns every active executable and the exact update command it can safely
+run. Stop active sessions before retrying an otherwise supported adapter.
+
+If an adapter is skipped, use the reported owner. Nix and version-manager installs
+remain controlled by their declaration; Codex CLIs bundled with the Codex desktop
+app update with that app; custom and ambiguous standalone executables remain manual.
+This is intentional: the presence of a similarly named package is not sufficient
+proof that it owns the executable wheeljack launches.
+
 ## Verification reports authentication failure
 
 Authenticate in the provider's CLI, not in wheeljack. Confirm that the CLI can

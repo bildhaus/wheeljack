@@ -21,18 +21,42 @@ Provider installation commands change independently of wheeljack. Use each
 provider's official documentation, then confirm that the CLI starts successfully
 in an ordinary terminal before diagnosing it inside wheeljack.
 
+The installation method does not matter. wheeljack resolves adapter executables
+from the desktop process and, on macOS, the user's login-shell `PATH`, so Homebrew,
+MacPorts, Nix, npm, Bun, pnpm, nvm/fnm, Volta, mise/asdf, Cargo, and standalone
+installations work when they expose the documented executable. Standard manager
+locations remain available if the login shell cannot be queried; Settings → Agents
+shows which search-path source was used.
+
 ## Detect and verify
 
 1. Install and authenticate the CLI outside wheeljack.
 2. Restart wheeljack if the executable was added to `PATH` while wheeljack was
    already running.
 3. Open **Settings → Agents**.
-4. Run detection, then verify the adapter.
-5. Choose the adapter as the default or select it when creating a new agent pane.
+4. Choose **Scan all** to detect and probe every adapter.
+5. Choose **Verify all** to run one real non-mutating turn through every installed,
+   signed-in adapter, or **Verify selected** for only the current adapter.
+6. Choose the adapter as the default or select it when creating a new agent pane.
 
 Verification checks executable resolution, the adapter's structured protocol,
 and the launch profile wheeljack will use. A changed executable or protocol
 profile invalidates stale verification instead of trusting an old result.
+Verification is explicit because it may contact each CLI's configured provider and
+consume one minimal turn.
+
+## Update installed adapters
+
+Choose **Update all** to inspect the active executable for each installed adapter.
+wheeljack proves ownership through npm, pnpm, Bun, Yarn, Homebrew, WinGet, Scoop,
+Chocolatey, or a documented native self-updater before offering an update. The
+confirmation dialog shows every exact command; confirmed updates run sequentially,
+then wheeljack scans again and verifies successfully updated adapters.
+
+Ambiguous, custom, Nix-declared, version-manager-shim, app-bundled, and unknown
+standalone installs are skipped with a reason. wheeljack never guesses an installer,
+runs a composed shell command, changes declarative package configuration, or updates
+an adapter while one of its sessions is active.
 
 ## Structured sessions versus shells
 

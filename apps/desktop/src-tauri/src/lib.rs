@@ -2,6 +2,8 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(any(target_os = "macos", test))]
+use std::ffi::OsStr;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
@@ -13,6 +15,13 @@ use std::{
         Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
+};
+#[cfg(target_os = "macos")]
+use std::{
+    io::Read,
+    process::Stdio,
+    thread,
+    time::{Duration, Instant},
 };
 use tauri::{ipc::Channel, Manager, RunEvent, State};
 use wheeljack_core::{Core, EventSink, InitOptions};
@@ -35,13 +44,16 @@ fn login_shell_path(output: &[u8]) -> Option<String> {
 
 #[cfg(any(target_os = "macos", test))]
 fn merge_search_paths(
-    primary: &std::ffi::OsStr,
-    fallback: Option<&std::ffi::OsStr>,
+    primary: Option<&OsStr>,
+    inherited: Option<&OsStr>,
+    fallbacks: &[PathBuf],
 ) -> Option<std::ffi::OsString> {
     let mut paths = Vec::new();
-    for path in std::iter::once(primary)
-        .chain(fallback)
+    for path in primary
+        .into_iter()
+        .chain(inherited)
         .flat_map(std::env::split_paths)
+        .chain(fallbacks.iter().cloned())
     {
         if !path.as_os_str().is_empty() && !paths.contains(&path) {
             paths.push(path);
@@ -50,33 +62,147 @@ fn merge_search_paths(
     std::env::join_paths(paths).ok()
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_adapter_fallback_paths(home: Option<&OsStr>) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = home.filter(|value| !value.is_empty()) {
+        let home = PathBuf::from(home);
+        paths.extend([
+            home.join(".local/bin"),
+            home.join(".bun/bin"),
+            home.join(".cargo/bin"),
+            home.join(".volta/bin"),
+            home.join(".nvm/current/bin"),
+            home.join(".fnm/aliases/default/bin"),
+            home.join(".local/share/mise/shims"),
+            home.join(".asdf/shims"),
+            home.join(".proto/shims"),
+            home.join(".local/share/proto/shims"),
+            home.join(".npm-global/bin"),
+            home.join(".yarn/bin"),
+            home.join(".deno/bin"),
+            home.join(".local/share/pnpm"),
+            home.join("Library/pnpm"),
+            home.join(".nix-profile/bin"),
+            home.join(".local/state/nix/profile/bin"),
+        ]);
+    }
+    paths.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/opt/local/bin"),
+        PathBuf::from("/nix/var/nix/profiles/default/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/sbin"),
+        PathBuf::from("/sbin"),
+    ]);
+    paths
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdapterEnvironment {
+    source: String,
+    shell: Option<String>,
+    path_entry_count: usize,
+    warning: Option<String>,
+}
+
 #[cfg(target_os = "macos")]
-fn inherit_login_shell_path() {
-    let shell = std::env::var_os("SHELL")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "/bin/zsh".into());
-    let Ok(output) = Command::new(shell)
+fn read_login_shell_path(shell: &OsStr) -> Result<String, String> {
+    let mut child = Command::new(shell)
         .args([
             "-l",
             "-i",
             "-c",
             "/usr/bin/printf '\\036'; /usr/bin/printenv PATH; /usr/bin/printf '\\037'",
         ])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-    else {
-        return;
-    };
-    if !output.status.success() {
-        return;
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("could not start the login shell: {error}"))?;
+    let stdout = child.stdout.take().map(|mut reader| {
+        thread::spawn(move || {
+            let mut output = Vec::new();
+            reader.read_to_end(&mut output).map(|_| output)
+        })
+    });
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("could not read login shell status: {error}"))?
+        {
+            if !status.success() {
+                return Err("the login shell exited unsuccessfully".to_string());
+            }
+            break;
+        }
+        if started.elapsed() >= Duration::from_secs(5) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("the login shell PATH check timed out".to_string());
+        }
+        thread::sleep(Duration::from_millis(25));
     }
-    let Some(path) = login_shell_path(&output.stdout) else {
-        return;
-    };
+    let output = stdout
+        .ok_or_else(|| "the login shell did not expose stdout".to_string())?
+        .join()
+        .map_err(|_| "the login shell output reader stopped unexpectedly".to_string())?
+        .map_err(|error| format!("could not read login shell output: {error}"))?;
+    login_shell_path(&output).ok_or_else(|| "the login shell did not return PATH".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn inherit_login_shell_path() -> AdapterEnvironment {
+    let shell = std::env::var_os("SHELL")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".into());
     let inherited = std::env::var_os("PATH");
-    if let Some(path) = merge_search_paths(path.as_ref(), inherited.as_deref()) {
+    let fallbacks = macos_adapter_fallback_paths(std::env::var_os("HOME").as_deref());
+    let (login_path, source, warning) = match read_login_shell_path(shell.as_ref()) {
+        Ok(path) => (Some(path), "login-shell", None),
+        Err(error) => (
+            None,
+            "fallbacks",
+            Some(format!(
+                "Could not import the macOS login-shell PATH ({error}). Standard agent CLI locations are still available."
+            )),
+        ),
+    };
+    let path = merge_search_paths(
+        login_path.as_deref().map(OsStr::new),
+        inherited.as_deref(),
+        &fallbacks,
+    );
+    if let Some(path) = path.as_ref() {
         std::env::set_var("PATH", path);
+    }
+    AdapterEnvironment {
+        source: source.to_string(),
+        shell: Some(shell.to_string_lossy().to_string()),
+        path_entry_count: path
+            .as_deref()
+            .map(std::env::split_paths)
+            .map(Iterator::count)
+            .unwrap_or_default(),
+        warning,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn inherited_adapter_environment() -> AdapterEnvironment {
+    AdapterEnvironment {
+        source: "process".to_string(),
+        shell: std::env::var_os("SHELL").map(|value| value.to_string_lossy().to_string()),
+        path_entry_count: std::env::var_os("PATH")
+            .as_deref()
+            .map(std::env::split_paths)
+            .map(Iterator::count)
+            .unwrap_or_default(),
+        warning: None,
     }
 }
 
@@ -205,6 +331,7 @@ struct CoreConnection {
     app_data_dir: String,
     version: &'static str,
     reused: bool,
+    adapter_environment: Option<AdapterEnvironment>,
 }
 
 #[derive(Default)]
@@ -237,6 +364,7 @@ impl CoreHost {
             app_data_dir: app_data_dir.to_string_lossy().to_string(),
             version: env!("CARGO_PKG_VERSION"),
             reused,
+            adapter_environment: None,
         })
     }
 
@@ -262,11 +390,88 @@ impl CoreHost {
     }
 }
 
+fn verify_adapter_smoke(host: &CoreHost, adapter_id: &str, cwd: &str) -> Result<(), String> {
+    let detected = host.call(
+        &serde_json::json!({
+            "id": "native-adapter-smoke-detect",
+            "command": "adapter_detect",
+            "payload": {}
+        })
+        .to_string(),
+    )?;
+    let detected = serde_json::from_str::<Value>(&detected).map_err(|error| error.to_string())?;
+    let installed = detected
+        .get("payload")
+        .and_then(Value::as_array)
+        .and_then(|adapters| {
+            adapters.iter().find(|adapter| {
+                adapter.get("id").and_then(Value::as_str) == Some(adapter_id)
+                    && adapter.get("status").and_then(Value::as_str) == Some("installed")
+            })
+        })
+        .is_some();
+    if !installed {
+        return Err(format!(
+            "Packaged adapter smoke could not detect {adapter_id} through the desktop search path."
+        ));
+    }
+    let verified = host.call(
+        &serde_json::json!({
+            "id": "native-adapter-smoke-verify",
+            "command": "adapter_verify",
+            "payload": { "adapterId": adapter_id, "cwd": cwd }
+        })
+        .to_string(),
+    )?;
+    let verified = serde_json::from_str::<Value>(&verified).map_err(|error| error.to_string())?;
+    if verified.get("ok").and_then(Value::as_bool) != Some(true)
+        || verified
+            .pointer("/payload/verificationStatus")
+            .and_then(Value::as_str)
+            != Some("verified")
+    {
+        return Err(format!(
+            "Packaged adapter smoke could not verify {adapter_id}: {verified}"
+        ));
+    }
+    if let Ok(manager) = std::env::var("WHEELJACK_ADAPTER_UPDATE_SMOKE_MANAGER") {
+        let preview = host.call(
+            &serde_json::json!({
+                "id": "native-adapter-smoke-update-preview",
+                "command": "adapter_update_preview",
+                "payload": {}
+            })
+            .to_string(),
+        )?;
+        let preview = serde_json::from_str::<Value>(&preview).map_err(|error| error.to_string())?;
+        let matched = preview
+            .pointer("/payload/updates")
+            .and_then(Value::as_array)
+            .and_then(|updates| {
+                updates.iter().find(|update| {
+                    update.get("adapterId").and_then(Value::as_str) == Some(adapter_id)
+                        && update
+                            .get("manager")
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| value.eq_ignore_ascii_case(manager.trim()))
+                })
+            })
+            .is_some();
+        if !matched {
+            return Err(format!(
+                "Packaged adapter smoke could not prove {manager} ownership for {adapter_id}: {preview}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn core_connect(
     app: tauri::AppHandle,
     events: Channel<CoreEventEnvelope>,
     host: State<'_, CoreHost>,
+    adapter_environment: State<'_, AdapterEnvironment>,
 ) -> Result<CoreConnection, String> {
     host.events.connect(events);
     let smoke_mode = ui_smoke_enabled();
@@ -304,7 +509,11 @@ async fn core_connect(
         update_feed_url: None,
         test_mode: smoke_mode,
     };
-    let connection = host.connect(init)?;
+    let mut connection = host.connect(init)?;
+    connection.adapter_environment = Some(adapter_environment.inner().clone());
+    if let Ok(adapter_id) = std::env::var("WHEELJACK_ADAPTER_SMOKE_ID") {
+        verify_adapter_smoke(&host, adapter_id.trim(), &connection.app_data_dir)?;
+    }
     if ui_smoke_auto_close_requested() {
         let malformed = host.call("{not-json")?;
         let malformed =
@@ -1170,11 +1379,14 @@ fn canonical_update_source(update_dir: &Path, source: &Path) -> Result<PathBuf, 
 
 pub fn run() {
     #[cfg(target_os = "macos")]
-    inherit_login_shell_path();
+    let adapter_environment = inherit_login_shell_path();
+    #[cfg(not(target_os = "macos"))]
+    let adapter_environment = inherited_adapter_environment();
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .manage(adapter_environment)
         .manage(CoreHost::default())
         .invoke_handler(tauri::generate_handler![
             core_connect,
@@ -1288,7 +1500,12 @@ mod tests {
             primary.to_string_lossy()
         );
         let parsed = login_shell_path(output.as_bytes()).unwrap();
-        let merged = merge_search_paths(parsed.as_ref(), Some(fallback.as_ref())).unwrap();
+        let merged = merge_search_paths(
+            Some(parsed.as_ref()),
+            Some(fallback.as_ref()),
+            &[PathBuf::from("/Users/test/.local/bin")],
+        )
+        .unwrap();
 
         assert_eq!(
             std::env::split_paths(&merged).collect::<Vec<_>>(),
@@ -1296,9 +1513,37 @@ mod tests {
                 PathBuf::from("/opt/homebrew/bin"),
                 PathBuf::from("/Users/test/.bun/bin"),
                 PathBuf::from("/usr/bin"),
+                PathBuf::from("/Users/test/.local/bin"),
             ]
         );
         assert_eq!(login_shell_path(b"shell banner only"), None);
+    }
+
+    #[test]
+    fn macos_adapter_fallbacks_cover_common_cli_installers() {
+        let paths = macos_adapter_fallback_paths(Some(OsStr::new("/Users/test")));
+        for expected in [
+            "/Users/test/.local/bin",
+            "/Users/test/.bun/bin",
+            "/Users/test/.cargo/bin",
+            "/Users/test/.volta/bin",
+            "/Users/test/.nvm/current/bin",
+            "/Users/test/.fnm/aliases/default/bin",
+            "/Users/test/.local/share/mise/shims",
+            "/Users/test/.asdf/shims",
+            "/Users/test/.local/share/pnpm",
+            "/Users/test/Library/pnpm",
+            "/Users/test/.nix-profile/bin",
+            "/opt/homebrew/bin",
+            "/opt/local/bin",
+            "/nix/var/nix/profiles/default/bin",
+            "/usr/local/bin",
+        ] {
+            assert!(
+                paths.contains(&PathBuf::from(expected)),
+                "missing {expected}"
+            );
+        }
     }
 
     #[test]

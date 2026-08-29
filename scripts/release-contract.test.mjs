@@ -60,6 +60,19 @@ describe("desktop version contract", () => {
 });
 
 describe("desktop release asset contract", () => {
+  test("proves packaged macOS adapter discovery through the login-shell path", async () => {
+    const workflow = await readFile(join(import.meta.dirname, "../.github/workflows/desktop.yml"), "utf8");
+    expect(workflow).toContain('bash scripts/smoke-desktop-macos.sh "$installed_app"');
+
+    const smoke = await readFile(join(import.meta.dirname, "smoke-desktop-macos.sh"), "utf8");
+    expect(smoke).toContain('WHEELJACK_ADAPTER_SMOKE_BIN="$FIXTURE_BIN"');
+    expect(smoke).toContain('WHEELJACK_ADAPTER_SMOKE_ID="claude-code"');
+    expect(smoke).toContain('WHEELJACK_ADAPTER_UPDATE_SMOKE_MANAGER="npm"');
+    expect(smoke).toContain('WHEELJACK_ADAPTER_SMOKE_PREFIX="$FIXTURE_PREFIX"');
+    expect(smoke).toContain('PATH="/usr/bin:/bin"');
+    expect(smoke).toContain('SHELL="$FIXTURE_SHELL"');
+  });
+
   test("runs updater proof from a writable app bundle", async () => {
     const workflow = await readFile(join(import.meta.dirname, "../.github/workflows/desktop.yml"), "utf8");
     expect(workflow).toContain('smoke-desktop-update-macos.mjs --app "$app"');

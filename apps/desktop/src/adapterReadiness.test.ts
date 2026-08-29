@@ -2,7 +2,6 @@ import {
   adapterReadinessLabel,
   canVerifyAdapter,
   isAdapterReady,
-  shouldAutoVerifyAdapter,
 } from "./adapterReadiness";
 import type { Adapter } from "./types";
 
@@ -19,7 +18,7 @@ const installed: Adapter = {
 describe("coding-agent readiness", () => {
   test("requires every structured coding adapter to verify", () => {
     expect(isAdapterReady(installed)).toBe(false);
-    expect(canVerifyAdapter(installed)).toBe(true);
+    expect(canVerifyAdapter(installed)).toBe(false);
     expect(adapterReadinessLabel(installed)).toBe("Verify");
   });
 
@@ -60,16 +59,13 @@ describe("coding-agent readiness", () => {
     };
     expect(isAdapterReady(failed)).toBe(false);
     expect(adapterReadinessLabel(failed)).toBe("Failed");
-    expect(shouldAutoVerifyAdapter(failed)).toBe(true);
 
     const verifying = { ...failed, probe: { ...failed.probe, verificationStatus: "verifying" } };
     expect(canVerifyAdapter(verifying)).toBe(false);
-    expect(shouldAutoVerifyAdapter(verifying)).toBe(false);
     expect(adapterReadinessLabel(verifying)).toBe("Verifying");
 
     const checking = { ...failed, status: "" };
     expect(canVerifyAdapter(checking)).toBe(false);
-    expect(shouldAutoVerifyAdapter(checking)).toBe(false);
     expect(adapterReadinessLabel(checking)).toBe("Checking");
 
     const verified: Adapter = {
@@ -80,8 +76,6 @@ describe("coding-agent readiness", () => {
       },
     };
     expect(isAdapterReady(verified)).toBe(true);
-    expect(shouldAutoVerifyAdapter(verified)).toBe(false);
-    expect(shouldAutoVerifyAdapter(verified, ["--model", "changed"])).toBe(true);
     expect(adapterReadinessLabel(verified)).toBe("Ready");
   });
 

@@ -39,12 +39,18 @@ describe("diagnostics report", () => {
       version: "0.1.0",
       platform: "windows",
       appDataDir: "C:\\wheeljack",
+      adapterEnvironment: {
+        source: "login-shell",
+        shell: "/bin/zsh",
+        pathEntryCount: 12,
+      },
       adapters: [adapter],
       runtimes: [runtime],
     });
 
     expect(JSON.parse(report)).toMatchObject({
       version: "0.1.0",
+      adapterEnvironment: { source: "login-shell", pathEntryCount: 12 },
       adapters: [{ id: "codex", probe: { authStatus: "signed-in" } }],
       sessions: { total: 1, byStatus: { running: 1 } },
     });
