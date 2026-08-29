@@ -17,8 +17,11 @@ mkdir -p "$FIXTURE_HOME" "$FIXTURE_BIN" "$FIXTURE_PACKAGE_ROOT"
 printf '%s\n' '{"name":"@anthropic-ai/claude-code","version":"1.0.0","bin":{"claude":"cli.js"}}' > "$FIXTURE_PACKAGE_ROOT/package.json"
 cat > "$FIXTURE_SHELL" <<'EOF'
 #!/bin/sh
-export PATH="$WHEELJACK_ADAPTER_SMOKE_BIN:/usr/bin:/bin"
-exec /bin/sh -c "$4"
+if [ "${1:-}" = "-l" ] && [ "${2:-}" = "-i" ] && [ "${3:-}" = "-c" ]; then
+  export PATH="$WHEELJACK_ADAPTER_SMOKE_BIN:/usr/bin:/bin"
+  exec /bin/sh -c "$4"
+fi
+exec /bin/sh "$@"
 EOF
 cat > "$FIXTURE_BIN/claude" <<'EOF'
 #!/bin/sh

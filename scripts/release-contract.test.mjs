@@ -71,6 +71,7 @@ describe("desktop release asset contract", () => {
     expect(smoke).toContain('WHEELJACK_ADAPTER_SMOKE_PREFIX="$FIXTURE_PREFIX"');
     expect(smoke).toContain('PATH="/usr/bin:/bin"');
     expect(smoke).toContain('SHELL="$FIXTURE_SHELL"');
+    expect(smoke).toContain('exec /bin/sh "$@"');
   });
 
   test("runs updater proof from a writable app bundle", async () => {
