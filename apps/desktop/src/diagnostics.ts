@@ -1,4 +1,4 @@
-import type { Adapter, PaneRuntime, StartupRecoveryState } from "./types";
+import type { Adapter, AdapterEnvironment, PaneRuntime, StartupRecoveryState } from "./types";
 
 export function createDiagnosticsReport({
   version,
@@ -7,6 +7,7 @@ export function createDiagnosticsReport({
   adapters,
   runtimes,
   startupRecovery,
+  adapterEnvironment,
 }: {
   version?: string;
   platform?: string;
@@ -14,6 +15,7 @@ export function createDiagnosticsReport({
   adapters: Adapter[];
   runtimes: PaneRuntime[];
   startupRecovery?: StartupRecoveryState;
+  adapterEnvironment?: AdapterEnvironment;
 }): string {
   const byStatus = Object.fromEntries(
     [...new Set(runtimes.map((runtime) => runtime.status))]
@@ -24,6 +26,12 @@ export function createDiagnosticsReport({
     version,
     platform,
     appDataDir,
+    adapterEnvironment: adapterEnvironment ? {
+      source: adapterEnvironment.source,
+      shell: adapterEnvironment.shell,
+      pathEntryCount: adapterEnvironment.pathEntryCount,
+      warning: adapterEnvironment.warning,
+    } : undefined,
     startupRecovery: startupRecovery ? {
       previousUncleanShutdown: startupRecovery.previousUncleanShutdown,
       safeMode: startupRecovery.safeMode,

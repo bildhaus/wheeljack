@@ -109,14 +109,25 @@ On the WebView side these arrive as `runtime.capabilities` and are consumed thro
 | Discover | `adapter_list`, `adapter_detect` | registry plus PATH detection |
 | Probe | `adapter_probe` | cheap liveness check |
 | Verify | `adapter_verify` | full launch check; run twice before declaring failure |
+| Update | `adapter_update_preview`, `adapter_update_execute` | preview exact provenance-owned commands, confirm once, then execute sequentially |
 | Repair | — | shell surfaces `adapterRepairCommand()` from the setup hint |
 | Spawn | `agent_structured_spawn` | starts a persistent session |
 | Prompt | `agent_structured_prompt` | delivered per `promptDelivery` |
 | Respond | `agent_structured_respond` | answers a question or approval |
+
+Adapter updates use a short-lived, single-use confirmation token. The core stores
+the previewed command plans and invokes executables directly without shell
+interpolation. Active sessions, ambiguous ownership, declarative installs, and
+manual installs are returned as skipped rather than guessed; the desktop rescans
+and verifies successful updates afterward.
 | Cancel | `agent_structured_cancel` | only when `capabilities.cancel` |
 | Attach | `agent_structured_terminal_attach` | only when `capabilities.attached_terminal` |
 | Kill | `agent_structured_kill` | intentional teardown, kept distinct from process failure |
 | Parse | `agent_protocol_parse` | converts raw lines into messages and events |
+
+Settings exposes **Scan all**, **Verify all**, and **Verify selected**. Batch
+verification runs at most two adapters concurrently and preserves each adapter's
+independent result, so one provider failure does not discard successful checks.
 
 `agent_protocol_parse` runs in the core, not the WebView: the shell buffers output lines,
 debounces, and sends them for parsing. Results carry a `protocolSequence`, and the shell

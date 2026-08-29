@@ -1237,7 +1237,7 @@ fn adapter_repair_command(adapter_id: &str) -> Option<String> {
     }
 }
 
-fn run_adapter_command(
+pub(crate) fn run_adapter_command(
     executable: &str,
     args: &[&str],
     cwd: Option<&str>,

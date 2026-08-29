@@ -37,6 +37,7 @@ use std::{
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+mod adapter_updates;
 mod adapters;
 mod agent_control;
 mod agent_protocol;
@@ -63,6 +64,7 @@ mod terminal_nodes;
 mod terminal_runtime;
 mod updater;
 mod usage;
+use adapter_updates::{discover_adapter_updates, execute_adapter_update, AdapterUpdatePlan};
 #[cfg(test)]
 use adapters::{adapter_auth_succeeded, current_platform_id, PASTE_THEN_ENTER_SUBMIT_DELAY_MS};
 use adapters::{
@@ -572,6 +574,11 @@ struct RouteApproval {
     expires_at: Instant,
 }
 
+struct AdapterUpdateApproval {
+    plans: Vec<AdapterUpdatePlan>,
+    expires_at: Instant,
+}
+
 struct PtySpawnRollback {
     killer: Option<Box<dyn ChildKiller + Send + Sync>>,
     #[cfg(windows)]
@@ -859,6 +866,8 @@ pub struct Core {
     response_sequence: AtomicU64,
     route_approvals: Mutex<HashMap<String, RouteApproval>>,
     document_approvals: Mutex<HashMap<String, DocumentApproval>>,
+    adapter_update_approvals: Mutex<HashMap<String, AdapterUpdateApproval>>,
+    adapter_updates: Mutex<()>,
     git_mutations: Mutex<()>,
 }
 
@@ -926,6 +935,8 @@ impl Core {
             response_sequence: AtomicU64::new(0),
             route_approvals: Mutex::new(HashMap::new()),
             document_approvals: Mutex::new(HashMap::new()),
+            adapter_update_approvals: Mutex::new(HashMap::new()),
+            adapter_updates: Mutex::new(()),
             git_mutations: Mutex::new(()),
         };
         if !core.test_mode && !core.startup_recovery.safe_mode {
@@ -1062,6 +1073,10 @@ impl Core {
             "adapter_detect" => self.adapter_detect().map_err(CommandError::failed),
             "adapter_probe" => self.adapter_probe(payload).map_err(CommandError::failed),
             "adapter_verify" => self.adapter_verify(payload).map_err(CommandError::failed),
+            "adapter_update_preview" => self.adapter_update_preview().map_err(CommandError::failed),
+            "adapter_update_execute" => self
+                .adapter_update_execute(payload)
+                .map_err(CommandError::failed),
             "adapter_save" => self.adapter_save(payload).map_err(CommandError::failed),
             "adapter_set_enabled" => self
                 .adapter_set_enabled(payload)
@@ -1622,6 +1637,75 @@ impl Core {
             &launch_args,
             &launch_config,
         )?)?)
+    }
+
+    fn adapter_update_preview(&self) -> Result<Value> {
+        let (adapters, active_adapter_ids) = {
+            let db = self.lock_db()?;
+            (adapter_registry(&db)?, running_adapter_ids(&db)?)
+        };
+        let catalog = discover_adapter_updates(adapters, &active_adapter_ids);
+        let confirmation_token = (!catalog.updates.is_empty()).then(|| Uuid::now_v7().to_string());
+        if let Some(token) = confirmation_token.as_ref() {
+            let mut approvals = self
+                .adapter_update_approvals
+                .lock()
+                .map_err(|error| anyhow!(error.to_string()))?;
+            let current = Instant::now();
+            approvals.retain(|_, approval| approval.expires_at > current);
+            approvals.insert(
+                token.clone(),
+                AdapterUpdateApproval {
+                    plans: catalog.updates.clone(),
+                    expires_at: current + ROUTE_CONFIRMATION_TTL,
+                },
+            );
+        }
+        Ok(json!({
+            "confirmationToken": confirmation_token,
+            "requiresConfirmation": confirmation_token.is_some(),
+            "updates": catalog.updates,
+            "skipped": catalog.skipped,
+        }))
+    }
+
+    fn adapter_update_execute(&self, payload: Value) -> Result<Value> {
+        let token = required_str(&payload, "confirmationToken")?;
+        let approval = self
+            .adapter_update_approvals
+            .lock()
+            .map_err(|error| anyhow!(error.to_string()))?
+            .remove(token)
+            .ok_or_else(|| {
+                anyhow!("adapter update confirmation token is invalid or already used")
+            })?;
+        if approval.expires_at <= Instant::now() {
+            bail!("adapter update confirmation token has expired");
+        }
+        let _update_guard = self
+            .adapter_updates
+            .lock()
+            .map_err(|error| anyhow!(error.to_string()))?;
+        let mut results = Vec::new();
+        for plan in approval.plans {
+            let active = {
+                let db = self.lock_db()?;
+                running_adapter_ids(&db)?.contains(&plan.adapter_id)
+            };
+            if active {
+                results.push(adapter_updates::AdapterUpdateResult {
+                    adapter_id: plan.adapter_id,
+                    display_name: plan.display_name,
+                    manager: plan.manager,
+                    command: plan.command,
+                    success: false,
+                    message: "A session started after preview. Stop it and try again.".to_string(),
+                });
+            } else {
+                results.push(execute_adapter_update(&plan));
+            }
+        }
+        Ok(json!({ "results": results }))
     }
 
     fn adapter_save(&self, payload: Value) -> Result<Value> {
@@ -4033,6 +4117,9 @@ impl Core {
     }
 
     fn agent_structured_spawn(&self, payload: Value) -> Result<Value> {
+        let _adapter_update_guard = self.adapter_updates.try_lock().map_err(|_| {
+            anyhow!("coding-agent updates are in progress; retry after they finish")
+        })?;
         let req =
             serde_json::from_value::<StructuredAgentSpawnRequest>(unwrap_payload(payload, "req"))?;
         validate_session_intent(&req)?;
@@ -4807,6 +4894,9 @@ impl Core {
     }
 
     fn pty_spawn(&self, payload: Value) -> Result<Value> {
+        let _adapter_update_guard = self.adapter_updates.try_lock().map_err(|_| {
+            anyhow!("coding-agent updates are in progress; retry after they finish")
+        })?;
         let request =
             serde_json::from_value::<SpawnSessionRequest>(unwrap_payload(payload, "req"))?;
         self.spawn_pty(request, true)
@@ -6578,6 +6668,15 @@ fn required_str<'a>(payload: &'a Value, key: &str) -> Result<&'a str> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("payload.{key} is required"))
+}
+
+fn running_adapter_ids(db: &Connection) -> Result<HashSet<String>> {
+    let mut statement =
+        db.prepare("SELECT DISTINCT adapter_id FROM sessions WHERE status = 'running'")?;
+    let adapter_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    Ok(adapter_ids)
 }
 
 fn validate_agent_profile_values(

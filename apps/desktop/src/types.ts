@@ -14,8 +14,16 @@ export interface CoreConnection {
   appDataDir: string;
   version: string;
   reused: boolean;
+  adapterEnvironment?: AdapterEnvironment;
   protocolVersion?: number;
   capabilities?: string[];
+}
+
+export interface AdapterEnvironment {
+  source: "process" | "login-shell" | "fallbacks";
+  shell?: string;
+  pathEntryCount: number;
+  warning?: string;
 }
 
 export interface CoreStatus {
@@ -238,6 +246,41 @@ export interface AdapterProbe {
   repairCommand?: string;
   message: string;
   checkedAt: string;
+}
+
+export interface AdapterUpdatePlan {
+  adapterId: string;
+  displayName: string;
+  executablePath: string;
+  manager: string;
+  packageName: string;
+  command: string;
+}
+
+export interface AdapterUpdateSkip {
+  adapterId: string;
+  displayName: string;
+  reason: string;
+}
+
+export interface AdapterUpdatePreview {
+  confirmationToken?: string;
+  requiresConfirmation: boolean;
+  updates: AdapterUpdatePlan[];
+  skipped: AdapterUpdateSkip[];
+}
+
+export interface AdapterUpdateResult {
+  adapterId: string;
+  displayName: string;
+  manager: string;
+  command: string;
+  success: boolean;
+  message: string;
+}
+
+export interface AdapterUpdateExecution {
+  results: AdapterUpdateResult[];
 }
 
 export interface AgentProfile {

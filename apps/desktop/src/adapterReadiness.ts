@@ -9,6 +9,7 @@ export function isAdapterReady(adapter?: Adapter, args?: string[]): boolean {
     !adapter ||
     !adapter.enabled ||
     !adapter.supportsStructured ||
+    !adapter.probe ||
     adapter.status.toLowerCase() !== "installed"
   ) return false;
   if (!adapterRequiresVerification(adapter)) return true;
@@ -22,19 +23,12 @@ export function canVerifyAdapter(adapter?: Adapter): boolean {
     !adapter ||
     !adapter.enabled ||
     !adapter.supportsStructured ||
+    !adapter.probe ||
     adapter.status.toLowerCase() !== "installed"
   ) return false;
-  if (adapter.probe?.verificationStatus === "verifying") return false;
+  if (adapter.probe.verificationStatus === "verifying") return false;
   return !adapterRequiresVerification(adapter) ||
-    !["missing", "unauthenticated"].includes(adapter.probe?.authStatus ?? "unknown");
-}
-
-export function shouldAutoVerifyAdapter(adapter?: Adapter, args?: string[]): boolean {
-  return Boolean(
-    adapter?.probe &&
-    canVerifyAdapter(adapter) &&
-    !isAdapterReady(adapter, args),
-  );
+    !["missing", "unauthenticated"].includes(adapter.probe.authStatus);
 }
 
 export function adapterReadinessLabel(adapter: Adapter, args?: string[]): string {

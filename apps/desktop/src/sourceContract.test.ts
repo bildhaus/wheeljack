@@ -68,7 +68,7 @@ test("reloads the sticker lens only when entering a project surface after Home",
   expect(paritySource).not.toContain("<StickerLensBackground");
 });
 
-test("makes startup usable before probing adapters and verifies exact profile args", () => {
+test("makes startup usable before probing adapters and verifies explicit batch profile args", () => {
   const startupReady = "setStartupReady(true)";
   const startupProject = "activateProject(startupProject)";
   const startupProbe = "probeAdapters(detectedAdapters, savedProfiles, startupProject?.agentAccess)";
@@ -86,18 +86,21 @@ test("makes startup usable before probing adapters and verifies exact profile ar
   );
   expect(startupSource).toContain("preferredCodingAdapterId(");
   const rescanSource = appSource.slice(
-    appSource.indexOf("const rescanAdapters"),
+    appSource.indexOf("const scanAdapters"),
     appSource.indexOf("const verifyAdapter"),
   );
   expect(rescanSource).toContain("preferredCodingAdapterId(");
-  expect(appSource.match(/callCore<AdapterProbe>\("adapter_verify"/g)).toHaveLength(3);
+  expect(appSource.match(/callCore<AdapterProbe>\("adapter_verify"/g)).toHaveLength(2);
   const verifySource = appSource.slice(
-    appSource.indexOf("const verifyAdapter"),
+    appSource.indexOf("const runAdapterVerification"),
     appSource.indexOf("const repairAdapter"),
   );
   expect(verifySource).toContain("...agentLaunchConfig(profile, project?.agentAccess)");
-  expect(appSource).toContain("attempt.attempts >= 2");
-  expect(appSource).toContain("...target.launchConfig");
+  expect(verifySource).toContain("targets.slice(index, index + 2)");
+  expect(verifySource).toContain("const verifyAllAdapters");
+  expect(verifySource).toContain("const updateAllAdapters");
+  expect(verifySource).toContain('import("./adapterUpdates")');
+  expect(appSource).not.toContain("Verifying automatically");
   const probeSource = appSource.slice(
     appSource.indexOf("async function probeAdapters"),
     appSource.indexOf("function percentile"),

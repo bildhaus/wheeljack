@@ -25,7 +25,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { Textarea } from "./components/ui/textarea";
 import { applyDownloadedUpdate, callCore, closeAfterFlush, completeUiSmoke, completeUpdateHealth, connectCore, legacyWindowsUiPreferences, uiSmokeAutoClose, uiSmokeEnabled, uiSmokeUpdateMode } from "./core";
-import { adapterReadinessLabel, isAdapterReady, shouldAutoVerifyAdapter } from "./adapterReadiness";
+import { adapterReadinessLabel, canVerifyAdapter, isAdapterReady } from "./adapterReadiness";
 import { reserveAgentCallsign, resolveAgentLabel } from "./agentIdentity";
 import { safeAgentToken } from "./agentModels";
 import {
@@ -536,6 +536,7 @@ export function App() {
   const [onboardingVersion, setOnboardingVersion] = useState<number>();
   const [resettingPreferences, setResettingPreferences] = useState(false);
   const [preferencesStatus, setPreferencesStatus] = useState("");
+  const [adapterUpdateStatus, setAdapterUpdateStatus] = useState("");
   const [error, setCurrentError] = useState("");
   const [errorToasts, setErrorToasts] = useState<ErrorToast[]>([]);
   const nextErrorToastId = useRef(0);
@@ -614,7 +615,6 @@ export function App() {
   const legacyRecoverySpawnPendingRef = useRef(new Set<string>());
   const legacyRecoveryCompletionPendingRef = useRef(new Set<string>());
   const legacyRecoveryRuntimeRef = useRef(new Map<string, string>());
-  const automaticAdapterVerificationRef = useRef(new Map<string, { key: string; attempts: number; pending: boolean }>());
   const verificationOutputTimerRef = useRef<number | undefined>(undefined);
   const opsPersistQueueRef = useRef<Promise<void>>(Promise.resolve());
   const opsProjectionQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -3647,14 +3647,19 @@ export function App() {
     setHistoryTranscript(undefined);
   };
 
+  const scanAdapters = async () => {
+    const detected = await callCore<Adapter[]>("adapter_detect", {});
+    const probed = await probeAdapters(detected, agentProfiles, project?.agentAccess);
+    setAdapters(probed);
+    selectAgentAdapter(preferredCodingAdapterId(probed, agentProfiles, selectedAdapterId));
+    return probed;
+  };
+
   const rescanAdapters = async () => {
     setBusy(true);
     setError("");
     try {
-      const detected = await callCore<Adapter[]>("adapter_detect", {});
-      const probed = await probeAdapters(detected, agentProfiles, project?.agentAccess);
-      setAdapters(probed);
-      selectAgentAdapter(preferredCodingAdapterId(probed, agentProfiles, selectedAdapterId));
+      await scanAdapters();
     } catch (cause) {
       setError(message(cause));
     } finally {
@@ -3662,27 +3667,93 @@ export function App() {
     }
   };
 
+  const runAdapterVerification = async (targets: Adapter[]) => {
+    const targetIds = new Set(targets.map((adapter) => adapter.id));
+    setAdapters((current) => current.map((adapter) => {
+      if (!targetIds.has(adapter.id)) return adapter;
+      return {
+        ...adapter,
+        probe: {
+          ...adapter.probe!,
+          verificationStatus: "verifying",
+          message: "Verifying…",
+          checkedAt: new Date().toISOString(),
+        },
+      };
+    }));
+    for (let index = 0; index < targets.length; index += 2) {
+      const batch = targets.slice(index, index + 2);
+      const results = await Promise.all(batch.map(async (adapter) => {
+        const profile = agentProfiles.find((candidate) => candidate.adapterId === adapter.id);
+        try {
+          const probe = await callCore<AdapterProbe>("adapter_verify", {
+            adapterId: adapter.id,
+            cwd: project?.path,
+            ...agentLaunchConfig(profile, project?.agentAccess),
+          });
+          return { adapter, probe };
+        } catch (cause) {
+          return {
+            adapter,
+            probe: {
+              ...adapter.probe!,
+              verificationStatus: "failed",
+              verifiedArgs: [],
+              message: `Verification failed: ${message(cause)}`,
+              checkedAt: new Date().toISOString(),
+            } satisfies AdapterProbe,
+          };
+        }
+      }));
+      setAdapters((current) => current.map((adapter) => {
+        const result = results.find((candidate) => candidate.adapter.id === adapter.id);
+        return result ? { ...adapter, probe: result.probe } : adapter;
+      }));
+    }
+  };
+
   const verifyAdapter = async () => {
-    if (!selectedAdapterId) return;
+    const target = adapters.find((adapter) => adapter.id === selectedAdapterId);
+    if (!target || !canVerifyAdapter(target)) return;
     setBusy(true);
     setError("");
-    const profile = agentProfiles.find((candidate) => candidate.adapterId === selectedAdapterId);
-    setAdapters((current) => current.map((adapter) => adapter.id === selectedAdapterId && adapter.probe
-      ? { ...adapter, probe: { ...adapter.probe, verificationStatus: "verifying", message: "Verifying…" } }
-      : adapter));
+    await runAdapterVerification([target]);
+    setBusy(false);
+  };
+
+  const verifyAllAdapters = async () => {
+    const targets = adapters.filter((adapter) =>
+      adapter.id !== "generic-shell" && canVerifyAdapter(adapter));
+    if (!targets.length) return;
+    setBusy(true);
+    setError("");
+    await runAdapterVerification(targets);
+    setBusy(false);
+  };
+
+  const updateAllAdapters = async () => {
+    setBusy(true);
+    setError("");
+    setAdapterUpdateStatus("Inspecting installer ownership…");
     try {
-      const result = await callCore<AdapterProbe>("adapter_verify", {
-        adapterId: selectedAdapterId,
-        cwd: project?.path,
-        ...agentLaunchConfig(profile, project?.agentAccess),
-      });
-      setAdapters((current) => current.map((adapter) =>
-        adapter.id === selectedAdapterId ? { ...adapter, probe: result } : adapter));
+      const { previewAndRunAdapterUpdates } = await import("./adapterUpdates");
+      const outcome = await previewAndRunAdapterUpdates(requestConfirmation);
+      setAdapterUpdateStatus(outcome.summary);
+      if (!outcome.execution) return;
+      const failed = outcome.execution.results.filter((result) => !result.success);
+      if (failed.length) {
+        setError(failed.map((result) => `${result.displayName}: ${result.message}`).join("\n"));
+      }
+      const scanned = await scanAdapters();
+      const updatedIds = new Set(outcome.execution.results
+        .filter((result) => result.success)
+        .map((result) => result.adapterId));
+      const verificationTargets = scanned.filter((adapter) =>
+        updatedIds.has(adapter.id) && canVerifyAdapter(adapter));
+      if (verificationTargets.length) await runAdapterVerification(verificationTargets);
     } catch (cause) {
-      setError(`Could not verify adapter: ${message(cause)}`);
-      setAdapters((current) => current.map((adapter) => adapter.id === selectedAdapterId && adapter.probe
-        ? { ...adapter, probe: { ...adapter.probe, verificationStatus: "failed", message: `Verification failed: ${message(cause)}` } }
-        : adapter));
+      setAdapterUpdateStatus("Adapter update failed.");
+      setError(`Could not update coding agents: ${message(cause)}`);
     } finally {
       setBusy(false);
     }
@@ -6247,64 +6318,6 @@ export function App() {
   }), [activity, nodeById, opsState, runtimes]);
   const readyCodingAdapters = adapters.filter((adapter) =>
     adapter.id !== "generic-shell" && isAdapterReady(adapter, adapterArgsById[adapter.id] ?? []));
-  useEffect(() => {
-    if (!startupReady || safeStartupActive) return;
-    const targets = adapters.flatMap((adapter) => {
-      const profile = agentProfiles.find((candidate) => candidate.adapterId === adapter.id);
-      const launchConfig = agentLaunchConfig(profile, project?.agentAccess);
-      if (!shouldAutoVerifyAdapter(adapter, launchConfig.args)) return [];
-      const key = JSON.stringify(agentVerificationConfig(profile, project?.agentAccess));
-      const attempt = automaticAdapterVerificationRef.current.get(adapter.id);
-      if (attempt?.pending || (attempt?.key === key && attempt.attempts >= 2)) return [];
-      return [{ adapter, profile, key, launchConfig }];
-    });
-    if (!targets.length) return;
-    const timer = window.setTimeout(() => {
-      for (const target of targets) {
-        const prior = automaticAdapterVerificationRef.current.get(target.adapter.id);
-        automaticAdapterVerificationRef.current.set(target.adapter.id, {
-          key: target.key,
-          attempts: prior?.key === target.key ? prior.attempts + 1 : 1,
-          pending: true,
-        });
-      }
-      const targetIds = new Set(targets.map((target) => target.adapter.id));
-      setAdapters((current) => current.map((adapter) => targetIds.has(adapter.id) && adapter.probe
-        ? { ...adapter, probe: { ...adapter.probe, verificationStatus: "verifying", message: "Verifying automatically…" } }
-        : adapter));
-      for (const target of targets) {
-        void (async () => {
-          let probe: AdapterProbe;
-          try {
-            probe = await callCore<AdapterProbe>("adapter_verify", {
-              adapterId: target.adapter.id,
-              cwd: project?.path,
-              ...target.launchConfig,
-            });
-          } catch (cause) {
-            probe = {
-              ...target.adapter.probe!,
-              verificationStatus: "failed",
-              message: `Automatic verification failed: ${message(cause)}`,
-              checkedAt: new Date().toISOString(),
-            };
-          }
-          const currentProfile = agentProfilesRef.current.find((candidate) => candidate.adapterId === target.adapter.id);
-          if (JSON.stringify(agentVerificationConfig(currentProfile, projectRef.current?.agentAccess)) !== target.key) {
-            probe = {
-              ...probe,
-              verificationStatus: "stale",
-              message: "Launch configuration changed during verification. Retrying automatically…",
-            };
-          }
-          const attempt = automaticAdapterVerificationRef.current.get(target.adapter.id);
-          if (attempt?.key === target.key) automaticAdapterVerificationRef.current.set(target.adapter.id, { ...attempt, pending: false });
-          setAdapters((current) => current.map((adapter) => adapter.id === target.adapter.id ? { ...adapter, probe } : adapter));
-        })();
-      }
-    }, 500);
-    return () => window.clearTimeout(timer);
-  }, [adapters, agentProfiles, project?.agentAccess, project?.path, safeStartupActive, startupReady]);
   const saveSchedulerConfig = async (enabled: boolean, paused: boolean, concurrencyLimit: number) => {
     const activeProject = projectRef.current;
     const activeCanvas = canvasRef.current;
@@ -7637,6 +7650,8 @@ export function App() {
               coreVersion={coreStatus?.version ?? connection?.version}
               platform={coreStatus?.platform}
               appDataDir={connection?.appDataDir}
+              adapterEnvironment={connection?.adapterEnvironment}
+              adapterUpdateStatus={adapterUpdateStatus}
               diagnosticsReport={createDiagnosticsReport({
                 version: coreStatus?.version ?? connection?.version,
                 platform: coreStatus?.platform,
@@ -7644,6 +7659,7 @@ export function App() {
                 adapters,
                 runtimes: Object.values(runtimes),
                 startupRecovery: coreStatus?.startupRecovery,
+                adapterEnvironment: connection?.adapterEnvironment,
               })}
               systemUsesLight={systemUsesLight}
               onBack={() => setSurface(previousSurfaceRef.current)}
@@ -7659,6 +7675,8 @@ export function App() {
               onRefreshAgentControlAudit={() => void refreshAgentControlAudit()}
               onRescan={() => void rescanAdapters()}
               onVerify={() => void verifyAdapter()}
+              onVerifyAll={() => void verifyAllAdapters()}
+              onUpdateAll={() => void updateAllAdapters()}
               onExportBackup={(path) => callCore("state_backup_export", { path }).then(() => undefined)}
               repairCommand={adapterRepairCommand(
                 adapters.find((adapter) => adapter.id === selectedAdapterId),
@@ -7785,7 +7803,7 @@ export function App() {
       </AlertDialog>
       <AlertDialog open={Boolean(confirmation)} onOpenChange={(open) => !open && completeConfirmation(false)}>
         <AlertDialogContent className="wj-dialog">
-          <AlertDialogHeader><AlertDialogTitle>{confirmation?.title}</AlertDialogTitle><AlertDialogDescription>{confirmation?.message}</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogHeader><AlertDialogTitle>{confirmation?.title}</AlertDialogTitle><AlertDialogDescription className="whitespace-pre-line">{confirmation?.message}</AlertDialogDescription></AlertDialogHeader>
           <AlertDialogFooter><AlertDialogCancel onClick={() => completeConfirmation(false)}>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => completeConfirmation(true)}>{confirmation?.confirmLabel ?? "Confirm"}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
