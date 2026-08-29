@@ -25,7 +25,7 @@ export async function previewAndRunAdapterUpdates(
     : "";
   const confirmed = await confirm(
     `Update ${preview.updates.length} coding ${preview.updates.length === 1 ? "agent" : "agents"}?`,
-    `Wheeljack will run these commands sequentially:\n\n${commands}${skipped}`,
+    `wheeljack will run these commands sequentially:\n\n${commands}${skipped}`,
     "Update all",
   );
   if (!confirmed) return { summary: "Adapter update canceled." };
