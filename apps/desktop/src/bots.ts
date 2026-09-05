@@ -130,3 +130,18 @@ function stableAvatarSeed(stableKey: string, suggestion: AgentSpecialistSuggesti
   for (const character of input) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
   return `bot_${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
+
+/** Resolve the exact configuration used by this pane's next turn and resume. */
+export function effectivePaneAgentProfile(base: AgentProfile | undefined, data: JsonObject): AgentProfile | undefined {
+  const profile = botProfileForLaunch(base, botSnapshotFromNode(data));
+  if (!profile) return undefined;
+  const override = data.agentProfile;
+  if (!override || typeof override !== "object" || Array.isArray(override)) return profile;
+  const saved = override as Partial<AgentProfile>;
+  return {
+    ...profile,
+    provider: typeof saved.provider === "string" ? saved.provider : profile.provider,
+    model: typeof saved.model === "string" ? saved.model : profile.model,
+    thinking: typeof saved.thinking === "string" ? saved.thinking : profile.thinking,
+  };
+}

@@ -60,6 +60,7 @@ mod protocol;
 mod session_history;
 mod settings;
 mod startup_recovery;
+mod state_backup;
 mod terminal_nodes;
 mod terminal_runtime;
 mod updater;
@@ -816,28 +817,45 @@ fn spawn_history_maintenance_worker(
     db_path: PathBuf,
     events: Arc<dyn EventSink>,
     shutdown: Arc<AtomicBool>,
+    interval: Duration,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        for _ in 0..50 {
+        let mut first_pass = true;
+        let mut delay = interval.min(Duration::from_secs(5));
+        loop {
+            let deadline = Instant::now() + delay;
+            while Instant::now() < deadline {
+                if shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+                thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(100)),
+                );
+            }
             if shutdown.load(Ordering::SeqCst) {
                 return;
             }
-            thread::sleep(Duration::from_millis(100));
-        }
-        if shutdown.load(Ordering::SeqCst) {
-            return;
-        }
-        let result = (|| -> Result<()> {
-            let db = open_app_connection(&db_path)?;
-            prune_all_session_chunks_to_retention(&db)?;
-            prune_global_session_chunks_to_retention(&db)?;
-            Ok(())
-        })();
-        if let Err(error) = result {
-            events.emit(
-                "history:maintenance-error",
-                &json!({ "message": format!("{error:#}") }),
-            );
+            let result = (|| -> Result<()> {
+                let db = open_app_connection(&db_path)?;
+                let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)?;
+                if first_pass {
+                    prune_all_session_chunks_to_retention(&tx)?;
+                }
+                prune_global_session_chunks_to_retention(&tx)?;
+                prune_completed_prompt_payloads(&tx, false)?;
+                tx.commit()?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => first_pass = false,
+                Err(error) => events.emit(
+                    "history:maintenance-error",
+                    &json!({ "message": format!("{error:#}") }),
+                ),
+            }
+            delay = interval;
         }
     })
 }
@@ -878,6 +896,7 @@ impl Core {
         fs::create_dir_all(&paths.cache_dir).context("create cache dir")?;
         fs::create_dir_all(&paths.update_dir).context("create update dir")?;
 
+        state_backup::restore_on_startup(&paths.app_data_dir);
         let migrated = migrate_app_data(&paths).context("migrate old app data")?;
         let db_path = paths.db_path();
         let connection = open_app_connection(&db_path)?;
@@ -949,6 +968,7 @@ impl Core {
                 core.paths.db_path(),
                 core.events.clone(),
                 core.shutdown_cancel.clone(),
+                Duration::from_secs(60),
             ));
         }
         Ok(core)
@@ -1050,6 +1070,7 @@ impl Core {
 
     fn register_worker(&self, worker: JoinHandle<()>) {
         if let Ok(mut workers) = self.workers.lock() {
+            workers.retain(|worker| !worker.is_finished());
             workers.push(worker);
         }
     }
@@ -1372,6 +1393,10 @@ impl Core {
             "state_backup_export" => self
                 .state_backup_export(payload)
                 .map_err(CommandError::failed),
+            "state_bundle_export" | "state_bundle_preview" | "state_bundle_restore" => self
+                .state_bundle_command(command, payload)
+                .map_err(CommandError::failed),
+            "state_bundle_status" => Ok(state_backup::restore_status(&self.paths.app_data_dir)),
             "settings_export" => self.settings_export().map_err(CommandError::failed),
             "settings_import" => self.settings_import(payload).map_err(CommandError::failed),
             "updater_platform" => self.updater_platform().map_err(CommandError::failed),
@@ -4542,8 +4567,18 @@ impl Core {
                 rollback.reader_cancel(),
                 &mut rollback.readers,
             )?;
-            rollback.disarm();
             self.register_worker(waiter);
+            if let Some(prior_session_id) = resume_session_id.as_deref() {
+                let deliveries = {
+                    let db = self.lock_db()?;
+                    rebind_prompt_deliveries(&db, prior_session_id, &session_id)?
+                };
+                for delivery in deliveries {
+                    self.events.emit("agent:prompt-delivery", &json!(delivery));
+                }
+                self.ensure_prompt_drainer(&session_id)?;
+            }
+            rollback.disarm();
 
             Ok(serde_json::to_value(SessionDto {
                 id: session_id.clone(),
@@ -5483,8 +5518,11 @@ impl Core {
 
     fn session_clear_transcripts(&self) -> Result<Value> {
         let db = self.lock_db()?;
-        let _ = db.execute("DELETE FROM session_chunks_fts", []);
-        let deleted = db.execute("DELETE FROM session_chunks", [])?;
+        let tx = db.unchecked_transaction()?;
+        tx.execute("DELETE FROM session_chunks_fts", [])?;
+        let deleted = tx.execute("DELETE FROM session_chunks", [])?;
+        prune_completed_prompt_payloads(&tx, true)?;
+        tx.commit()?;
         let _ = gc_image_attachments(&db, &self.paths.app_data_dir);
         Ok(json!(deleted))
     }
@@ -5531,6 +5569,23 @@ impl Core {
         let db = self.lock_db()?;
         export_database_backup(&db, &self.paths.db_path(), &destination)?;
         Ok(json!({ "path": destination }))
+    }
+
+    fn state_bundle_command(&self, command: &str, payload: Value) -> Result<Value> {
+        let path = PathBuf::from(required_str(&payload, "path")?);
+        let result = match command {
+            "state_bundle_export" => {
+                let db = self.lock_db()?;
+                state_backup::export_bundle(&db, &self.paths.app_data_dir, &path)?
+            }
+            "state_bundle_restore" => state_backup::stage_restore(
+                &path,
+                required_str(&payload, "fingerprint")?,
+                &self.paths.app_data_dir,
+            )?,
+            _ => state_backup::preview_bundle(&path)?,
+        };
+        Ok(serde_json::to_value(result)?)
     }
 
     fn settings_export(&self) -> Result<Value> {
@@ -6334,23 +6389,54 @@ fn spawn_prompt_delivery_worker(
     shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
+        let db = match open_app_connection(&db_path) {
+            Ok(db) => db,
+            Err(error) => {
+                events.emit(
+                    "agent:prompt-delivery-error",
+                    &json!({ "sessionId": session_id, "message": format!("{error:#}") }),
+                );
+                if let Ok(mut drainers) = drainers.lock() {
+                    drainers.remove(&session_id);
+                }
+                return;
+            }
+        };
         while !shutdown.load(Ordering::SeqCst) {
+            // Serialize the empty check/removal with ensure_prompt_drainer. A submit
+            // racing this exit either becomes visible here or starts a new worker.
+            let Ok(mut registered) = drainers.lock() else {
+                return;
+            };
+            match has_dispatchable_prompt(&db, &session_id) {
+                Ok(false) => {
+                    registered.remove(&session_id);
+                    return;
+                }
+                Err(error) => {
+                    drop(registered);
+                    events.emit(
+                        "agent:prompt-delivery-error",
+                        &json!({ "sessionId": session_id, "message": format!("{error:#}") }),
+                    );
+                    thread::sleep(Duration::from_millis(250));
+                    continue;
+                }
+                Ok(true) => {}
+            }
             let session = sessions
                 .lock()
                 .ok()
                 .and_then(|sessions| sessions.get(&session_id).cloned());
             let Some(session) = session else {
-                if let Ok(db) = open_app_connection(&db_path) {
-                    let _ = db.execute(
-                        "UPDATE session_prompt_deliveries
-                         SET state = 'blocked', error_code = 'session_not_running',
-                             error_message = 'Resume the agent session before sending this prompt.',
-                             updated_at = ?2
-                         WHERE session_id = ?1 AND state = 'queued'",
-                        params![session_id, now()],
-                    );
-                }
-                break;
+                let _ = db.execute(
+                    "UPDATE session_prompt_deliveries
+                     SET state = 'blocked', error_code = 'session_not_running',
+                         error_message = 'Resume the agent session before sending this prompt.', updated_at = ?2
+                     WHERE session_id = ?1 AND state = 'queued'", params![session_id, now()],
+                );
+                registered.remove(&session_id);
+                return;
             };
             let turn_active = session
                 .rpc_state
@@ -6358,17 +6444,15 @@ fn spawn_prompt_delivery_worker(
                 .and_then(|state| state.lock().ok().map(|state| state.turn_active))
                 .unwrap_or(false);
             if turn_active {
+                drop(registered);
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            let delivery = match open_app_connection(&db_path)
-                .and_then(|db| claim_next_prompt_delivery(&db, &session_id))
-            {
+            let delivery = claim_next_prompt_delivery(&db, &session_id);
+            drop(registered);
+            let delivery = match delivery {
                 Ok(Some(delivery)) => delivery,
-                Ok(None) => {
-                    thread::sleep(Duration::from_millis(100));
-                    continue;
-                }
+                Ok(None) => continue,
                 Err(error) => {
                     events.emit(
                         "agent:prompt-delivery-error",
@@ -6381,10 +6465,23 @@ fn spawn_prompt_delivery_worker(
             events.emit("agent:prompt-delivery", &json!(delivery));
             let result =
                 dispatch_queued_prompt(&db_path, &app_data_dir, &session_id, &session, &delivery);
-            if let Ok(db) = open_app_connection(&db_path) {
-                match result {
-                    Ok(()) => {
-                        let _ = complete_prompt_delivery(&db, &delivery.id);
+            let mut reported_error = false;
+            loop {
+                let settlement = match &result {
+                    Ok(PromptDispatchOutcome::Accepted {
+                        history_seq,
+                        history_line,
+                    }) => {
+                        persist_accepted_prompt_delivery(&db, &delivery, *history_seq, history_line)
+                    }
+                    Ok(PromptDispatchOutcome::Indeterminate(message)) => {
+                        settle_dispatched_prompt_error(
+                            &db,
+                            &delivery,
+                            "indeterminate",
+                            "delivery_unconfirmed",
+                            message,
+                        )
                     }
                     Err(error) => {
                         let message = format!("{error:#}");
@@ -6393,13 +6490,27 @@ fn spawn_prompt_delivery_worker(
                         } else {
                             ("failed", "dispatch_failed")
                         };
-                        let _ =
-                            settle_prompt_delivery_error(&db, &delivery.id, state, code, &message);
+                        settle_dispatched_prompt_error(&db, &delivery, state, code, &message)
+                    }
+                };
+                match settlement {
+                    Ok(()) => break,
+                    Err(error) => {
+                        // Retry only the local write: provider acceptance must never
+                        // be turned into a resendable failure by a SQLite error.
+                        if !reported_error {
+                            events.emit("agent:prompt-delivery-error", &json!({ "sessionId": session_id, "deliveryId": delivery.id, "message": format!("Prompt delivery is awaiting local persistence: {error:#}") }));
+                            reported_error = true;
+                        }
+                        if shutdown.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(250));
                     }
                 }
-                if let Ok(Some(updated)) = load_prompt_delivery(&db, &delivery.id) {
-                    events.emit("agent:prompt-delivery", &json!(updated));
-                }
+            }
+            if let Ok(Some(updated)) = load_prompt_delivery(&db, &delivery.id) {
+                events.emit("agent:prompt-delivery", &json!(updated));
             }
         }
         if let Ok(mut drainers) = drainers.lock() {
@@ -6408,13 +6519,21 @@ fn spawn_prompt_delivery_worker(
     })
 }
 
+enum PromptDispatchOutcome {
+    Accepted {
+        history_seq: u64,
+        history_line: Vec<u8>,
+    },
+    Indeterminate(String),
+}
+
 fn dispatch_queued_prompt(
     db_path: &Path,
     app_data_dir: &Path,
     session_id: &str,
     session: &StructuredAgentSessionHandle,
     delivery: &PromptDeliveryDto,
-) -> Result<()> {
+) -> Result<PromptDispatchOutcome> {
     let payload = delivery
         .payload
         .as_ref()
@@ -6430,7 +6549,7 @@ fn dispatch_queued_prompt(
     )?;
     let history_line = structured_user_history_line(&prompt, &payload.history_text)?;
     let history_seq = session.seq.fetch_add(1, Ordering::SeqCst) + 1;
-    if session.protocol == "opencode-sse" {
+    let sent = if session.protocol == "opencode-sse" {
         structured_sse_send_prompt(
             &StructuredSsePromptDriver {
                 protocol: session.protocol.clone(),
@@ -6445,7 +6564,7 @@ fn dispatch_queued_prompt(
                 thinking,
             },
             &prompt,
-        )?;
+        )
     } else {
         structured_rpc_send_prompt(
             &StructuredProtocolDriver {
@@ -6478,11 +6597,16 @@ fn dispatch_queued_prompt(
                 },
             },
             &prompt,
-        )?;
+        )
+    };
+    match sent {
+        Ok(()) => Ok(PromptDispatchOutcome::Accepted {
+            history_seq,
+            history_line,
+        }),
+        Err(error) if error.to_string().contains("still streaming") => Err(error),
+        Err(error) => Ok(PromptDispatchOutcome::Indeterminate(format!("{error:#}"))),
     }
-    let db = open_app_connection(db_path)?;
-    persist_session_stream_chunk(&db, session_id, history_seq, "agent-input", &history_line)?;
-    Ok(())
 }
 
 fn validate_session_intent(req: &StructuredAgentSpawnRequest) -> Result<()> {

@@ -4,6 +4,10 @@ description: Understand wheeljack's local SQLite authority, app-data migration, 
 editUrl: https://github.com/bildhaus/wheeljack/edit/main/docs/reference/local-data-and-permissions.md
 ---
 
+:::note
+The workflow improvements described here apply to wheeljack 0.1.14 and later.
+:::
+
 wheeljack has no hosted account or sync service. Project registration, canvases,
 layouts, settings, session history, attachments, Bots, and Plan state are stored
 locally under the Tauri application data directory.
@@ -49,6 +53,11 @@ locations. Migration runs only while the new production database is empty.
 Source databases remain untouched. The migrated destination also receives a
 pre-migration backup so recovery does not depend on deleting the old profile.
 
+The release-preparation build adds queue-recovery metadata while retaining
+database compatibility version 21, which v0.1.13 can read after an updater
+rollback. Startup fills missing request identities and refreshes payload
+fingerprints after an older build has written to the profile.
+
 ## Coding-agent network access
 
 wheeljack does not proxy or host agent traffic. A structured CLI communicates
@@ -71,7 +80,11 @@ do, so it remains an explicit per-project decision.
 
 ## Backups and removal
 
-Use **Settings → Application** to export a verified backup to a new file outside
-the live data directory. Removing a project from wheeljack is separate from
+Use **Settings → Application → Storage** to export a complete backup folder with
+the database and referenced attachments, or a database-only SQLite file. Complete
+backups support a previewed restore on the next launch, with a complete recovery
+copy of the previous state retained in the app-data folder. Keep exported backups
+outside the live data directory. Project files and agent CLI credentials are not
+part of the backup. Removing a project from wheeljack is separate from
 deleting its folder. Resetting preferences is separate from deleting durable
 workspace state. Follow the specific confirmation for each action.

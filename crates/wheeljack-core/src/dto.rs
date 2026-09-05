@@ -595,6 +595,8 @@ fn default_adapter_enabled() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct SessionHistoryItemDto {
     pub id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub node_id: String,
     pub node_title: String,
     pub adapter_id: String,

@@ -1440,10 +1440,7 @@ where
     thread::spawn(move || {
         let db = open_app_connection(&db_path).ok();
         let mut reader = BufReader::new(reader);
-        let mut pending_chunks: Vec<(u64, String, Vec<u8>)> =
-            Vec::with_capacity(STRUCTURED_TRANSCRIPT_BATCH_SIZE);
-        let mut last_chunk_flush = Instant::now();
-        let mut last_retention_prune = Instant::now();
+        let transcript = SessionTranscriptWriter::new(db_path, session_id.clone(), events.clone());
         loop {
             if cancellation.is_canceled() {
                 break;
@@ -1474,33 +1471,11 @@ where
                 continue;
             }
             let next_seq = seq.fetch_add(1, Ordering::SeqCst) + 1;
-            if let Some(db) = db.as_ref() {
-                pending_chunks.push((
-                    next_seq,
-                    format!("agent-{stream}"),
-                    format!("{line_text}\n").into_bytes(),
-                ));
-                if (pending_chunks.len() >= STRUCTURED_TRANSCRIPT_BATCH_SIZE
-                    || last_chunk_flush.elapsed() >= STRUCTURED_TRANSCRIPT_FLUSH_INTERVAL)
-                    && {
-                        let enforce_retention =
-                            last_retention_prune.elapsed() >= SESSION_TRANSCRIPT_PRUNE_INTERVAL;
-                        let flushed = flush_pending_session_chunks(
-                            db,
-                            &session_id,
-                            &mut pending_chunks,
-                            enforce_retention,
-                        )
-                        .is_ok();
-                        if flushed && enforce_retention {
-                            last_retention_prune = Instant::now();
-                        }
-                        flushed
-                    }
-                {
-                    last_chunk_flush = Instant::now();
-                }
-            }
+            transcript.push((
+                next_seq,
+                format!("agent-{stream}"),
+                format!("{line_text}\n").into_bytes(),
+            ));
             events.emit(
                 "agent:structured-line",
                 &json!(StructuredAgentLineEvent {
@@ -1564,18 +1539,7 @@ where
                 false,
             );
         }
-        if let Some(db) = db.as_ref() {
-            for attempt in 0..3 {
-                if flush_pending_session_chunks(db, &session_id, &mut pending_chunks, true).is_ok()
-                    || pending_chunks.is_empty()
-                {
-                    break;
-                }
-                if attempt < 2 {
-                    thread::sleep(Duration::from_millis(25));
-                }
-            }
-        }
+        drop(transcript);
         emit_structured_protocol_events(
             &session_id,
             &node_id,
@@ -1587,6 +1551,87 @@ where
             true,
         );
     })
+}
+
+type TranscriptChunk = (u64, String, Vec<u8>);
+
+/// Pipe reads may stay blocked for the entire idle lifetime of an agent. Own
+/// persistence separately so an incomplete batch has a real flush deadline.
+struct SessionTranscriptWriter {
+    sender: Option<std::sync::mpsc::SyncSender<TranscriptChunk>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl SessionTranscriptWriter {
+    fn new(db_path: PathBuf, session_id: String, events: Arc<dyn EventSink>) -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(STRUCTURED_TRANSCRIPT_BATCH_SIZE);
+        let worker = thread::spawn(move || {
+            let db = match open_app_connection(&db_path) {
+                Ok(db) => db,
+                Err(error) => {
+                    events.emit(
+                        "history:persistence-error",
+                        &json!({ "sessionId": session_id, "message": format!("{error:#}") }),
+                    );
+                    return;
+                }
+            };
+            let mut last_retention_prune = Instant::now();
+            while let Ok(first) = receiver.recv() {
+                let mut pending = vec![first];
+                let deadline = Instant::now() + STRUCTURED_TRANSCRIPT_FLUSH_INTERVAL;
+                let mut disconnected = false;
+                while pending.len() < STRUCTURED_TRANSCRIPT_BATCH_SIZE {
+                    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    {
+                        Ok(chunk) => pending.push(chunk),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
+                    }
+                }
+                let enforce_retention = disconnected
+                    || last_retention_prune.elapsed() >= SESSION_TRANSCRIPT_PRUNE_INTERVAL;
+                for attempt in 0..3 {
+                    match flush_pending_session_chunks(&db, &session_id, &mut pending, enforce_retention) {
+                        Ok(()) => {
+                            if enforce_retention { last_retention_prune = Instant::now(); }
+                            break;
+                        }
+                        Err(error) if attempt == 2 => events.emit(
+                            "history:persistence-error",
+                            &json!({ "sessionId": session_id, "message": format!("Could not save agent output: {error:#}") }),
+                        ),
+                        Err(_) => thread::sleep(Duration::from_millis(25)),
+                    }
+                }
+                if disconnected {
+                    break;
+                }
+            }
+        });
+        Self {
+            sender: Some(sender),
+            worker: Some(worker),
+        }
+    }
+
+    fn push(&self, chunk: TranscriptChunk) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.send(chunk);
+        }
+    }
+}
+
+impl Drop for SessionTranscriptWriter {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 fn flush_pending_session_chunks(
@@ -3370,6 +3415,11 @@ pub(crate) fn read_chunked_line<R: BufRead>(
 pub(crate) fn spawn_structured_sse_reader(driver: StructuredSseDriver) -> JoinHandle<()> {
     thread::spawn(move || {
         let db = open_app_connection(&driver.db_path).ok();
+        let transcript = SessionTranscriptWriter::new(
+            driver.db_path.clone(),
+            driver.session_id.clone(),
+            driver.events.clone(),
+        );
         loop {
             if driver.cancellation.is_canceled() {
                 break;
@@ -3383,10 +3433,6 @@ pub(crate) fn spawn_structured_sse_reader(driver: StructuredSseDriver) -> JoinHa
             let mut data_lines: Vec<String> = Vec::new();
             let chunked = headers_are_chunked(&headers);
             let mut chunk_remaining = 0_usize;
-            let mut pending_chunks: Vec<(u64, String, Vec<u8>)> =
-                Vec::with_capacity(STRUCTURED_TRANSCRIPT_BATCH_SIZE);
-            let mut last_chunk_flush = Instant::now();
-            let mut last_retention_prune = Instant::now();
             loop {
                 if driver.cancellation.is_canceled() {
                     break;
@@ -3436,29 +3482,7 @@ pub(crate) fn spawn_structured_sse_reader(driver: StructuredSseDriver) -> JoinHa
                     if let Some(chunk) =
                         process_sse_event(&driver, db.as_ref(), event_name.take(), &data_lines)
                     {
-                        if let Some(db) = db.as_ref() {
-                            pending_chunks.push(chunk);
-                            if pending_chunks.len() >= STRUCTURED_TRANSCRIPT_BATCH_SIZE
-                                || last_chunk_flush.elapsed()
-                                    >= STRUCTURED_TRANSCRIPT_FLUSH_INTERVAL
-                            {
-                                let enforce_retention = last_retention_prune.elapsed()
-                                    >= SESSION_TRANSCRIPT_PRUNE_INTERVAL;
-                                if flush_pending_session_chunks(
-                                    db,
-                                    &driver.session_id,
-                                    &mut pending_chunks,
-                                    enforce_retention,
-                                )
-                                .is_ok()
-                                {
-                                    last_chunk_flush = Instant::now();
-                                    if enforce_retention {
-                                        last_retention_prune = Instant::now();
-                                    }
-                                }
-                            }
-                        }
+                        transcript.push(chunk);
                     }
                     data_lines.clear();
                     continue;
@@ -3473,25 +3497,7 @@ pub(crate) fn spawn_structured_sse_reader(driver: StructuredSseDriver) -> JoinHa
                 if let Some(chunk) =
                     process_sse_event(&driver, db.as_ref(), event_name, &data_lines)
                 {
-                    pending_chunks.push(chunk);
-                }
-            }
-            if let Some(db) = db.as_ref() {
-                for attempt in 0..3 {
-                    if flush_pending_session_chunks(
-                        db,
-                        &driver.session_id,
-                        &mut pending_chunks,
-                        true,
-                    )
-                    .is_ok()
-                        || pending_chunks.is_empty()
-                    {
-                        break;
-                    }
-                    if attempt < 2 {
-                        thread::sleep(Duration::from_millis(25));
-                    }
+                    transcript.push(chunk);
                 }
             }
             emit_structured_protocol_events(
@@ -3959,7 +3965,17 @@ pub(crate) fn persist_session_stream_chunks_with_retention(
         return Ok(());
     }
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
-    let session_exists = tx.query_row(
+    persist_session_stream_chunks_in_transaction(&tx, session_id, chunks, enforce_retention)?;
+    tx.commit()
+}
+
+pub(crate) fn persist_session_stream_chunks_in_transaction(
+    db: &Connection,
+    session_id: &str,
+    chunks: &[(u64, &str, &[u8])],
+    enforce_retention: bool,
+) -> rusqlite::Result<()> {
+    let session_exists = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
         params![session_id],
         |row| row.get::<_, bool>(0),
@@ -3968,27 +3984,27 @@ pub(crate) fn persist_session_stream_chunks_with_retention(
         return Err(rusqlite::Error::QueryReturnedNoRows);
     }
     {
-        let mut insert_chunk = tx.prepare_cached(
+        let mut insert_chunk = db.prepare_cached(
             "INSERT INTO session_chunks (session_id, seq, stream, data, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
-        let mut insert_search = tx.prepare_cached(
+        let mut insert_search = db.prepare_cached(
             "INSERT OR REPLACE INTO session_chunks_fts(rowid, session_id, data)
              VALUES (?1, ?2, ?3)",
         )?;
         for (seq, stream, data) in chunks {
             insert_chunk.execute(params![session_id, *seq as i64, stream, data, now()])?;
             insert_search.execute(params![
-                tx.last_insert_rowid(),
+                db.last_insert_rowid(),
                 session_id,
                 String::from_utf8_lossy(data).as_ref()
             ])?;
         }
     }
     if enforce_retention {
-        prune_session_chunks_to_retention(&tx, session_id)?;
+        prune_session_chunks_to_retention(db, session_id)?;
     }
-    tx.commit()
+    Ok(())
 }
 
 pub(crate) fn load_agent_resume_cursor(

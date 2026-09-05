@@ -33,3 +33,14 @@ test("merges composition without replacing runtime node data", () => {
   expect(data.sessionId).toBe("session-1");
   expect(data.chatComposition).toMatchObject({ draft: "Draft", scrollTop: 420, followLatest: false });
 });
+
+
+test("queued edit normalization retains the unsent draft and validates its separate attachments", () => {
+  const result = nodeDataWithAgentComposition({}, {
+    version: 1, draft: "New prompt", attachments: [], scrollTop: 0, followLatest: true,
+    queuedEdit: { deliveryId: "pending-one", draft: "Revised queued prompt", attachments: [{ path: "edit.png", fileName: "edit.png", mimeType: "image/png" }] },
+  });
+  expect(agentCompositionFromNode(result)).toMatchObject({
+    draft: "New prompt", queuedEdit: { deliveryId: "pending-one", draft: "Revised queued prompt", attachments: [{ path: "edit.png" }] },
+  });
+});

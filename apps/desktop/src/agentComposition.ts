@@ -9,6 +9,7 @@ export interface AgentCompositionState {
   attachments: AgentImageAttachment[];
   scrollTop: number;
   followLatest: boolean;
+  queuedEdit?: { deliveryId: string; draft: string; attachments: AgentImageAttachment[] };
 }
 
 export const emptyAgentComposition = (): AgentCompositionState => ({
@@ -48,6 +49,13 @@ export function agentCompositionFromNode(data: JsonObject): AgentCompositionStat
     attachments,
     scrollTop,
     followLatest: record.followLatest !== false,
+    ...(record.queuedEdit && typeof record.queuedEdit === "object" && !Array.isArray(record.queuedEdit)
+      && typeof (record.queuedEdit as Record<string, unknown>).deliveryId === "string"
+      ? { queuedEdit: (() => {
+        const edit = record.queuedEdit as Record<string, unknown>;
+        const normalized = agentCompositionFromNode({ chatComposition: { draft: edit.draft, attachments: edit.attachments } });
+        return { deliveryId: edit.deliveryId as string, draft: normalized.draft, attachments: normalized.attachments };
+      })() } : {}),
   };
 }
 

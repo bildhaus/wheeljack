@@ -86,6 +86,7 @@ jobs:
           bun scripts/verify-desktop-version.mjs
           cd apps/desktop
           bun install --frozen-lockfile
+          bun run lint
           bun run test
           bun run build
           cd ../..

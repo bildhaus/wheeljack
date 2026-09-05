@@ -22,9 +22,11 @@ pub(crate) fn load_session_history(
              SELECT COUNT(*)
              FROM session_chunks c
              WHERE c.session_id = s.id
-           ) AS chunk_count
+           ) AS chunk_count,
+           canvas.project_id
          FROM sessions s
          LEFT JOIN nodes n ON n.id = s.node_id
+         LEFT JOIN canvases canvas ON canvas.id = n.canvas_id
          ORDER BY COALESCE(s.started_at, s.created_at) DESC
          LIMIT ?1",
     )?;
@@ -40,6 +42,7 @@ pub(crate) fn load_session_history(
             started_at: row.get(7)?,
             ended_at: row.get(8)?,
             chunk_count: row.get(9)?,
+            project_id: row.get(10)?,
             transcript_preview: String::new(),
         })
     })?;

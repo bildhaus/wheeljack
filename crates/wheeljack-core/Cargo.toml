@@ -15,6 +15,7 @@ serde_json = "1"
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting", "macros"] }
 ureq = "2"
+url = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 
 [target.'cfg(windows)'.dependencies]

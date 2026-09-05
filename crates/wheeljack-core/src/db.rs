@@ -265,7 +265,7 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
         (18, add_project_ops_state),
         (19, repair_legacy_recovery_state),
         (20, add_durable_agent_workflows),
-        (LATEST_SCHEMA_VERSION, preserve_legacy_autonomy_defaults),
+        (21, preserve_legacy_autonomy_defaults),
     ];
     for (version, migration) in migrations {
         if current_version >= *version {
@@ -276,6 +276,12 @@ pub(crate) fn run_migrations(connection: &Connection) -> Result<()> {
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
     }
+    // These defaulted columns are backward-compatible with public schema 21.
+    // Keep its version so the immutable v0.1.13 updater can safely roll back.
+    // Older builds can insert/edit payloads, so reconcile their metadata each startup.
+    let tx = connection.unchecked_transaction()?;
+    ensure_prompt_delivery_metadata(&tx)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -296,6 +302,47 @@ fn preserve_legacy_autonomy_defaults(connection: &Connection) -> Result<()> {
          WHERE key = 'agentAutonomyPolicy'
            AND json_valid(value_json)
            AND json_type(value_json) = 'object'",
+        [],
+    )?;
+    Ok(())
+}
+
+fn ensure_prompt_delivery_metadata(connection: &Connection) -> Result<()> {
+    ensure_table_column(
+        connection,
+        "session_prompt_deliveries",
+        "request_session_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_table_column(
+        connection,
+        "session_prompt_deliveries",
+        "payload_fingerprint",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT id, payload_json, payload_fingerprint FROM session_prompt_deliveries WHERE payload_json IS NOT NULL",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, payload, fingerprint) = row?;
+        let payload = serde_json::from_str::<PromptDeliveryPayload>(&payload)?;
+        let current_fingerprint = prompt_delivery_payload_fingerprint(&payload)?;
+        if fingerprint != current_fingerprint {
+            connection.execute(
+                "UPDATE session_prompt_deliveries SET payload_fingerprint = ?2 WHERE id = ?1",
+                params![id, current_fingerprint],
+            )?;
+        }
+    }
+    connection.execute(
+        "UPDATE session_prompt_deliveries SET request_session_id = session_id WHERE request_session_id = ''",
         [],
     )?;
     Ok(())

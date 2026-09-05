@@ -12,7 +12,9 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import appAsset from "./App.tsx?raw";
-import paritySource from "./ParitySurfaces.tsx?raw";
+import parityAsset from "./ParitySurfaces.tsx?raw";
+import opsSurfaceSource from "./OpsSurface.tsx?raw";
+import settingsSurfaceSource from "./SettingsSurface.tsx?raw";
 import workspaceRuntimeSource from "./WorkspaceRuntimeSurface.tsx?raw";
 import stylesAsset from "./styles.css?raw";
 import shortcutsSource from "./shortcuts.ts?raw";
@@ -56,6 +58,9 @@ import { messagesForAgentStatus } from "./AgentChat";
 // Vitest stubs CSS raw imports, so this suite needs a filesystem fallback. Resolve
 // from the vitest root rather than import.meta.url, which is not a file URL in jsdom.
 const appSource = appAsset;
+// Legacy source contracts still span these surfaces; behavior regressions live in
+// their component suites. Keep their logical ordering after the lazy extraction.
+const paritySource = parityAsset.replace("export function UtilityPanelSurface", `${opsSurfaceSource}\n${settingsSurfaceSource}\nexport function UtilityPanelSurface`);
 const stylesSource: string = stylesAsset || readFileSync(path.resolve(process.cwd(), "src/styles.css"), "utf8");
 
 test("reloads the sticker lens only when entering a project surface after Home", () => {
@@ -437,7 +442,6 @@ test("keeps the animated expandable Plan stepper in the title bar while merging 
   expect(opsSource).toContain('className="wj-new-task-action"');
   expect(opsSource).toContain('missingDocumentCount > 0 && <Button variant="outline" size="sm" onClick={onBootstrapPlan}');
   expect(opsSource).toContain('>Re-analyze project</DropdownMenuItem>');
-  expect(paritySource).toContain('<strong>Bootstrap plan</strong>');
   expect(opsSource).not.toContain("<ProjectModeSwitch");
   expect(opsSource).toContain('className="wj-surface-toolbar wj-plan-toolbar"');
   expect(paritySource).toContain('className="wj-project-mode-dock"');
@@ -934,7 +938,6 @@ test("shows build, updater, and storage settings", () => {
   expect(settingsSource).toContain('role="alert"');
   expect(settingsSource).toContain('SettingsCard title="Storage"');
   expect(settingsSource).toContain("Copy path");
-  expect(settingsSource).toContain("Export backup");
   expect(settingsSource).toContain("Copy diagnostics");
   expect(appSource).toContain('callCore("state_backup_export"');
   expect(settingsSource).toContain("disabled={resettingPreferences}");

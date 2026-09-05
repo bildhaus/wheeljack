@@ -3,6 +3,8 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/p
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
+import { preparePreviousReleaseFixture, verifyUpgradeFixture } from "./pre-release-update-fixture.mjs";
+
 const options = Object.fromEntries(process.argv.slice(2).map((value, index, values) =>
   value.startsWith("--") ? [value.slice(2), values[index + 1]] : null
 ).filter(Boolean));
@@ -11,16 +13,22 @@ if (!options.executable) throw new Error("--executable is required.");
 const sourceExecutable = resolve(options.executable);
 const sourceBytes = await readFile(sourceExecutable);
 const sourceHash = createHash("sha256").update(sourceBytes).digest("hex");
+const previousExecutable = options["previous-executable"] ? resolve(options["previous-executable"]) : sourceExecutable;
+const previousHash = createHash("sha256").update(await readFile(previousExecutable)).digest("hex");
+if (options["previous-sha256"] && options["previous-sha256"].toLowerCase() !== previousHash) throw new Error("Previous executable checksum mismatch.");
+const healthRollback = options["rollback-kind"] === "health";
 const expectRollback = options["expect-rollback"] === "true";
 const verifySignature = options["verify-signature"] === "true";
 const native = options.native === "true";
-const assetBytes = expectRollback ? Buffer.from("wheeljack updater rollback smoke") : sourceBytes;
+if (options["previous-executable"] && !native) throw new Error("--previous-executable currently requires --native true.");
+if (healthRollback && !expectRollback) throw new Error("--rollback-kind health requires --expect-rollback true.");
+const assetBytes = expectRollback && !healthRollback ? Buffer.from("wheeljack updater rollback smoke") : sourceBytes;
 const assetHash = createHash("sha256").update(assetBytes).digest("hex");
 const root = await mkdtemp(join(tmpdir(), "wheeljack-desktop-update-smoke-"));
 const profile = join(root, "profile");
 const target = join(root, "wheeljack.exe");
 await mkdir(profile);
-await copyFile(sourceExecutable, target);
+await copyFile(previousExecutable, target);
 const before = await stat(target);
 
 const assetName = "wheeljack-windows-x64-portable.exe";
@@ -60,6 +68,13 @@ const server = Bun.serve({
 });
 
 const debugPort = 9400 + Math.floor(Math.random() * 400);
+let fixtureBefore;
+if (options["previous-executable"]) {
+  const bootstrapEnv = { ...process.env, WHEELJACK_DESKTOP_DATA_DIR: profile, WHEELJACK_UI_SMOKE: "1", WHEELJACK_UPDATE_FEED_URL: `http://127.0.0.1:${server.port}/release`, WEBVIEW2_USER_DATA_FOLDER: join(profile, "webview2") };
+  delete bootstrapEnv.WHEELJACK_UPDATE_SMOKE_MODE;
+  fixtureBefore = await preparePreviousReleaseFixture(target, profile, bootstrapEnv);
+  console.error(`Previous-release fixture initialized: ${JSON.stringify(fixtureBefore)}`);
+}
 const child = Bun.spawn([
   target,
   "--ui-smoke",
@@ -197,7 +212,7 @@ async function verifyReplacementFiles() {
   const after = await stat(target);
   const afterHash = createHash("sha256").update(await readFile(target)).digest("hex");
   if (expectRollback) {
-    if (afterHash !== sourceHash) throw new Error("The updater did not restore the prior executable after replacement launch failure.");
+    if (afterHash !== previousHash) throw new Error("The updater did not restore the prior executable after replacement launch failure.");
     const installLog = await readFile(join(profile, "updates", "install.log"), "utf8");
     if (!installLog.includes("failed")) throw new Error("The rollback path did not record its failed replacement.");
   } else {
@@ -218,11 +233,31 @@ try {
     stage = "wait for the self-driven updater";
     await waitForChildExit();
     const resultPath = join(profile, "ui-smoke-result.json");
-    await waitUntil(() => stat(resultPath).then(() => true, () => false), "healthy relaunched native UI", 60_000);
+    // A replacement may write its smoke result before failing the health handshake.
+    // Require the final restored executable and a result newer than its rollback marker.
+    if (expectRollback) {
+      await waitUntil(async () => {
+        const hash = createHash("sha256").update(await readFile(target).catch(() => Buffer.alloc(0))).digest("hex");
+        return hash === previousHash && await readFile(join(profile, "updates", "install.log"), "utf8").then((log) => log.includes("failed"), () => false);
+      }, "prior executable restoration", 60_000);
+    }
+    await waitUntil(async () => {
+      const resultInfo = await stat(resultPath).catch(() => undefined);
+      if (!resultInfo) return false;
+      if (!expectRollback) return true;
+      const marker = await stat(join(profile, "updates", "install.log"));
+      return resultInfo.mtimeMs > marker.mtimeMs;
+    }, "healthy relaunched native UI", 60_000);
     const result = JSON.parse(await readFile(resultPath, "utf8"));
     if (!result.ok) throw new Error(result.message || "The relaunched native UI smoke failed.");
     const afterHash = await verifyReplacementFiles();
+    const fixtureAfter = fixtureBefore ? await verifyUpgradeFixture(profile, 21, !expectRollback || healthRollback) : undefined;
     console.log(JSON.stringify({
+      previousSha256: previousHash,
+      offeredSha256: sourceHash,
+      fixtureBefore,
+      fixtureAfter,
+      rollbackKind: expectRollback ? (healthRollback ? "health" : "invalid-executable") : undefined,
       ok: true,
       native: true,
       target: basename(target),
@@ -307,6 +342,7 @@ try {
     await waitForPageClosed();
   }
 } catch (error) {
+  if (native && !socket) await targetPage(deadline(2_000)).then(connect).catch(() => undefined);
   const diagnostic = socket?.readyState === WebSocket.OPEN
     ? await evaluate(`(() => ({
         updaterStatus: document.querySelector("[data-updater-status]")?.getAttribute("data-updater-status"),
@@ -317,6 +353,8 @@ try {
   if (diagnostic) console.error(`Updater UI diagnostic: ${JSON.stringify(diagnostic)}`);
   const updateDir = join(profile, "updates");
   const nativeDiagnostic = {
+    executableSha256: createHash("sha256").update(await readFile(target).catch(() => Buffer.alloc(0))).digest("hex"),
+    fixture: fixtureBefore ? await verifyUpgradeFixture(profile).catch((cause) => ({ error: String(cause) })) : undefined,
     updateFiles: await readdir(updateDir).catch(() => []),
     installLog: await readFile(join(updateDir, "install.log"), "utf8").catch(() => undefined),
     recoveryError: await readFile(join(updateDir, "install-error.txt"), "utf8").catch(() => undefined),
@@ -336,6 +374,13 @@ try {
     }
   }
   child.kill();
+  // A restored executable has a different PID; close only this disposable target.
+  if (process.platform === "win32") {
+    const stop = Bun.spawn(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+      "Get-CimInstance Win32_Process -Filter \"Name = 'wheeljack.exe'\" | Where-Object { $_.ExecutablePath -eq $env:WHEELJACK_SMOKE_OWNED_TARGET } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"],
+      { env: { ...process.env, WHEELJACK_SMOKE_OWNED_TARGET: target }, stdout: "ignore", stderr: "ignore" });
+    await stop.exited;
+  }
   server.stop(true);
   await waitForPageClosed().catch(() => {});
   await sleep(1000);
@@ -345,7 +390,8 @@ try {
     throw new Error(`Refusing unsafe updater smoke cleanup path: ${resolvedRoot}`);
   }
   try {
-    await rm(resolvedRoot, { recursive: true, force: true });
+    if (options["keep-profile"] === "true") console.error(`Preserved disposable updater evidence: ${resolvedRoot}`);
+    else await rm(resolvedRoot, { recursive: true, force: true });
   } catch (error) {
     console.error(`Updater smoke cleanup deferred for ${resolvedRoot}: ${error instanceof Error ? error.message : error}`);
   }

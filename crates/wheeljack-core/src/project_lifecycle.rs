@@ -154,26 +154,36 @@ pub(crate) fn lifecycle_working_dir(root: &Path, task: &LifecycleTask) -> Result
 }
 
 pub(crate) fn validate_lifecycle_preview_url(url: &str) -> Result<()> {
-    let valid = [
-        "http://127.0.0.1",
-        "http://localhost",
-        "http://[::1]",
-        "https://127.0.0.1",
-        "https://localhost",
-        "https://[::1]",
-    ]
-    .iter()
-    .any(|prefix| {
-        url.strip_prefix(prefix).is_some_and(|suffix| {
-            suffix.is_empty()
-                || suffix.starts_with(':')
-                || suffix.starts_with('/')
-                || suffix.starts_with('?')
-                || suffix.starts_with('#')
-        })
-    });
-    if !valid {
+    let parsed = url::Url::parse(url).context("invalid lifecycle preview URL")?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || url.chars().any(char::is_control)
+        || url.contains('\\')
+    {
         bail!("lifecycle preview URL must use a loopback HTTP address");
+    }
+    Ok(())
+}
+
+pub(crate) fn probe_lifecycle_preview_url(url: &str) -> Result<()> {
+    validate_lifecycle_preview_url(url)?;
+    // Probe headers only, directly on loopback. Never follow a redirect or route
+    // the request through a configured proxy, and bound an unresponsive server.
+    let response = ureq::AgentBuilder::new()
+        .try_proxy_from_env(false)
+        .redirects(0)
+        .timeout(Duration::from_millis(500))
+        .build()
+        .get(url)
+        .call()
+        .context("preview server is not ready")?;
+    if !(200..300).contains(&response.status()) {
+        bail!(
+            "preview server returned HTTP {} instead of a page",
+            response.status()
+        );
     }
     Ok(())
 }
@@ -380,6 +390,21 @@ pub(crate) fn spawn_lifecycle_waiter(
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let deadline = timeout_seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds));
+        let preview_url = if kind == "preview" {
+            open_app_connection(&db_path).ok().and_then(|db| {
+                db.query_row(
+                    "SELECT url FROM project_lifecycle_runs WHERE id = ?1",
+                    params![run_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten()
+            })
+        } else {
+            None
+        };
+        let mut next_probe = Instant::now();
+        let mut direct_exit = None;
         let (mut state, exit_code, mut error_message) = loop {
             if shutdown.load(Ordering::SeqCst) {
                 break (
@@ -388,40 +413,91 @@ pub(crate) fn spawn_lifecycle_waiter(
                     Some("wheeljack is shutting down.".to_string()),
                 );
             }
-            let status = handle
-                .child
-                .lock()
-                .ok()
-                .and_then(|mut child| child.try_wait().ok().flatten());
-            if let Some(status) = status {
+            if direct_exit.is_none() {
+                direct_exit = handle
+                    .child
+                    .lock()
+                    .ok()
+                    .and_then(|mut child| child.try_wait().ok().flatten())
+                    .map(|status| (status, Instant::now()));
+            }
+            if let Some((status, exited_at)) = direct_exit {
                 let code = status.code();
-                break if status.success() {
-                    ("completed", code, None)
-                } else {
-                    (
-                        "failed",
-                        code,
-                        Some(format!("Lifecycle process exited with {status}.")),
-                    )
-                };
+                if log_readers.iter().all(JoinHandle::is_finished) {
+                    break if status.success() {
+                        ("completed", code, None)
+                    } else {
+                        (
+                            "failed",
+                            code,
+                            Some(format!("Lifecycle process exited with {status}.")),
+                        )
+                    };
+                }
+                // Continue enforcing the task timeout while descendants retain
+                // the output pipes. Tasks without a timeout still get a bounded
+                // drain after their launcher exits.
+                if deadline.is_none() && exited_at.elapsed() >= Duration::from_secs(2) {
+                    break ("failed", code, Some("Lifecycle launcher exited while child processes still held its output pipes.".to_string()));
+                }
             }
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                if let Ok(mut child) = handle.child.lock() {
-                    let _ = kill_structured_process(&mut child, &handle.process_tree);
-                }
                 break (
                     "timed_out",
                     None,
                     Some("Lifecycle process exceeded its configured timeout.".to_string()),
                 );
             }
+            if direct_exit.is_none() && Instant::now() >= next_probe {
+                if let Some(url) = preview_url.as_deref() {
+                    let result = probe_lifecycle_preview_url(url);
+                    let (state, error) = match result {
+                        Ok(()) => ("ready", None),
+                        Err(error) => ("running", Some(format!("Waiting for preview: {error:#}"))),
+                    };
+                    if let Ok(db) = open_app_connection(&db_path) {
+                        let changed = db.execute(
+                            "UPDATE project_lifecycle_runs SET state = ?2, error_message = ?3, updated_at = ?4
+                             WHERE id = ?1 AND state IN ('running', 'ready') AND (state != ?2 OR error_message IS NOT ?3)",
+                            params![run_id, state, error, now()],
+                        ).unwrap_or(0);
+                        if changed > 0 {
+                            if let Ok(runs) = load_active_lifecycle_runs(&db, &project_id) {
+                                if let Some(run) = runs.into_iter().find(|run| run.id == run_id) {
+                                    events.emit("lifecycle:state", &json!(run));
+                                }
+                            }
+                        }
+                    }
+                }
+                next_probe = Instant::now() + Duration::from_millis(500);
+            }
             thread::sleep(Duration::from_millis(50));
         };
+        if let Ok(mut child) = handle.child.lock() {
+            if let Err(error) = kill_structured_process(&mut child, &handle.process_tree) {
+                state = "failed";
+                error_message = Some(format!("Could not stop lifecycle process tree: {error:#}"));
+            }
+        }
         // A terminal run state is the durable completion boundary. Drain both
         // output pipes first so callers that observe completion can also read
         // every log chunk produced by the process.
+        let drain_deadline = Instant::now() + Duration::from_secs(2);
+        while log_readers.iter().any(|reader| !reader.is_finished())
+            && Instant::now() < drain_deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
         for reader in log_readers {
-            let _ = reader.join();
+            if reader.is_finished() {
+                let _ = reader.join();
+            } else {
+                error_message = Some("Lifecycle output did not close after its process tree was stopped; trailing logs may be incomplete.".to_string());
+                if state == "completed" {
+                    state = "failed";
+                }
+            }
         }
         if let Ok(mut processes) = processes.lock() {
             processes.remove(&run_id);

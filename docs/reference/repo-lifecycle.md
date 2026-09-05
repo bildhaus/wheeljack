@@ -4,6 +4,10 @@ description: Define reviewable setup and local-preview commands for a wheeljack 
 editUrl: https://github.com/bildhaus/wheeljack/edit/main/docs/reference/repo-lifecycle.md
 ---
 
+:::note
+The workflow improvements described here apply to wheeljack 0.1.14 and later.
+:::
+
 A project may define `.wheeljack/lifecycle.json` to make its setup and local
 preview workflow available in Browser Preview panes. Commands run directly as
 argument arrays; wheeljack does not pass them through a shell.
@@ -40,6 +44,12 @@ The Rust core owns the child process tree, streams stdout and stderr into a
 bounded local log, records run state in SQLite, and terminates active lifecycle
 processes during shutdown. Runs that were active during an unclean stop are
 marked interrupted on the next launch rather than presented as live.
+
+Preview panes wait for a successful HTTP response before opening a newly started
+server. The core reports readiness separately from process liveness and probes only
+the configured loopback address, without following redirects or using a proxy.
+Use **Reload preview** to retry the current URL. Timeout and cancellation remain
+active while descendants hold output pipes after the launcher exits.
 
 Only one active run of each kind is allowed per project. Browser panes recover
 the current durable run after remounting instead of starting a duplicate. An

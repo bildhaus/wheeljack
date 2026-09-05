@@ -23,14 +23,16 @@ fn normalized_existing_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn collect_json_paths(value: &Value, attachment_dir: &Path, references: &mut HashSet<PathBuf>) {
+fn collect_json_paths(value: &Value, attachment_dir: &Path, references: &mut HashSet<String>) {
     match value {
         Value::String(value) => {
             let path = PathBuf::from(value);
             if path.is_file() {
-                let path = normalized_existing_path(&path);
-                if path.parent() == Some(attachment_dir) {
-                    references.insert(path);
+                let canonical = normalized_existing_path(&path);
+                if canonical.parent() == Some(attachment_dir) {
+                    // Backups must preserve the spelling stored in the document,
+                    // including aliases such as macOS /var -> /private/var.
+                    references.insert(value.clone());
                 }
             }
         }
@@ -48,11 +50,7 @@ fn collect_json_paths(value: &Value, attachment_dir: &Path, references: &mut Has
     }
 }
 
-fn collect_json_document(
-    document: &[u8],
-    attachment_dir: &Path,
-    references: &mut HashSet<PathBuf>,
-) {
+fn collect_json_document(document: &[u8], attachment_dir: &Path, references: &mut HashSet<String>) {
     if let Ok(value) = serde_json::from_slice::<Value>(document) {
         collect_json_paths(&value, attachment_dir, references);
         return;
@@ -65,7 +63,10 @@ fn collect_json_document(
     }
 }
 
-fn referenced_attachments(db: &Connection, app_data_dir: &Path) -> Result<HashSet<PathBuf>> {
+pub(crate) fn referenced_attachments(
+    db: &Connection,
+    app_data_dir: &Path,
+) -> Result<HashSet<String>> {
     let attachment_dir = normalized_existing_path(&app_data_dir.join("attachments"));
     let mut references = HashSet::new();
 
@@ -115,7 +116,10 @@ fn attachment_storage_status(
         return Ok(AttachmentStorageStatus::default());
     }
     let attachment_dir = normalized_existing_path(&attachment_dir);
-    let references = referenced_attachments(db, app_data_dir)?;
+    let references = referenced_attachments(db, app_data_dir)?
+        .into_iter()
+        .map(|path| normalized_existing_path(Path::new(&path)))
+        .collect::<HashSet<_>>();
     let mut status = AttachmentStorageStatus::default();
 
     for entry in fs::read_dir(&attachment_dir).context("read image attachment directory")? {

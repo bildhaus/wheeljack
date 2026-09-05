@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { describe, expect, test, vi } from "vitest";
-import { FloorSurface } from "./ParitySurfaces";
+import { FloorSurface } from "./OpsSurface";
 import { deriveOpsFloorModel } from "./opsFloor";
 import type { OpsRunGraphModel } from "./opsRunGraph";
 import type { ActivityEvent, CanvasNode, OpsCard, OpsState, PaneRuntime } from "./types";

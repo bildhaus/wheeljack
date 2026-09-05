@@ -3,6 +3,85 @@ use super::*;
 pub(crate) const MAX_PENDING_PROMPTS_PER_SESSION: i64 = 20;
 pub(crate) const MAX_PENDING_PROMPTS_GLOBAL: i64 = 100;
 
+pub(crate) fn prompt_delivery_payload_fingerprint(
+    payload: &PromptDeliveryPayload,
+) -> Result<String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(payload)?)
+    ))
+}
+
+/// Keep minimal tombstones for idempotency; completed prompt bodies expire after a week.
+pub(crate) fn prune_completed_prompt_payloads(db: &Connection, clear_all: bool) -> Result<usize> {
+    Ok(db.execute(
+        "UPDATE session_prompt_deliveries SET payload_json = NULL
+         WHERE state IN ('delivered', 'canceled') AND payload_json IS NOT NULL
+           AND (?1 OR julianday(updated_at) <= julianday('now', '-7 days'))",
+        params![clear_all],
+    )?)
+}
+
+pub(crate) fn has_dispatchable_prompt(db: &Connection, session_id: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT COALESCE((SELECT state = 'queued' FROM session_prompt_deliveries
+         WHERE session_id = ?1 AND state NOT IN ('delivered', 'canceled')
+         ORDER BY seq LIMIT 1), 0)",
+        params![session_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// A resume changes runtime ownership, never the original idempotency identity.
+pub(crate) fn rebind_prompt_deliveries(
+    db: &Connection,
+    prior_session_id: &str,
+    session_id: &str,
+) -> Result<Vec<PromptDeliveryDto>> {
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let same_conversation: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions prior JOIN sessions resumed
+         ON prior.node_id = resumed.node_id AND prior.adapter_id = resumed.adapter_id
+            AND prior.intent = resumed.intent
+         WHERE prior.id = ?1 AND resumed.id = ?2)",
+        params![prior_session_id, session_id],
+        |row| row.get(0),
+    )?;
+    if !same_conversation {
+        bail!("resumed prompt queue must belong to the same agent pane and intent");
+    }
+    let deliveries = list_prompt_deliveries(&tx, prior_session_id)?;
+    let next_seq: u64 = tx.query_row(
+        "SELECT COALESCE(MAX(seq), 0) FROM session_prompt_deliveries WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    for (index, delivery) in deliveries.iter().enumerate() {
+        let state = match delivery.state.as_str() {
+            "queued" | "blocked" => "queued",
+            "dispatching" => "indeterminate",
+            state => state,
+        };
+        tx.execute(
+            "UPDATE session_prompt_deliveries SET session_id = ?2, seq = ?3, state = ?4,
+             dispatch_token = NULL, updated_at = ?5,
+             error_code = CASE WHEN ?4 = 'queued' THEN NULL ELSE error_code END,
+             error_message = CASE WHEN ?4 = 'queued' THEN NULL ELSE error_message END
+             WHERE id = ?1",
+            params![
+                delivery.id,
+                session_id,
+                next_seq + index as u64 + 1,
+                state,
+                now()
+            ],
+        )?;
+    }
+    let rebound = list_prompt_deliveries(&tx, session_id)?;
+    tx.commit()?;
+    Ok(rebound)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PromptDeliveryPayload {
@@ -63,14 +142,14 @@ pub(crate) fn submit_prompt_delivery(
     validate_delivery_request(req)?;
     let payload_json = serde_json::to_string(&req.payload)?;
     if let Some(existing) = load_prompt_delivery(db, &req.client_prompt_id)? {
-        let existing_payload = existing
-            .payload
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        if existing.session_id != req.session_id
+        let (request_session_id, fingerprint): (String, String) = db.query_row(
+            "SELECT request_session_id, payload_fingerprint FROM session_prompt_deliveries WHERE id = ?1",
+            params![req.client_prompt_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if (existing.session_id != req.session_id && request_session_id != req.session_id)
             || existing.mode != req.mode
-            || existing_payload.as_deref() != Some(payload_json.as_str())
+            || fingerprint != prompt_delivery_payload_fingerprint(&req.payload)?
         {
             bail!("prompt delivery id is already bound to different content");
         }
@@ -112,8 +191,8 @@ pub(crate) fn submit_prompt_delivery(
     db.execute(
         "INSERT INTO session_prompt_deliveries
          (id, session_id, seq, mode, state, payload_json, revision, attempts,
-          created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'queued', ?5, 1, 0, ?6, ?6)",
+          created_at, updated_at, request_session_id, payload_fingerprint)
+         VALUES (?1, ?2, ?3, ?4, 'queued', ?5, 1, 0, ?6, ?6, ?2, ?7)",
         params![
             req.client_prompt_id,
             req.session_id,
@@ -121,6 +200,7 @@ pub(crate) fn submit_prompt_delivery(
             req.mode,
             payload_json,
             timestamp,
+            prompt_delivery_payload_fingerprint(&req.payload)?,
         ],
     )?;
     load_prompt_delivery(db, &req.client_prompt_id)?
@@ -207,6 +287,30 @@ pub(crate) fn complete_prompt_delivery(db: &Connection, delivery_id: &str) -> Re
     Ok(())
 }
 
+pub(crate) fn persist_accepted_prompt_delivery(
+    db: &Connection,
+    delivery: &PromptDeliveryDto,
+    history_seq: u64,
+    history_line: &[u8],
+) -> Result<()> {
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let dispatching: bool = tx.query_row(
+        "SELECT state = 'dispatching' AND session_id = ?2 FROM session_prompt_deliveries WHERE id = ?1",
+        params![delivery.id, delivery.session_id], |row| row.get(0),
+    ).optional()?.unwrap_or(false);
+    if dispatching {
+        persist_session_stream_chunks_in_transaction(
+            &tx,
+            &delivery.session_id,
+            &[(history_seq, "agent-input", history_line)],
+            true,
+        )?;
+        complete_prompt_delivery(&tx, &delivery.id)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub(crate) fn settle_prompt_delivery_error(
     db: &Connection,
     delivery_id: &str,
@@ -224,6 +328,25 @@ pub(crate) fn settle_prompt_delivery_error(
          WHERE id = ?1",
         params![delivery_id, state, code, message, now()],
     )?;
+    Ok(())
+}
+
+pub(crate) fn settle_dispatched_prompt_error(
+    db: &Connection,
+    delivery: &PromptDeliveryDto,
+    state: &str,
+    code: &str,
+    message: &str,
+) -> Result<()> {
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let still_owned: bool = tx.query_row(
+        "SELECT session_id = ?2 AND state = 'dispatching' FROM session_prompt_deliveries WHERE id = ?1",
+        params![delivery.id, delivery.session_id], |row| row.get(0),
+    ).optional()?.unwrap_or(false);
+    if still_owned {
+        settle_prompt_delivery_error(&tx, &delivery.id, state, code, message)?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -253,9 +376,15 @@ pub(crate) fn edit_prompt_delivery(
     let changed = db.execute(
         "UPDATE session_prompt_deliveries
          SET payload_json = ?2, state = 'queued', revision = revision + 1,
-             error_code = NULL, error_message = NULL, dispatch_token = NULL, updated_at = ?3
+             error_code = NULL, error_message = NULL, dispatch_token = NULL, updated_at = ?3,
+             payload_fingerprint = ?4
          WHERE id = ?1 AND state IN ('queued', 'failed', 'indeterminate', 'blocked')",
-        params![delivery_id, serde_json::to_string(payload)?, now()],
+        params![
+            delivery_id,
+            serde_json::to_string(payload)?,
+            now(),
+            prompt_delivery_payload_fingerprint(payload)?
+        ],
     )?;
     if changed != 1 {
         bail!("prompt delivery cannot be edited in its current state");
