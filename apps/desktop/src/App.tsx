@@ -132,6 +132,7 @@ import { AgentAvatar } from "./AgentAvatar";
 import {
   botInput,
   botProfileForLaunch,
+  effectivePaneAgentProfile,
   botSnapshot,
   botSnapshotFromDraft,
   botSnapshotFromNode,
@@ -149,6 +150,7 @@ import { DotMatrixLoader } from "./DotMatrixLoader";
 import { createDiagnosticsReport } from "./diagnostics";
 import type { UsageSessionRow } from "./usage";
 import { opsActiveFileConflicts, opsAutomaticFileConflictInstructions, opsCanCompleteWithOverride, opsCardParticipantIds, opsCurrentCardForAgent, opsDecompositionHasCycle, opsDispatchableDecompositionKeys, opsFileConflictDirectiveIsCurrent, opsResolveFileConflict, opsStatusAttentionReason, opsVerificationApproval, opsVerificationContractIssues } from "./opsPresence";
+import { addDocumentStarterTasks } from "./opsStarterTasks";
 import { taskWorktreeCleanupPrompt } from "./taskWorktrees";
 import { createStickerLensScene, StickerLensBackground, type StickerLensScene } from "./StickerLensBackground";
 import {
@@ -158,12 +160,10 @@ import {
   HomeSurface,
   normalizeFloorRailWidth,
   OnboardingSurface,
-  OpsSurface,
   ProjectEmptyState,
   ProjectIdentitySheet,
   ProjectSidebar,
   ReviewDrawerSurface,
-  SettingsSurface,
   TitleBar,
   TranscriptDrawerSurface,
   UtilityPanelSurface,
@@ -423,6 +423,8 @@ const AGENT_ADAPTER_STORAGE_KEY = "wheeljack.agentAdapter";
 const SplitView = lazy(async () => ({
   default: (await import("./WorkspaceRuntimeSurface")).SplitView,
 }));
+const OpsSurface = lazy(async () => ({ default: (await import("./OpsSurface")).OpsSurface }));
+const SettingsSurface = lazy(async () => ({ default: (await import("./SettingsSurface")).SettingsSurface }));
 const UsageSurface = lazy(async () => ({
   default: (await import("./UsageSurface")).UsageSurface,
 }));
@@ -1007,6 +1009,13 @@ export function App() {
         setUsageRefreshVersion((version) => version + 1);
       } else if (envelope.event === "usage:error") {
         setError(`Usage accounting failed: ${stringValue(envelope.payload, "message") ?? "unknown error"}`);
+      } else if (envelope.event === "agent:prompt-delivery-error" || envelope.event === "history:persistence-error") {
+        const detail = stringValue(envelope.payload, "message") ?? "Local session history could not be saved.";
+        const sessionId = stringValue(envelope.payload, "sessionId");
+        setError(detail);
+        setRuntimes((current) => Object.fromEntries(Object.entries(current).map(([id, runtime]) => [
+          id, runtime.sessionId === sessionId ? { ...runtime, statusSummary: detail } : runtime,
+        ])));
       } else if (envelope.event === "agent:prompt-delivery") {
         const delivery = envelope.payload as unknown as PromptDelivery;
         if (!delivery.sessionId || !delivery.id) return;
@@ -2728,7 +2737,7 @@ export function App() {
     });
     try {
       const baseProfile = agentProfiles.find((candidate) => candidate.adapterId === runtime.adapterId);
-      const profile = botProfileForLaunch(baseProfile, snapshot);
+      const profile = effectivePaneAgentProfile(baseProfile, agentNode?.data ?? {});
       const promptPayload = {
         sessionId: runtime.sessionId,
         nodeId: runtime.nodeId,
@@ -3018,11 +3027,11 @@ export function App() {
     const node = nodes.find((candidate) => candidate.id === runtime.nodeId);
     const snapshot = node ? botSnapshotFromNode(node.data) : undefined;
     const baseProfile = agentProfiles.find((candidate) => candidate.adapterId === runtime.adapterId);
-    const profile = botProfileForLaunch(baseProfile, snapshot);
+    const profile = effectivePaneAgentProfile(baseProfile, node?.data ?? {});
     const intent = runtime.intent ?? "code";
     const launchConfig = agentLaunchConfig(profile, project.agentAccess, intent);
     let adapter = adapters.find((candidate) => candidate.id === runtime.adapterId);
-    if (adapter && snapshot) {
+    if (adapter && (snapshot || node?.data.agentProfile)) {
       const probe = await callCore<AdapterProbe>("adapter_probe", {
         adapterId: runtime.adapterId,
         ...launchConfig,
@@ -3128,9 +3137,21 @@ export function App() {
             : "Session resumed.",
           structuredLines: [],
           messages: nextMessages,
+          promptDeliveries: undefined,
           turnStartLine: submittedPrompt || images.length ? 0 : undefined,
         },
       }));
+      if (runtime.structured) {
+        const resumedSessionId = spawned.id;
+        try {
+          const deliveries = await callCore<PromptDelivery[]>("session_prompt_list", { sessionId: resumedSessionId });
+          setRuntimes((current) => current[runtime.nodeId]?.sessionId === resumedSessionId
+            ? { ...current, [runtime.nodeId]: { ...current[runtime.nodeId], promptDeliveries: deliveries } }
+            : current);
+        } catch (cause) {
+          setError(`Session resumed, but its prompt queue could not be refreshed: ${message(cause)}`);
+        }
+      }
       return true;
     } catch (cause) {
       if (spawned) void callCore("session_kill", { sessionId: spawned.id, terminationReason: "canceled" }).catch(() => undefined);
@@ -3150,15 +3171,17 @@ export function App() {
   };
 
   const savePaneData = async (node: CanvasNode, data: JsonObject) => {
-    if (!canvas) return;
+    if (!canvas) return false;
     try {
       const updated = await callCore<CanvasNode>("canvas_upsert_node", {
         canvasId: canvas.id,
         node: { ...node, data, updatedAt: new Date().toISOString() },
       });
       setNodes((current) => current.map((item) => item.id === updated.id ? updated : item));
+      return true;
     } catch (cause) {
       setError(`Could not save ${node.title}: ${message(cause)}`);
+      return false;
     }
   };
 
@@ -4945,28 +4968,7 @@ export function App() {
   };
 
   const createDocumentTasks = (kind: "prd" | "tdd") => {
-    const additions: OpsCard[] = (kind === "prd"
-      ? [
-          ["Validate primary workflow", "Exercise the end-to-end user journey against acceptance criteria."],
-          ["Review edge states", "Verify empty, loading, denied, failed, and recovery behavior."],
-        ]
-      : [
-          ["Implement architecture slice", "Build the smallest cross-boundary implementation described by the TDD."],
-          ["Run acceptance validation", "Verify runtime behavior, data safety, and packaged execution."],
-        ]).map(([title, detail]) => ({
-          id: crypto.randomUUID().replaceAll("-", ""),
-          columnId: columnIdForRole(opsStateRef.current, "queued"),
-          title,
-          detail,
-          assignee: "Unassigned",
-          priority: "normal",
-          assigneeIds: [],
-          agentStatuses: {},
-          expectedFiles: [],
-          lastNote: "",
-          reviewPolicy: "agent",
-        }));
-    changeOps((current) => ({ ...current, cards: [...current.cards, ...additions] }));
+    changeOps((current) => addDocumentStarterTasks(current, kind));
     setOpsPage("board");
   };
 
@@ -7183,6 +7185,7 @@ export function App() {
           )}
           {surface === "home" && !onboardingVisible && (
             <HomeSurface
+              currentProject={project}
               projects={projects}
               sessions={sessions}
               activity={activity}
@@ -7483,7 +7486,15 @@ export function App() {
                       onRespond={respondToAgent}
                       onCancel={cancelAgentTurn}
                       onAgentAccess={saveProjectAgentAccess}
-                      onAgentProfile={updateAgentProfile}
+                      onAgentProfile={async (nodeId, patch) => {
+                        const node = nodesRef.current.find((item) => item.id === nodeId);
+                        if (!node) return;
+                        const base = agentProfilesRef.current.find((item) => item.adapterId === stringValue(node.data, "adapterId"));
+                        const effective = effectivePaneAgentProfile(base, node.data);
+                        if (!effective || !await savePaneData(node, { ...node.data, agentProfile: validAgentProfilePatch(effective, patch) as unknown as JsonObject })) {
+                          throw new Error("The model selection could not be saved. Try again.");
+                        }
+                      }}
                       onRepair={(runtime) => repairAdapter(runtime.adapterId)}
                       onResume={(runtime) => void resumeAgent(runtime)}
                       onPrepareHandoff={prepareAgentHandoff}
@@ -7557,7 +7568,7 @@ export function App() {
               </div>
             </main>
           ) : (
-            <OpsSurface
+            <Suspense fallback={<div role="status">Loading Plan…</div>}><OpsSurface
               page={opsPage}
               state={opsState}
               activity={activity}
@@ -7633,10 +7644,10 @@ export function App() {
                 });
               }}
               onStickerLensHost={setOpsStickerLensHost}
-            />
+            /></Suspense>
           ))}
           {surface === "settings" && (
-            <SettingsSurface
+            <Suspense fallback={<div role="status">Loading settings…</div>}><SettingsSurface
               page={settingsPage}
               preferences={preferences}
               shortcuts={shortcuts}
@@ -7685,7 +7696,7 @@ export function App() {
               onRepair={() => repairAdapter()}
               updater={updater}
               onInstallUpdate={() => void installReadyUpdate()}
-            />
+            /></Suspense>
           )}
         </section>
         <UtilityPanelSurface

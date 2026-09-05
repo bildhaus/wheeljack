@@ -73,7 +73,11 @@ try {
     $appProcess = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
 
     $bunShim = (Get-Command bun -ErrorAction Stop).Source
-    $bun = Join-Path (Split-Path $bunShim -Parent) 'node_modules\bun\bin\bun.exe'
+    $bun = if ([IO.Path]::GetExtension($bunShim) -eq '.exe') {
+        $bunShim
+    } else {
+        Join-Path (Split-Path $bunShim -Parent) 'node_modules\bun\bin\bun.exe'
+    }
     if (-not (Test-Path -LiteralPath $bun -PathType Leaf)) {
         throw "Bun executable was not found behind the command shim: $bun"
     }

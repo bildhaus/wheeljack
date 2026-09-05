@@ -689,17 +689,13 @@ if (!samePath(toolbarFixtureSession.cwd, openedProject.path)) {
 }
 await evaluate(`document.querySelector('button.wj-nav-item[aria-label="Home"]:not(:disabled)')?.click()`);
 await waitFor(`Boolean(document.querySelector('button[aria-label^="More actions for"]'))`, "project overflow action");
-await waitFor(`["Open live sessions","Open inbox","Open changed files"].every(label=>document.querySelector('button[aria-label$="'+label+'"]'))`, "interactive Home metrics");
+await waitFor(`(()=>{const metrics=document.querySelector('[aria-label="Workspace metrics"]');return metrics?.textContent.includes("Live sessions")&&metrics.textContent.includes("Dirty projects")&&!metrics.textContent.includes("Changed files")&&Boolean(metrics.querySelector('button[aria-label$="Open inbox"]'))})()`, "workspace-scoped Home metrics");
 await evaluate(`document.querySelector('button[aria-label$="Open inbox"]')?.click()`);
 await waitFor(`[...document.querySelectorAll('[role="tab"]')].some(node=>node.textContent?.trim().startsWith("Inbox") && node.getAttribute("aria-selected")==="true")`, "Home inbox metric");
 await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
 await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
-await evaluate(`document.querySelector('button[aria-label$="Open changed files"]')?.click()`);
-await waitFor(`[...document.querySelectorAll('[role="tab"]')].some(node=>node.textContent?.trim()==="Git" && node.getAttribute("aria-selected")==="true")`, "Home changed-files metric");
-await cdp("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
-await cdp("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
-await evaluate(`document.querySelector('button[aria-label$="Open live sessions"]')?.click()`);
-await waitFor(`Boolean(document.querySelector('textarea[aria-label="Agent prompt"]'))`, "Home live-sessions metric");
+await evaluate(`document.querySelector('.wj-session-list button')?.click()`);
+await waitFor(`Boolean(document.querySelector('textarea[aria-label="Agent prompt"]'))`, "Home explicit live-session navigation");
 await evaluate(`document.querySelector('button.wj-nav-item[aria-label="Home"]:not(:disabled)')?.click()`);
 await waitFor(`Boolean(document.querySelector('button[aria-label^="More actions for"]'))`, "Home after metric navigation");
 await clickElement('button[aria-label^="More actions for"]');
@@ -708,7 +704,7 @@ await evaluate(`(()=>{const item=[...document.querySelectorAll('[role="menuitem"
 await waitFor(`(()=>{const dialog=document.querySelector('[role="alertdialog"]');if(!dialog||!dialog.textContent?.includes("has active sessions"))return false;const remove=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Remove from wheeljack");const erase=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Delete from disk");return remove?.disabled===true&&!erase})()`, "active-session project removal guard");
 await evaluate(`(()=>{const dialog=document.querySelector('[role="alertdialog"]');const cancel=[...dialog.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Cancel");cancel?.click();return Boolean(cancel)})()`);
 await waitFor(`!document.querySelector('[role="alertdialog"]')`, "closed project removal dialog");
-await evaluate(`document.querySelector('button[aria-label$="Open live sessions"]')?.click()`);
+await evaluate(`document.querySelector('.wj-session-list button')?.click()`);
 await waitFor(`Boolean(document.querySelector('textarea[aria-label="Agent prompt"]:not(:disabled)'))`, "structured-agent pane after project removal guard");
 await evaluate(`(()=>{const input=document.querySelector('textarea[aria-label="Agent prompt"]');input?.focus();return Boolean(input)})()`);
 await cdp("Input.insertText", { text: structuredPrompt });
@@ -1070,8 +1066,8 @@ await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find
 await waitFor(`[...document.querySelectorAll('[role="alertdialog"] button')].some(node=>node.textContent?.trim().startsWith("Accept & write"))`, "PRD write preview");
 await evaluate(`(()=>{const button=[...document.querySelectorAll('[role="alertdialog"] button')].find(node=>node.textContent?.trim().startsWith("Accept & write"));button?.click();return Boolean(button)})()`);
 await waitFor(`document.querySelector('textarea[aria-label="PRD document editor"]')?.value.includes("## Acceptance criteria")`, "generated PRD");
-await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Create tasks" && !node.disabled)`, "enabled PRD task creation");
-await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Create tasks" && !node.disabled);button?.click();return Boolean(button)})()`);
+await waitFor(`[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==="Add starter tasks" && !node.disabled)`, "enabled PRD task creation");
+await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Add starter tasks" && !node.disabled);button?.click();return Boolean(button)})()`);
 await selectProjectView("Plan");
 await waitFor(`document.querySelectorAll(".wj-task-card").length===3`, "PRD-derived Ops tasks");
 await waitFor(`Boolean([...document.querySelectorAll('button[aria-label^="Task actions:"]:not(:disabled)')].find(node=>node.getAttribute("aria-label")!==${JSON.stringify(`Task actions: ${editedOpsTaskTitle}`)}))`, "enabled derived-task actions");
@@ -1268,9 +1264,15 @@ await clickTextElement(".wj-settings-tabs button", "Agents");
 await waitFor(`[...document.querySelectorAll("h1")].some(node=>node.textContent?.trim()==="Agents") && Boolean(document.querySelector('[aria-label="Coding agent"]'))`, "agent settings");
 await waitFor(`[...document.querySelectorAll(".wj-settings-tabs button")].some(node=>node.textContent?.trim().startsWith("Application"))`, "Application settings tab");
 await clickTextElement(".wj-settings-tabs button", "Application");
-await waitFor(`[...document.querySelectorAll("h1")].some(node=>node.textContent?.trim()==="Application") && ["Export backup","Copy diagnostics","Reset all"].every(label=>[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==label))`, "application settings");
+await waitFor(`[...document.querySelectorAll("h1")].some(node=>node.textContent?.trim()==="Application") && ["Export database only","Export complete backup","Restore backup","Copy diagnostics","Reset all"].every(label=>[...document.querySelectorAll("button")].some(node=>node.textContent?.trim()==label))`, "application settings");
+const completeBackupPath = join(expectedDataDir, "smoke-complete-backup");
+const exportedBackup = await coreCall("state_bundle_export", { path: completeBackupPath });
+const checkedBackup = await coreCall("state_bundle_preview", { path: completeBackupPath });
+if (checkedBackup.fingerprint !== exportedBackup.fingerprint || checkedBackup.projectCount < 1 || checkedBackup.sessionCount < 1) {
+  throw new Error("Native complete backup did not preserve the exercised workspace.");
+}
 await evaluate(`(()=>{const button=[...document.querySelectorAll("button")].find(node=>node.textContent?.trim()==="Back");button?.click();return Boolean(button)})()`);
-await evaluate(`document.querySelector('button[aria-label$="Open live sessions"]')?.click()`);
+await evaluate(`document.querySelector('.wj-session-list button')?.click()`);
 await waitFor("Boolean(document.querySelector('.wj-terminal-page'))", "terminal surface");
 const priorPaneCount = await evaluate("document.querySelectorAll('[data-pane-id]').length");
 await waitFor(`Boolean(document.querySelector('button[aria-label="New pane"]:not(:disabled)'))`, "enabled pane action");

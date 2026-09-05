@@ -4,6 +4,10 @@ description: Configure wheeljack appearance, workspace behavior, keyboard shortc
 editUrl: https://github.com/bildhaus/wheeljack/edit/main/docs/guides/settings-and-shortcuts.md
 ---
 
+:::note
+The workflow improvements described here apply to wheeljack 0.1.14 and later.
+:::
+
 Settings are stored locally and apply across wheeljack unless a control is
 explicitly project-specific.
 
@@ -40,12 +44,24 @@ rejects conflicts instead of assigning one key sequence to two actions.
 
 ## Back up local state
 
-Use the Application storage controls to export a consistent SQLite backup. The
-core captures live write-ahead-log state and checks backup integrity before
-reporting success.
+Use **Application → Storage → Export complete backup** to save a folder containing
+a consistent SQLite snapshot, referenced image attachments, and a checksum manifest.
+Keep the whole folder together. **Export database only** saves just SQLite; it
+does not include the image files. Both capture current write-ahead-log state.
 
 Store the backup outside wheeljack's live app-data directory. Existing files are
-not overwritten.
+not overwritten. Project folders and the agent CLIs' credentials are separate.
+
+Choose **Restore backup**, select the complete backup folder, and review its date,
+project/session counts, and attachments. Confirm **Restore on next launch**, then
+quit and reopen wheeljack. Restore replaces workspace state and settings, without
+changing project files. A complete pre-restore recovery backup is saved under the
+app-data folder before replacement. Attachment paths are relocated automatically;
+project folders must still exist at their saved locations.
+
+Checksums, SQLite integrity, and schema compatibility are checked before staging
+and again at startup. If staging changes or restore cannot finish, the current
+profile remains available and Storage shows the error.
 
 ## Reset settings
 

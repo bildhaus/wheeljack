@@ -88,6 +88,7 @@ export interface Canvas {
 
 export interface Session {
   id: string;
+  projectId?: string;
   nodeId: string;
   adapterId: string;
   cwd: string;

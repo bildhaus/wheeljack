@@ -4,6 +4,10 @@ description: Run persistent coding-agent chats with models, files, approvals, to
 editUrl: https://github.com/bildhaus/wheeljack/edit/main/docs/guides/structured-agents.md
 ---
 
+:::note
+The workflow improvements described here apply to wheeljack 0.1.14 and later.
+:::
+
 Structured agent panes turn a supported CLI protocol into a persistent chat
 surface. The CLI remains the execution engine and provider boundary; wheeljack
 normalizes presentation, lifecycle, and local persistence.
@@ -20,6 +24,10 @@ normalizes presentation, lifecycle, and local persistence.
 Model lists come from the adapter rather than a hard-coded cross-provider
 catalog. Availability can therefore change with the installed CLI, account,
 provider, and adapter version.
+
+The composer displays the effective model and effort for that pane, including
+saved Bot overrides. Changes there apply to the pane; change adapter defaults in
+Settings when you want future panes to inherit a different configuration.
 
 **Code** sessions use the project's configured agent access. **Ask** sessions
 are strictly read-only and are only available when the adapter exposes an
@@ -59,6 +67,12 @@ Choose Retry only after checking the conversation for a duplicate.
 Queued edits preserve the prompt's images and launch policy and replace the
 same durable delivery record. Canceled and indeterminate prompts remain visibly
 marked in the conversation so the UI does not imply confirmed delivery.
+
+Editing a queued prompt preserves the separate new-message draft and its images.
+The edit target survives navigation. Resuming an interrupted session carries its
+pending queue forward in order; uncertain deliveries still require an explicit
+decision. A local history-write failure after acceptance does not resend provider
+work automatically.
 
 ## Stop, resume, and repair
 

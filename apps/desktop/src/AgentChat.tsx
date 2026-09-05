@@ -279,7 +279,7 @@ function AgentInteractionCard({
   />;
 }
 
-function AgentModelPicker({ profile, cwd, onProfile }: { profile: AgentProfile; cwd?: string; onProfile: (patch: Partial<AgentProfile>) => void }) {
+function AgentModelPicker({ profile, cwd, onProfile }: { profile: AgentProfile; cwd?: string; onProfile: (patch: Partial<AgentProfile>) => void | Promise<void> }) {
   const modelListId = useId();
   const [open, setOpen] = useState(false);
   const [model, setModel] = useState(profile.model);
@@ -291,6 +291,7 @@ function AgentModelPicker({ profile, cwd, onProfile }: { profile: AgentProfile; 
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [applying, setApplying] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [activeModelIndex, setActiveModelIndex] = useState(-1);
   useEffect(() => {
@@ -336,10 +337,17 @@ function AgentModelPicker({ profile, cwd, onProfile }: { profile: AgentProfile; 
     if (next !== effort) setEffort(next);
     setDialPosition(Math.max(0, efforts.indexOf(next)));
   }, [effort, efforts, selected?.defaultEffort]);
-  const apply = () => {
-    if (!safeAgentToken(model, 128)) return;
-    onProfile({ model, provider, thinking: effort });
-    setOpen(false);
+  const apply = async () => {
+    if (!safeAgentToken(model, 128) || applying) return;
+    setApplying(true);
+    try {
+      await onProfile({ model, provider, thinking: effort });
+      setOpen(false);
+    } catch (cause) {
+      setLoadError(errorMessage(cause));
+    } finally {
+      setApplying(false);
+    }
   };
   const moveDial = (next: AgentProfile["thinking"]) => {
     if (next === effort) return;
@@ -378,7 +386,7 @@ function AgentModelPicker({ profile, cwd, onProfile }: { profile: AgentProfile; 
       <PopoverContent className="chat-model-popover" align="start">
         <div className="chat-model-heading">
           <ProviderMark adapterId={profile.adapterId} />
-          <div><strong>Model & reasoning</strong><small>Models available through the installed {profile.adapterId} CLI.</small></div>
+          <div><strong>Model & reasoning</strong><small>Applies to this agent’s next turn. Change defaults in Settings.</small></div>
         </div>
         <Input
           aria-label="Search agent models"
@@ -429,7 +437,7 @@ function AgentModelPicker({ profile, cwd, onProfile }: { profile: AgentProfile; 
                 aria-valuetext={effort}
                 value={[dialPosition]}
                 min={0}
-                max={Math.max(0, efforts.length - 1)}
+                max={Math.max(1, efforts.length - 1)}
                 step={0.01}
                 disabled={efforts.length < 2}
                 onValueChange={([position]) => {
@@ -447,7 +455,7 @@ function AgentModelPicker({ profile, cwd, onProfile }: { profile: AgentProfile; 
             </div>
           </div>
         </div>
-        <div className="chat-model-actions"><small>{matchingModels.length > 100 ? `Showing 100 of ${matchingModels.length}; refine the search.` : `${models.length} models available`}</small><Button type="button" size="sm" disabled={!safeAgentToken(model, 128)} onClick={apply}>Apply</Button></div>
+        <div className="chat-model-actions"><small>{matchingModels.length > 100 ? `Showing 100 of ${matchingModels.length}; refine the search.` : `${models.length} models available`}</small><Button type="button" size="sm" disabled={!safeAgentToken(model, 128) || applying} onClick={() => void apply()}>{applying ? "Saving…" : "Apply"}</Button></div>
       </PopoverContent>
     </Popover>
   );
@@ -488,14 +496,14 @@ function AgentChatComponent({
   onCancel: () => Promise<boolean>;
   onLoadOlderHistory: () => Promise<void>;
   onAgentAccess: (agentAccess: AgentAccessMode) => Promise<void>;
-  onAgentProfile: (adapterId: string, patch: Partial<AgentProfile>) => void;
+  onAgentProfile: (adapterId: string, patch: Partial<AgentProfile>) => void | Promise<void>;
   onRepair: () => void;
   onResume: () => void;
   composition?: AgentCompositionState;
   onCompositionChange?: (composition: AgentCompositionState) => void;
 }) {
-  const [prompt, setPrompt] = useState(composition.draft);
-  const [attachments, setAttachments] = useState<AgentImageAttachment[]>(composition.attachments);
+  const [prompt, setPrompt] = useState(composition.queuedEdit?.draft ?? composition.draft);
+  const [attachments, setAttachments] = useState<AgentImageAttachment[]>(composition.queuedEdit?.attachments ?? composition.attachments);
   const [attachmentError, setAttachmentError] = useState("");
   const [composerCaret, setComposerCaret] = useState(0);
   const [projectFiles, setProjectFiles] = useState<string[]>([]);
@@ -507,7 +515,7 @@ function AgentChatComponent({
   const [dismissedFileMention, setDismissedFileMention] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [editingDeliveryId, setEditingDeliveryId] = useState<string>();
+  const [editingDeliveryId, setEditingDeliveryId] = useState<string | undefined>(composition.queuedEdit?.deliveryId);
   const [deliveryPendingId, setDeliveryPendingId] = useState<string>();
   const [interactionDraft, setInteractionDraft] = useState("");
   const [visibleMessageLimit, setVisibleMessageLimit] = useState(80);
@@ -527,14 +535,20 @@ function AgentChatComponent({
     }, 180);
   }, []);
   useEffect(() => {
-    scheduleComposition({ ...compositionRef.current, draft: prompt, attachments });
-  }, [attachments, prompt, scheduleComposition]);
-  useEffect(() => {
-    if (!editingDeliveryId || runtime.promptDeliveries?.some((delivery) => delivery.id === editingDeliveryId)) return;
+    scheduleComposition(editingDeliveryId
+      ? { ...compositionRef.current, queuedEdit: { deliveryId: editingDeliveryId, draft: prompt, attachments } }
+      : { ...compositionRef.current, queuedEdit: undefined, draft: prompt, attachments });
+  }, [attachments, editingDeliveryId, prompt, scheduleComposition]);
+  const stopPromptEdit = useCallback(() => {
     setEditingDeliveryId(undefined);
-    setPrompt("");
-    setAttachments([]);
-  }, [editingDeliveryId, runtime.promptDeliveries]);
+    setPrompt(compositionRef.current.draft);
+    setAttachments(compositionRef.current.attachments);
+  }, []);
+  useEffect(() => {
+    if (!editingDeliveryId || !runtime.promptDeliveries || runtime.promptDeliveries.some((delivery) => delivery.id === editingDeliveryId)) return;
+    stopPromptEdit();
+    setAttachmentError("That queued prompt is no longer available to edit. Your unsent draft has been restored.");
+  }, [editingDeliveryId, runtime.promptDeliveries, stopPromptEdit]);
   useEffect(() => () => {
     window.clearTimeout(compositionTimerRef.current);
     compositionCallbackRef.current?.(compositionRef.current);
@@ -701,14 +715,20 @@ function AgentChatComponent({
     setSubmitting(true);
     try {
       const editingDelivery = runtime.promptDeliveries?.find((delivery) => delivery.id === editingDeliveryId);
+      if (editingDeliveryId && !editingDelivery) {
+        setAttachmentError("That queued prompt is no longer available. Stop editing to return to your draft.");
+        return;
+      }
       const accepted = editingDelivery
         ? await onPromptEdit(editingDelivery, draft, draftAttachments)
         : await onPrompt(draft, draftAttachments);
       if (accepted) {
-        setEditingDeliveryId(undefined);
-        setPrompt((current) => current === draft ? "" : current);
-        const sentPaths = new Set(draftAttachments.map((attachment) => attachment.path));
-        setAttachments((current) => current.filter((attachment) => !sentPaths.has(attachment.path)));
+        if (editingDelivery) stopPromptEdit();
+        else {
+          setPrompt((current) => current === draft ? "" : current);
+          const sentPaths = new Set(draftAttachments.map((attachment) => attachment.path));
+          setAttachments((current) => current.filter((attachment) => !sentPaths.has(attachment.path)));
+        }
       }
     } finally {
       setSubmitting(false);
@@ -728,6 +748,7 @@ function AgentChatComponent({
     });
   };
   const beginPromptEdit = (delivery: PromptDelivery) => {
+    if (!editingDeliveryId) compositionRef.current = { ...compositionRef.current, draft: prompt, attachments };
     setEditingDeliveryId(delivery.id);
     setPrompt(delivery.payload?.historyText ?? "");
     setAttachments(queuedAttachments(delivery));
@@ -741,9 +762,7 @@ function AgentChatComponent({
     try {
       const accepted = action === "retry" ? await onPromptRetry(delivery) : await onPromptCancel(delivery);
       if (accepted && editingDeliveryId === delivery.id) {
-        setEditingDeliveryId(undefined);
-        setPrompt("");
-        setAttachments([]);
+        stopPromptEdit();
       }
     } catch (cause) {
       setAttachmentError(errorMessage(cause));
@@ -952,7 +971,7 @@ function AgentChatComponent({
           </div>
           <footer><span>↑↓ navigate</span><span>Enter add</span><span>Esc close</span></footer>
         </div>}
-        {editingDeliveryId && <div className="chat-editing-prompt" role="status"><span>Editing queued prompt</span><Button type="button" size="xs" variant="ghost" disabled={submitting} onClick={() => { setEditingDeliveryId(undefined); setPrompt(""); setAttachments([]); }}>Stop editing</Button></div>}
+        {editingDeliveryId && <div className="chat-editing-prompt" role="status"><span>Editing queued prompt</span><Button type="button" size="xs" variant="ghost" disabled={submitting} onClick={stopPromptEdit}>Stop editing</Button></div>}
         <Textarea
           ref={composerInputRef}
           autoFocus={autoFocusComposer}

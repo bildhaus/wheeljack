@@ -4,6 +4,10 @@ description: Turn project intent into autonomous execution, durable task reports
 editUrl: https://github.com/bildhaus/wheeljack/edit/main/docs/guides/plan-and-review.md
 ---
 
+:::note
+The workflow improvements described here apply to wheeljack 0.1.14 and later.
+:::
+
 wheeljack keeps intent, execution, and proof attached to the same project. **Run**
 is the operational view of the swarm; **Plan** is the durable task model; and
 **Spec** keeps the PRD and TDD beside the work derived from them.
@@ -20,6 +24,11 @@ You can create templates manually or ask a verified structured agent to propose
 one document or a coherent bundle. Agent output is staged for review before it
 overwrites project files. If files changed on disk during generation, wheeljack
 surfaces the conflict instead of silently replacing newer content.
+
+**Add starter tasks** inserts a small set of generic checklist cards without
+deriving them from the PRD/TDD. Repeating the action does not add duplicate starter
+cards. Edit these into complete task contracts or ask an agent for document-specific
+proposals before assigning implementation work.
 
 ## Write a task contract
 

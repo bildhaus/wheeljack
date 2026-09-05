@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const STICKER_SPECS = [
   ["wj-1", 1.63], ["wj-2", 1.325], ["wj-3", 1.908], ["wj-4", 0.857], ["wj-5", 3.98],
@@ -10,12 +10,23 @@ const STICKER_SPECS = [
   ["wj-31", 1.739], ["wj-32", 1], ["wj-33", 1.039], ["wj-34", 1.35], ["wj-35", 5.825],
   ["wj-36", 1.368], ["wj-37", 3.251], ["wj-38", 2.858], ["wj-39", 6.269], ["wj-40", 0.988],
 ] as const;
-const STICKER_SVGS = import.meta.glob("./assets/stickers/*.svg", { eager: true, query: "?raw", import: "default" }) as Record<string, string>;
+const STICKER_URLS = import.meta.glob("./assets/stickers/*.svg", { eager: true, query: "?url&no-inline", import: "default" }) as Record<string, string>;
 const STICKERS = STICKER_SPECS.map(([id, aspect]) => ({
   id,
   aspect,
-  svg: STICKER_SVGS[`./assets/stickers/${id}.svg`].replaceAll("#d94f2b", "currentColor"),
+  url: STICKER_URLS[`./assets/stickers/${id}.svg`],
 }));
+
+// SVG artwork remains a bundled asset, fetched only when a decorative scene is visible.
+let stickerArtwork: Promise<string[]> | undefined;
+export function loadStickerArtwork(): Promise<string[]> {
+  stickerArtwork ??= Promise.all(STICKERS.map(async ({ url }) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Could not load sticker artwork: ${response.status}`);
+    return (await response.text()).replaceAll("#d94f2b", "currentColor");
+  })).catch((cause) => { stickerArtwork = undefined; throw cause; });
+  return stickerArtwork;
+}
 
 const RADIUS = 240;
 const LIFT = 0.62;
@@ -115,12 +126,20 @@ export function stickerLensInfluence(distance: number): number {
 
 export function StickerLensBackground({ host, scene }: { host: HTMLElement | null; scene: StickerLensScene }) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const [artwork, setArtwork] = useState<string[]>([]);
+  useEffect(() => {
+    if (!host) return;
+    let canceled = false;
+    void loadStickerArtwork().then((value) => { if (!canceled) setArtwork(value); })
+      .catch((cause) => console.warn("Could not load decorative stickers.", cause));
+    return () => { canceled = true; };
+  }, [host]);
   const enteredSceneRef = useRef<StickerLensScene | undefined>(undefined);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
     const workspace = root?.parentElement;
-    if (!root || !workspace || !host) {
+    if (!root || !workspace || !host || !artwork.length) {
       if (root) root.hidden = true;
       return;
     }
@@ -259,9 +278,9 @@ export function StickerLensBackground({ host, scene }: { host: HTMLElement | nul
       host.removeEventListener("pointercancel", reset);
       reducedMotion.removeEventListener("change", motionChange);
     };
-  }, [host, scene]);
+  }, [host, scene, artwork]);
 
   return <div aria-hidden="true" className="wj-sticker-lens" hidden ref={rootRef}>
-    {STICKERS.map((sticker) => <span dangerouslySetInnerHTML={{ __html: sticker.svg }} key={sticker.id} />)}
+    {STICKERS.map((sticker, index) => <span dangerouslySetInnerHTML={{ __html: artwork[index] ?? "" }} key={sticker.id} />)}
   </div>;
 }

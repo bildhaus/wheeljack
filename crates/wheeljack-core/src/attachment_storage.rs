@@ -65,7 +65,10 @@ fn collect_json_document(
     }
 }
 
-fn referenced_attachments(db: &Connection, app_data_dir: &Path) -> Result<HashSet<PathBuf>> {
+pub(crate) fn referenced_attachments(
+    db: &Connection,
+    app_data_dir: &Path,
+) -> Result<HashSet<PathBuf>> {
     let attachment_dir = normalized_existing_path(&app_data_dir.join("attachments"));
     let mut references = HashSet::new();
 

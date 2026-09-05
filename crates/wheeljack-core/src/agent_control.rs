@@ -324,7 +324,7 @@ pub(crate) fn list_agent_control_audit(
     Ok(audit)
 }
 
-fn validate_agent_control_request(req: &AgentControlRequestDto) -> Result<()> {
+pub(crate) fn validate_agent_control_request(req: &AgentControlRequestDto) -> Result<()> {
     if req.request_id.is_empty()
         || req.request_id.len() > 80
         || !req

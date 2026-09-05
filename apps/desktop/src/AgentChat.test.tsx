@@ -471,3 +471,83 @@ test("renders fenced code and sanitizes rich agent output", () => {
   expect(container.querySelector("script")).toBeNull();
   expect(screen.getByText("Safe")).toBeTruthy();
 });
+
+
+function queuedDelivery() {
+  return {
+    id: "queued-edit-restore", sessionId: "session-one", seq: 9, mode: "next" as const,
+    state: "queued" as const, payload: { prompt: "Queued instruction", historyText: "Queued instruction", imagePaths: [] },
+    revision: 1, attempts: 0, createdAt: "2026-09-05T00:00:00Z", updatedAt: "2026-09-05T00:00:00Z",
+  };
+}
+
+test("canceling or saving a queued edit restores the unrelated draft and attachments", async () => {
+  const user = userEvent.setup();
+  const attachment = { path: "draft.png", fileName: "draft.png", mimeType: "image/png" };
+  coreMocks.readImageAttachment.mockResolvedValue({ dataUrl: "data:image/png;base64,AA==" });
+  const delivery = queuedDelivery();
+  const { callbacks } = renderChat({ status: "running", promptDeliveries: [delivery] }, {
+    composition: { version: 1, draft: "My next instruction", attachments: [attachment], scrollTop: 0, followLatest: true },
+  });
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  expect((screen.getByLabelText("Agent prompt") as HTMLTextAreaElement).value).toBe("Queued instruction");
+  await user.click(screen.getByRole("button", { name: "Stop editing" }));
+  expect((screen.getByLabelText("Agent prompt") as HTMLTextAreaElement).value).toBe("My next instruction");
+  expect(screen.getByRole("button", { name: "Remove draft.png" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  await user.type(screen.getByLabelText("Agent prompt"), " updated{Enter}");
+  await waitFor(() => expect(callbacks.onPromptEdit).toHaveBeenCalledWith(delivery, "Queued instruction updated", []));
+  expect((screen.getByLabelText("Agent prompt") as HTMLTextAreaElement).value).toBe("My next instruction");
+  expect(screen.getByRole("button", { name: "Remove draft.png" })).toBeTruthy();
+  expect(callbacks.onPrompt).not.toHaveBeenCalled();
+});
+
+test("remounting during a queued edit restores its identity instead of sending a duplicate", async () => {
+  const user = userEvent.setup();
+  const delivery = queuedDelivery();
+  const onCompositionChange = vi.fn();
+  const mounted = renderChat({ status: "running", promptDeliveries: [delivery] }, {
+    composition: { version: 1, draft: "Unsent next prompt", attachments: [], scrollTop: 0, followLatest: true },
+    onCompositionChange,
+  });
+  await user.click(screen.getByRole("button", { name: "Edit" }));
+  await user.type(screen.getByLabelText("Agent prompt"), " revised");
+  mounted.unmount();
+  const saved = onCompositionChange.mock.lastCall![0];
+  expect(saved.draft).toBe("Unsent next prompt");
+  expect(saved.queuedEdit).toMatchObject({ deliveryId: delivery.id, draft: "Queued instruction revised" });
+  const remounted = renderChat({ status: "running", promptDeliveries: [delivery] }, { composition: saved });
+  expect(screen.getByText("Editing queued prompt")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Save queued prompt" }));
+  await waitFor(() => expect(remounted.callbacks.onPromptEdit).toHaveBeenCalledWith(delivery, "Queued instruction revised", []));
+  expect(remounted.callbacks.onPrompt).not.toHaveBeenCalled();
+  expect((screen.getByLabelText("Agent prompt") as HTMLTextAreaElement).value).toBe("Unsent next prompt");
+});
+
+test("an edit survives queue loading and restores the draft when the delivery disappears", async () => {
+  const delivery = queuedDelivery();
+  const mounted = renderChat({ status: "running", promptDeliveries: undefined }, {
+    composition: { version: 1, draft: "Unsent", attachments: [], scrollTop: 0, followLatest: true,
+      queuedEdit: { deliveryId: delivery.id, draft: "Editing", attachments: [] } },
+  });
+  expect(screen.getByText("Editing queued prompt")).toBeTruthy();
+  mounted.rerender(<AgentChat {...mounted.props} runtime={runtime({ status: "running", promptDeliveries: [] })} />);
+  await waitFor(() => expect((screen.getByLabelText("Agent prompt") as HTMLTextAreaElement).value).toBe("Unsent"));
+  expect(screen.queryByText("Editing queued prompt")).toBeNull();
+  expect(mounted.callbacks.onPrompt).not.toHaveBeenCalled();
+});
+
+
+test("model Apply retains the editor when the pane configuration cannot be saved", async () => {
+  const user = userEvent.setup();
+  localStorage.clear();
+  coreMocks.callCore.mockResolvedValue({ models: [{ id: profile.model, label: "Current model", efforts: ["medium"] }] });
+  const onAgentProfile = vi.fn(async () => { throw new Error("Configuration could not be saved"); });
+  renderChat({}, { agentProfile: profile, onAgentProfile });
+  await user.click(screen.getByRole("button", { name: `Model: ${profile.model}, reasoning effort: medium` }));
+  await screen.findByRole("option", { name: "Current model" });
+  await user.click(screen.getByRole("button", { name: "Apply" }));
+  expect(await screen.findByText("Configuration could not be saved")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Apply" })).toBeTruthy();
+  expect(onAgentProfile).toHaveBeenCalledOnce();
+});

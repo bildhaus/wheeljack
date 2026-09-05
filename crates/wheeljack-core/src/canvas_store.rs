@@ -444,6 +444,24 @@ fn sanitize_agent_composition(data: &mut Value) {
         .get("followLatest")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    let queued_edit = composition
+        .get("queuedEdit")
+        .and_then(Value::as_object)
+        .and_then(|edit| {
+            let delivery_id = edit.get("deliveryId")?.as_str()?.trim();
+            if delivery_id.is_empty() || delivery_id.len() > 160 {
+                return None;
+            }
+            let mut normalized = json!({ "chatComposition": {
+                "draft": edit.get("draft"), "attachments": edit.get("attachments"),
+            }});
+            sanitize_agent_composition(&mut normalized);
+            Some(json!({
+                "deliveryId": delivery_id,
+                "draft": normalized["chatComposition"]["draft"],
+                "attachments": normalized["chatComposition"]["attachments"],
+            }))
+        });
     object.insert(
         "chatComposition".to_string(),
         json!({
@@ -454,6 +472,9 @@ fn sanitize_agent_composition(data: &mut Value) {
             "followLatest": follow_latest,
         }),
     );
+    if let Some(edit) = queued_edit {
+        object["chatComposition"]["queuedEdit"] = edit;
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +494,10 @@ mod agent_composition_tests {
                         { "path": "attachments/nope.txt", "fileName": "nope.txt", "mimeType": "text/plain" }
                     ],
                     "scrollTop": -10,
+                    "queuedEdit": { "deliveryId": "pending", "draft": "x".repeat(20_005), "attachments": [
+                        { "path": "attachments/two.png", "fileName": "two.png", "mimeType": "image/png" },
+                        { "path": "bad", "fileName": "bad", "mimeType": "text/plain" }
+                    ] },
                     "followLatest": false
                 }
             }),
@@ -489,6 +514,24 @@ mod agent_composition_tests {
         );
         assert_eq!(data["chatComposition"]["scrollTop"], 0.0);
         assert_eq!(data["chatComposition"]["followLatest"], false);
+        assert_eq!(
+            data["chatComposition"]["queuedEdit"]["deliveryId"],
+            "pending"
+        );
+        assert_eq!(
+            data["chatComposition"]["queuedEdit"]["draft"]
+                .as_str()
+                .unwrap()
+                .len(),
+            20_000
+        );
+        assert_eq!(
+            data["chatComposition"]["queuedEdit"]["attachments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }
 

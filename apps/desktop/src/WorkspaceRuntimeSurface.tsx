@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { lazy, Suspense, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgentChat } from "./AgentChat";
-import { callCore } from "./core";
-import { botSnapshotFromNode } from "./bots";
+import { botSnapshotFromNode, effectivePaneAgentProfile } from "./bots";
 import { agentCompositionFromNode, type AgentCompositionState } from "./agentComposition";
 import { PaneAgentMenuItems, type TerminalAgentContext } from "./PaneAgentMenuItems";
 import { ProviderMark } from "./ProviderMark";
@@ -36,14 +35,14 @@ import type {
   AgentProfile,
   CanvasNode,
   JsonObject,
-  LifecycleManifest,
-  LifecycleRun,
   OpsCard,
   PaneRuntime,
   PromptDelivery,
   SplitAxis,
   SplitNode,
 } from "./types";
+
+const BrowserPane = lazy(() => import("./BrowserPane"));
 
 function DevToolsContextItem() {
   if (!import.meta.env.DEV) return null;
@@ -100,7 +99,7 @@ interface SplitViewProps {
   onRespond: (runtime: PaneRuntime, approved: boolean, response?: string) => Promise<boolean>;
   onCancel: (runtime: PaneRuntime) => Promise<boolean>;
   onAgentAccess: (agentAccess: AgentAccessMode) => Promise<void>;
-  onAgentProfile: (adapterId: string, patch: Partial<AgentProfile>) => void;
+  onAgentProfile: (nodeId: string, patch: Partial<AgentProfile>) => void | Promise<void>;
   onRepair?: (runtime: PaneRuntime) => void;
   onResume?: (runtime: PaneRuntime) => void;
   onPrepareHandoff?: (runtime: PaneRuntime) => void;
@@ -122,7 +121,7 @@ export function SplitView(props: SplitViewProps) {
         node={pane}
         runtime={runtime}
         agentContext={props.agentContexts[pane.id]}
-        agentProfile={props.agentProfiles.find((profile) => profile.adapterId === runtime?.adapterId)}
+        agentProfile={effectivePaneAgentProfile(props.agentProfiles.find((profile) => profile.adapterId === runtime?.adapterId), pane.data)}
         projectRoot={props.projectRoot}
         projectId={props.projectId}
         agentAccess={props.agentAccess}
@@ -152,7 +151,7 @@ export function SplitView(props: SplitViewProps) {
         onRespond={(approved, response) => runtime ? props.onRespond(runtime, approved, response) : Promise.resolve(false)}
         onCancel={() => runtime ? props.onCancel(runtime) : Promise.resolve(false)}
         onAgentAccess={props.onAgentAccess}
-        onAgentProfile={props.onAgentProfile}
+        onAgentProfile={(_adapterId, patch) => props.onAgentProfile(pane.id, patch)}
         onRepair={() => runtime && props.onRepair?.(runtime)}
         onResume={() => runtime && props.onResume?.(runtime)}
         onPrepareHandoff={() => runtime && props.onPrepareHandoff?.(runtime)}
@@ -323,7 +322,7 @@ function Pane({
   onCancel: () => Promise<boolean>;
   onLoadOlderHistory: () => Promise<void>;
   onAgentAccess: (agentAccess: AgentAccessMode) => Promise<void>;
-  onAgentProfile: (adapterId: string, patch: Partial<AgentProfile>) => void;
+  onAgentProfile: (adapterId: string, patch: Partial<AgentProfile>) => void | Promise<void>;
   onRepair: () => void;
   onResume: () => void;
   onPrepareHandoff: () => void;
@@ -557,7 +556,7 @@ function Pane({
 function DataPane({ node, shortcuts, projectId, projectRoot, onSave }: { node: CanvasNode; shortcuts: ShortcutBindings; projectId?: string; projectRoot?: string; onSave: (data: JsonObject) => void }) {
   if (node.kind === "markdown_note") return <MarkdownPane node={node} saveShortcut={shortcuts["pane.save"]} onSave={onSave} />;
   if (node.kind === "task_checklist" || node.kind === "checklist") return <ChecklistPane node={node} onSave={onSave} />;
-  if (node.kind === "browser_preview") return <BrowserPane node={node} projectId={projectId} projectRoot={projectRoot} onSave={onSave} />;
+  if (node.kind === "browser_preview") return <Suspense fallback={<div role="status">Loading preview…</div>}><BrowserPane node={node} projectId={projectId} projectRoot={projectRoot} onSave={onSave} /></Suspense>;
   return <pre className="fallback-pane">{stringValue(node.data, "content") ?? "No content."}</pre>;
 }
 
@@ -644,165 +643,6 @@ function ChecklistPane({ node, onSave }: { node: CanvasNode; onSave: (data: Json
         <Input aria-label="New checklist item" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Add an item" />
         <Button type="submit" size="sm" disabled={!draft.trim()}><Plus />Add</Button>
       </form>
-    </div>
-  );
-}
-
-function BrowserPane({ node, projectId, projectRoot, onSave }: { node: CanvasNode; projectId?: string; projectRoot?: string; onSave: (data: JsonObject) => void }) {
-  const initial = stringValue(node.data, "url") ?? "";
-  const nodeDataRef = useRef(node.data);
-  nodeDataRef.current = node.data;
-  const [draft, setDraft] = useState(initial);
-  const [url, setUrl] = useState(initial);
-  const [error, setError] = useState("");
-  const [manifest, setManifest] = useState<LifecycleManifest>();
-  const [run, setRun] = useState<LifecycleRun>();
-  const [logs, setLogs] = useState("");
-  const [lifecycleBusy, setLifecycleBusy] = useState(false);
-  const runId = run?.id;
-  const runState = run?.state;
-  const activeRun = Boolean(run && ["running", "starting", "ready", "stopping"].includes(run.state));
-  useEffect(() => {
-    if (!projectId || !projectRoot) return;
-    let canceled = false;
-    const savedRunId = stringValue(node.data, "lifecycleRunId");
-    void Promise.all([
-      callCore<LifecycleManifest>("project_lifecycle_inspect", { projectId, projectPath: projectRoot }),
-      callCore<LifecycleRun | null>("project_lifecycle_current", { projectId, runId: savedRunId }),
-    ]).then(([nextManifest, currentRun]) => {
-      if (canceled) return;
-      setManifest(nextManifest);
-      setRun(currentRun ?? undefined);
-      if (currentRun) {
-        const nextData: JsonObject = { ...nodeDataRef.current, lifecycleRunId: currentRun.id };
-        if (currentRun.kind === "preview" && currentRun.url) {
-          setDraft(currentRun.url);
-          setUrl(currentRun.url);
-          nextData.url = currentRun.url;
-        }
-        if (savedRunId !== currentRun.id || nextData.url !== initial) onSave(nextData);
-      } else if (savedRunId) {
-        const { lifecycleRunId: _lifecycleRunId, ...nextData } = nodeDataRef.current;
-        onSave(nextData);
-      }
-    }).catch((cause) => {
-      if (!canceled) {
-        setManifest(undefined);
-        setError(cause instanceof Error ? cause.message : String(cause));
-      }
-    });
-    return () => { canceled = true; };
-  }, [projectId, projectRoot]);
-  useEffect(() => {
-    if (!runId || !runState || !["running", "starting", "ready", "stopping"].includes(runState)) return;
-    const refresh = () => {
-      void callCore<{ text: string }>("project_lifecycle_logs", { runId }).then((value) => setLogs(value.text)).catch(() => undefined);
-      if (projectId) void callCore<LifecycleRun[]>("project_lifecycle_runs", { projectId, limit: 20 }).then((runs) => {
-        const latest = runs.find((candidate) => candidate.id === runId);
-        if (latest) {
-          setRun(latest);
-          if (!["running", "starting", "ready", "stopping"].includes(latest.state)
-            && stringValue(nodeDataRef.current, "lifecycleRunId") === latest.id) {
-            const { lifecycleRunId: _lifecycleRunId, ...nextData } = nodeDataRef.current;
-            onSave(nextData);
-          }
-        }
-      }).catch(() => undefined);
-    };
-    refresh();
-    const timer = window.setInterval(refresh, 500);
-    return () => window.clearInterval(timer);
-  }, [projectId, runId, runState]);
-  const trustManifest = async () => {
-    if (!manifest || !projectId || !projectRoot) return;
-    setLifecycleBusy(true);
-    try {
-      await callCore("project_lifecycle_trust", { projectId, projectPath: projectRoot, hash: manifest.hash });
-      setManifest({ ...manifest, trusted: true });
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLifecycleBusy(false);
-    }
-  };
-  const startLifecycle = async (kind: "setup" | "preview") => {
-    if (!projectId || !projectRoot) return;
-    setLifecycleBusy(true);
-    setLogs("");
-    try {
-      const next = await callCore<LifecycleRun>("project_lifecycle_start", { projectId, projectPath: projectRoot, kind });
-      setRun(next);
-      const nextData: JsonObject = { ...nodeDataRef.current, lifecycleRunId: next.id };
-      if (kind === "preview" && next.url) {
-        setDraft(next.url);
-        setUrl(next.url);
-        nextData.url = next.url;
-      }
-      onSave(nextData);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLifecycleBusy(false);
-    }
-  };
-  const stopLifecycle = async () => {
-    if (!run || !activeRun) return;
-    setLifecycleBusy(true);
-    setError("");
-    try {
-      await callCore("project_lifecycle_stop", { runId: run.id });
-      setRun((current) => current?.id === run.id ? { ...current, state: "stopping" } : current);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setLifecycleBusy(false);
-    }
-  };
-  const navigate = () => {
-    try {
-      const candidate = draft.trim();
-      const withProtocol = /^[a-z][a-z\d+.-]*:/i.test(candidate)
-        ? candidate
-        : /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(candidate)
-          ? `http://${candidate}`
-          : `https://${candidate}`;
-      const parsed = new URL(withProtocol);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error();
-      setUrl(parsed.href);
-      setDraft(parsed.href);
-      setError("");
-      onSave({ ...nodeDataRef.current, url: parsed.href });
-    } catch {
-      setError("Enter an http or https URL.");
-    }
-  };
-  const trustedLocalPreview = Boolean(
-    manifest?.trusted
-    && run?.kind === "preview"
-    && run.url === url
-    && /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i.test(url),
-  );
-  return (
-    <div className="data-pane-browser">
-      {manifest && <section className="browser-lifecycle" aria-label="Project lifecycle">
-        <div><strong>Project lifecycle</strong><small>{manifest.trusted ? "Trusted manifest" : "Review required"} · {manifest.hash.slice(0, 10)}</small></div>
-        {!manifest.trusted ? <>
-          <code>{JSON.stringify({ setup: manifest.setup, preview: manifest.preview }, null, 2)}</code>
-          <Button type="button" size="sm" variant="outline" disabled={lifecycleBusy} onClick={() => void trustManifest()}>Trust this manifest</Button>
-        </> : <div className="browser-lifecycle-actions">
-          {manifest.setup && <Button type="button" size="sm" variant="outline" disabled={lifecycleBusy || activeRun} onClick={() => void startLifecycle("setup")}>Run setup</Button>}
-          {manifest.preview && <Button type="button" size="sm" disabled={lifecycleBusy || activeRun} onClick={() => void startLifecycle("preview")}>Start preview</Button>}
-          {activeRun && <Button type="button" size="sm" variant="outline" disabled={lifecycleBusy || run?.state === "stopping"} onClick={() => void stopLifecycle()}>{run?.state === "stopping" ? "Stopping…" : "Stop"}</Button>}
-          {run && <small>{run.kind} · {run.state}{run.exitCode !== undefined ? ` · exit ${run.exitCode}` : ""}</small>}
-        </div>}
-        {logs && <pre aria-label="Lifecycle logs">{logs}</pre>}
-      </section>}
-      <form onSubmit={(event) => { event.preventDefault(); navigate(); }}>
-        <Input aria-label="Browser address" value={draft} onChange={(event) => setDraft(event.target.value)} aria-invalid={Boolean(error)} />
-        <Button size="sm">Go</Button>
-      </form>
-      {error && <p role="alert">{error}</p>}
-      {url ? <div className="browser-preview"><iframe title={`Browser preview ${node.title}`} src={url} sandbox={trustedLocalPreview ? "allow-forms allow-scripts allow-same-origin" : "allow-forms allow-scripts"} /><div className="browser-external-fallback"><Button type="button" size="xs" variant="ghost" onClick={() => void invoke("open_external_url", { url }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))}>Open externally</Button></div></div> : <div className="data-pane-empty">Enter a URL to preview it.</div>}
     </div>
   );
 }

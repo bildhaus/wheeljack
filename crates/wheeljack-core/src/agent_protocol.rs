@@ -43,7 +43,19 @@ impl AgentProtocolStreamState {
                         "message" | "reasoning" | "commentary"
                     )
                 {
-                    visible.text = visible_wheeljack_text(&visible.text);
+                    // Reasoning may discuss an internal directive inline; it is
+                    // never an action source and should not expose that payload.
+                    if visible.kind != "message" {
+                        if let Some(offset) = WHEELJACK_CONTROL_PREFIXES
+                            .iter()
+                            .filter_map(|prefix| visible.text.find(prefix))
+                            .min()
+                        {
+                            visible.text.truncate(offset);
+                        }
+                    }
+                    visible.text =
+                        visible_wheeljack_text(&visible.text, visible.streaming == Some(true));
                 }
                 let hidden_empty_part = matches!(
                     visible.kind.as_str(),
@@ -432,11 +444,22 @@ pub(crate) fn apply_agent_stream_events(
     }
 
     capture_completed_controls(messages, &mut state.pending_controls, output_role);
+    // Consume only complete assistant directives. Keep the surrounding prose and
+    // invalid requests visible, and do not recapture directives on later events.
+    for message in messages.iter_mut().filter(|message| {
+        message.role == "assistant" && message.kind == "message" && message.streaming != Some(true)
+    }) {
+        message.text = visible_wheeljack_text(&message.text, false);
+    }
     messages.retain(|message| {
-        message.role != output_role
+        message.role != "assistant"
             || message.kind != "message"
             || message.streaming == Some(true)
-            || !is_wheeljack_control_message_or_prefix(&message.text)
+            || !message.text.is_empty()
+            || message
+                .images
+                .as_ref()
+                .is_some_and(|images| !images.is_empty())
     });
     if req.adapter_id == "opencode" {
         remove_duplicate_opencode_reasoning(messages, output_role);
@@ -1020,9 +1043,10 @@ const WHEELJACK_AUTONOMY_PROMPT_MARKER: &str = "wheeljack autonomous controls:";
 
 fn is_wheeljack_control_message_or_prefix(text: &str) -> bool {
     let text = text.trim_start();
-    WHEELJACK_CONTROL_PREFIXES
-        .iter()
-        .any(|prefix| text.starts_with(prefix) || prefix.starts_with(text))
+    !text.is_empty()
+        && WHEELJACK_CONTROL_PREFIXES
+            .iter()
+            .any(|prefix| text.starts_with(prefix) || prefix.starts_with(text))
 }
 
 fn completed_wheeljack_control(text: &str) -> Option<&str> {
@@ -1030,9 +1054,50 @@ fn completed_wheeljack_control(text: &str) -> Option<&str> {
     let prefix = WHEELJACK_CONTROL_PREFIXES
         .iter()
         .find(|prefix| text.starts_with(**prefix))?;
-    serde_json::from_str::<Value>(&text[prefix.len()..])
-        .ok()
-        .map(|_| text)
+    let mut value = serde_json::from_str::<Value>(&text[prefix.len()..]).ok()?;
+    let object = value.as_object_mut()?;
+    if *prefix == agent_control::AGENT_CONTROL_PREFIX {
+        // Reuse the core request validation before hiding anything the frontend
+        // cannot dispatch. Source identity is supplied by the session at dispatch.
+        let request_id = object.remove("id")?;
+        object.insert("requestId".to_string(), request_id);
+        for key in ["sourceSessionId", "sourceNodeId", "canvasId"] {
+            object.insert(key.to_string(), json!("protocol-validation"));
+        }
+        let request = serde_json::from_value::<AgentControlRequestDto>(value).ok()?;
+        if !request.request_id.chars().next()?.is_ascii_alphanumeric() {
+            return None;
+        }
+        agent_control::validate_agent_control_request(&request).ok()?;
+    }
+    Some(text)
+}
+
+fn wheeljack_text_lines(text: &str) -> impl Iterator<Item = (&str, bool)> {
+    // An echoed instruction block and fenced examples are not agent requests.
+    let text = text
+        .split(WHEELJACK_AUTONOMY_PROMPT_MARKER)
+        .next()
+        .unwrap_or(text);
+    let mut fence = None;
+    text.lines().map(move |line| {
+        let marker = if line.trim_start().starts_with("```") {
+            Some('`')
+        } else if line.trim_start().starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        let eligible = fence.is_none() && marker.is_none();
+        if let Some(marker) = marker {
+            if fence == Some(marker) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(marker);
+            }
+        }
+        (line, eligible)
+    })
 }
 
 fn capture_completed_controls(
@@ -1050,7 +1115,18 @@ fn capture_completed_controls(
                 && message.kind == "message"
                 && message.streaming != Some(true)
         })
-        .filter_map(|message| completed_wheeljack_control(&message.text))
+        .flat_map(|message| {
+            // Preserve the existing whole-message JSON format, including pretty
+            // printed document proposals, alongside one-line control requests.
+            if let Some(control) = completed_wheeljack_control(&message.text) {
+                vec![control]
+            } else {
+                wheeljack_text_lines(&message.text)
+                    .filter(|(_, eligible)| *eligible)
+                    .filter_map(|(line, _)| completed_wheeljack_control(line))
+                    .collect()
+            }
+        })
     {
         if pending_controls.iter().any(|known| known == control) {
             continue;
@@ -1059,34 +1135,33 @@ fn capture_completed_controls(
     }
 }
 
-fn visible_wheeljack_text(text: &str) -> String {
-    let mut offset = text.find(WHEELJACK_AUTONOMY_PROMPT_MARKER);
-    offset = WHEELJACK_CONTROL_PREFIXES
-        .iter()
-        .filter_map(|prefix| text.find(prefix))
-        .min()
-        .map_or(offset, |candidate| {
-            Some(offset.map_or(candidate, |current| current.min(candidate)))
-        });
-    for (candidate, _) in text.match_indices("wheel") {
-        let starts_at_boundary = candidate == 0
-            || text[..candidate]
-                .chars()
-                .next_back()
-                .is_some_and(|character| !character.is_alphanumeric() && character != '_');
-        if !starts_at_boundary {
-            continue;
-        }
-        let tail = &text[candidate..];
-        if WHEELJACK_CONTROL_PREFIXES
-            .iter()
-            .any(|prefix| prefix.starts_with(tail))
-        {
-            offset = Some(offset.map_or(candidate, |current| current.min(candidate)));
-        }
+fn visible_wheeljack_text(text: &str, streaming: bool) -> String {
+    if completed_wheeljack_control(text).is_some() {
+        return String::new();
     }
-    let visible = offset.map_or(text, |offset| &text[..offset]);
-    visible.trim_end().to_string()
+    wheeljack_text_lines(text)
+        .filter_map(|(line, eligible)| {
+            if !eligible || !is_wheeljack_control_message_or_prefix(line) {
+                return Some(line.to_string());
+            }
+            if streaming || completed_wheeljack_control(line).is_some() {
+                return None;
+            }
+            if !WHEELJACK_CONTROL_PREFIXES
+                .iter()
+                .any(|prefix| line.trim_start().starts_with(prefix))
+            {
+                return Some(line.to_string());
+            }
+            Some(format!(
+                "Invalid wheeljack control request (not executed): {}",
+                line.trim()
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
 }
 
 fn agent_protocol_event(

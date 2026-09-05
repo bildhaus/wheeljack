@@ -149,6 +149,7 @@ Shell ownership is split along runtime boundaries rather than concentrated entir
 | `state/runtimesStore.ts` | live terminal and structured-agent runtimes |
 | `state/opsStore.ts` | current Plan/Ops document state |
 | `WorkspaceRuntimeSurface.tsx` | split layout, panes, and terminal/chat presentation; lazy-loaded by `App.tsx` |
+| `SettingsSurface.tsx`, `OpsSurface.tsx` | lazy-loaded settings and Plan/Run surfaces |
 | `opsOrchestration.ts` | pure Plan/Ops transitions, scheduling decisions, persistence projections, and conflict checks |
 | `App.tsx` | cross-boundary effects, core calls, and composition of the extracted owners |
 
@@ -234,9 +235,17 @@ assets with `scripts/check-desktop-bundle.mjs`:
 
 | Bundle metric | Current ceiling | Improvement target |
 | --- | ---: | ---: |
-| Initial JavaScript | 1,715,000 bytes | 1,250,000 bytes |
-| Largest JavaScript chunk | 1,350,000 bytes | 900,000 bytes |
-| Total JavaScript | 1,820,000 bytes | 1,550,000 bytes |
+| Initial JavaScript | 1,734,000 bytes | 1,250,000 bytes |
+| Largest JavaScript chunk | 1,354,000 bytes | 900,000 bytes |
+| Total JavaScript | 1,845,000 bytes | 1,550,000 bytes |
+
+The release-preparation build meets all three JavaScript improvement targets. Decorative sticker
+SVGs are bundled separately and fetched from the app's own origin only when needed.
+Structured output uses a bounded writer that flushes while input is idle, and empty
+prompt drainers retire instead of polling SQLite continuously. Global transcript
+retention runs every minute. Delivered and canceled prompt bodies expire after seven
+days; minimal delivery fingerprints remain for idempotency. Clear-history removes
+completed bodies immediately and preserves unresolved deliveries.
 
 The packaged six-session smoke keeps its baseline regression check and separately reports
 progress toward 540 MiB working set, 75 ms input p95, and 16.7 ms frame p95. The target

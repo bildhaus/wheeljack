@@ -1181,6 +1181,110 @@ fn agent_protocol_parse_keeps_codex_activity_transient_and_hides_control_message
 }
 
 #[test]
+fn agent_protocol_captures_control_lines_once_and_preserves_surrounding_prose() {
+    let request: AgentProtocolParseRequest = serde_json::from_value(json!({
+        "adapterId": "codex-cli", "protocol": "codex-app-server", "nodeId": "controls"
+    }))
+    .unwrap();
+    let first = r#"wheeljack.control {"id":"one","action":"list_agents"}"#;
+    let second =
+        r#"wheeljack.control {"id":"two","action":"spawn_agent","message":"Review the tests"}"#;
+    let text = format!("Checking available agents.\n{first}\n{second}\nThe review is next.");
+    let events = parse_agent_protocol_line(
+        "codex-cli",
+        Some("codex-app-server"),
+        &json!({
+            "method": "item/completed", "params": { "item": {
+                "type": "agentMessage", "phase": "final_answer", "text": text
+            }}
+        })
+        .to_string(),
+        1,
+    );
+    let mut state = AgentProtocolStreamState::default();
+    apply_agent_stream_events(&mut state, &events, &request);
+    assert_eq!(std::mem::take(&mut state.pending_controls), [first, second]);
+    assert_eq!(
+        state.visible_messages()[0].text,
+        "Checking available agents.\nThe review is next."
+    );
+    apply_agent_stream_events(&mut state, &[], &request);
+    assert!(
+        state.pending_controls.is_empty(),
+        "later events must not replay consumed directives"
+    );
+}
+
+#[test]
+fn agent_protocol_reports_invalid_controls_without_executing_examples() {
+    let request: AgentProtocolParseRequest = serde_json::from_value(json!({
+        "adapterId": "codex-cli", "protocol": "codex-app-server", "nodeId": "invalid-controls"
+    }))
+    .unwrap();
+    let example = r#"wheeljack.control {"id":"example","action":"list_agents"}"#;
+    let invalid = [
+        r#"wheeljack.control {"id":"truncated""#,
+        r#"wheeljack.control {"id":"unknown","action":"delete_workspace"}"#,
+        r#"wheeljack.control {"id":"missing-message","action":"spawn_agent"}"#,
+    ];
+    let text = format!(
+        "Example:\n```text\n{example}\n```\n\n{}\nStill visible.",
+        invalid.join("\n")
+    );
+    let events = parse_agent_protocol_line(
+        "codex-cli",
+        Some("codex-app-server"),
+        &json!({
+            "method": "item/completed", "params": { "item": {
+                "type": "agentMessage", "phase": "final_answer", "text": text
+            }}
+        })
+        .to_string(),
+        1,
+    );
+    let mut state = AgentProtocolStreamState::default();
+    apply_agent_stream_events(&mut state, &events, &request);
+    assert!(state.pending_controls.is_empty());
+    let visible = state.visible_messages()[0].text.clone();
+    assert!(visible.contains(&format!("```text\n{example}\n```")));
+    assert_eq!(
+        visible
+            .matches("Invalid wheeljack control request (not executed):")
+            .count(),
+        3
+    );
+    assert!(visible.ends_with("Still visible."));
+    apply_agent_stream_events(&mut state, &[], &request);
+    assert_eq!(state.visible_messages()[0].text, visible);
+    assert!(state.pending_controls.is_empty());
+}
+
+#[test]
+fn agent_protocol_preserves_pretty_printed_document_controls() {
+    let request: AgentProtocolParseRequest = serde_json::from_value(json!({
+        "adapterId": "codex-cli", "protocol": "codex-app-server", "nodeId": "document-controls"
+    }))
+    .unwrap();
+    let text =
+        "wheeljack.project_documents {\n  \"requestId\": \"document-1\",\n  \"documents\": {}\n}";
+    let events = parse_agent_protocol_line(
+        "codex-cli",
+        Some("codex-app-server"),
+        &json!({
+            "method": "item/completed", "params": { "item": {
+                "type": "agentMessage", "phase": "final_answer", "text": text
+            }}
+        })
+        .to_string(),
+        1,
+    );
+    let mut state = AgentProtocolStreamState::default();
+    apply_agent_stream_events(&mut state, &events, &request);
+    assert_eq!(state.pending_controls, [text]);
+    assert!(state.visible_messages().is_empty());
+}
+
+#[test]
 fn agent_protocol_hides_control_messages_split_across_live_codex_deltas() {
     let request = AgentProtocolParseRequest {
         adapter_id: "codex-cli".to_string(),

@@ -1,4 +1,5 @@
 import {
+  effectivePaneAgentProfile,
   botSnapshot,
   botSnapshotFromNode,
   botStandingPrompt,
@@ -92,4 +93,17 @@ test("specialist suggestion parsing enforces the proposal limits", () => {
     roleDescription: "Verify the task.",
     rationale: "x".repeat(241),
   })).toBeUndefined();
+});
+
+
+test("pane configuration resolves bot snapshots and local overrides without changing defaults", () => {
+  const base = { ...agentProfile, model: "haiku", thinking: "low" as const };
+  const data = { botSnapshot: botSnapshot(profile) };
+  expect(effectivePaneAgentProfile(base, data)).toMatchObject({ model: "sonnet", thinking: "high" });
+  const customized = { ...data, agentProfile: { model: "opus", thinking: "medium", provider: "anthropic" } };
+  expect(effectivePaneAgentProfile(base, customized)).toMatchObject({ model: "opus", thinking: "medium" });
+  expect(effectivePaneAgentProfile(base, data)).toMatchObject({ model: "sonnet", thinking: "high" });
+  expect(effectivePaneAgentProfile(base, {})).toEqual(base);
+  expect(base.model).toBe("haiku");
+  expect(data.botSnapshot.launch.model).toBe("sonnet");
 });

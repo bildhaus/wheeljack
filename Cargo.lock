@@ -4501,7 +4501,7 @@ dependencies = [
 
 [[package]]
 name = "wheeljack-core"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4513,13 +4513,14 @@ dependencies = [
  "sha2",
  "time",
  "ureq",
+ "url",
  "uuid",
  "windows",
 ]
 
 [[package]]
 name = "wheeljack-desktop"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "base64 0.22.1",
  "fontdb",
