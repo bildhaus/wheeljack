@@ -86,7 +86,7 @@ fn live_codex_queue_resume_isolated() {
     );
     assert!(
         root.is_absolute() && root.starts_with(std::env::temp_dir()),
-        "Wheeljack state and repository must remain in a disposable temp fixture"
+        "wheeljack state and repository must remain in a disposable temp fixture"
     );
     assert_eq!(
         std::env::var("WHEELJACK_LIVE_EXISTING_PROVIDER_PROFILE").as_deref(),
@@ -95,7 +95,7 @@ fn live_codex_queue_resume_isolated() {
     );
     let evidence_path =
         PathBuf::from(std::env::var_os("WHEELJACK_LIVE_EVIDENCE").expect("evidence path"));
-    let mut evidence = format!("# Real-provider queue and resume validation\n\nStarted: {}\n\nProvider: OpenAI Codex CLI (ChatGPT authentication), using the installed authenticated profile without reading or copying credentials. Ordinary provider CLI history entries are an intentional side effect; Wheeljack app state and repo remain disposable.\nFixture: `{}`\n\n", now(), root.display());
+    let mut evidence = format!("# Real-provider queue and resume validation\n\nStarted: {}\n\nProvider: OpenAI Codex CLI (ChatGPT authentication), using the installed authenticated profile without reading or copying credentials. Ordinary provider CLI history entries are an intentional side effect; wheeljack app state and repo remain disposable.\nFixture: `{}`\n\n", now(), root.display());
     fs::write(&evidence_path, &evidence).unwrap();
     let result = (|| -> Result<()> {
         let repo = root.join("repo");
