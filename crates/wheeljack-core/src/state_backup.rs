@@ -189,8 +189,8 @@ pub(crate) fn export_bundle(
         fs::create_dir(staging.join("attachments"))?;
         let mut attachments = Vec::new();
         for original in references {
-            let (hash, _) = digest_file(&original)?;
-            let extension = original
+            let (hash, _) = digest_file(Path::new(&original))?;
+            let extension = Path::new(&original)
                 .extension()
                 .and_then(OsStr::to_str)
                 .filter(|value| value.bytes().all(|c| c.is_ascii_alphanumeric()))
@@ -201,7 +201,7 @@ pub(crate) fn export_bundle(
             copy_synced(&original, staging.join("attachments").join(&name))?;
             attachments.push(BackupAttachment {
                 name,
-                original_path: original.to_string_lossy().into_owned(),
+                original_path: original,
                 sha256: hash,
             });
         }
@@ -466,6 +466,75 @@ mod tests {
         db.execute("INSERT INTO nodes (id,canvas_id,kind,title,x,y,width,height,z_index,data_json,created_at,updated_at) VALUES ('n','c','agent_terminal','Agent',0,0,1,1,0,?1,'now','now')", [draft.to_string()]).unwrap();
         db.execute("INSERT INTO session_chunks (session_id,seq,stream,data,created_at) VALUES ('s',1,'agent-input',?1,'now')", [json!({"images":[{"path":image}], "text":"hello"}).to_string().into_bytes()]).unwrap();
         (root, db, image)
+    }
+
+    #[test]
+    fn portable_backup_preserves_reference_spelling_without_original_files() {
+        let (root, db, image) = fixture();
+        let alias = root.join("source/attachments/../attachments/draft.png");
+        let dot_alias = format!("{}/./draft.png", image.parent().unwrap().display());
+        let document = json!({"chatComposition":{"draft":"alias draft", "attachments":[{"path":alias,"mimeType":"image/png"},{"path":dot_alias},{"path":image}]}});
+        db.execute(
+            "UPDATE nodes SET data_json=?1 WHERE id='n'",
+            [document.to_string()],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE session_chunks SET data=?1 WHERE session_id='s'",
+            [json!({"images":[{"path":alias}],"text":"alias history"})
+                .to_string()
+                .into_bytes()],
+        )
+        .unwrap();
+        let storage = gc_image_attachments(&db, &root.join("source")).unwrap();
+        assert_eq!(storage.removed_count, 0);
+        assert_eq!(storage.referenced_count, 1);
+        let bundle = root.join("backup");
+        let preview = export_bundle(&db, &root.join("source"), &bundle).unwrap();
+        let manifest: BackupManifest =
+            serde_json::from_slice(&fs::read(bundle.join(MANIFEST)).unwrap()).unwrap();
+        let spellings: HashSet<_> = manifest
+            .attachments
+            .iter()
+            .map(|item| item.original_path.as_str())
+            .collect();
+        assert_eq!(spellings.len(), 3);
+        assert!(spellings.contains(alias.to_str().unwrap()));
+        assert!(spellings.contains(dot_alias.as_str()));
+        assert!(spellings.contains(image.to_str().unwrap()));
+        fs::remove_file(&image).unwrap();
+        let target = root.join("target");
+        fs::create_dir(&target).unwrap();
+        stage_restore(&bundle, &preview.fingerprint, &target).unwrap();
+        apply_pending_restore(&target).unwrap();
+        let restored = Connection::open(target.join(DB_FILE_NAME)).unwrap();
+        let document: String = restored
+            .query_row("SELECT data_json FROM nodes WHERE id='n'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let value: Value = serde_json::from_str(&document).unwrap();
+        let path = Path::new(
+            value["chatComposition"]["attachments"][0]["path"]
+                .as_str()
+                .unwrap(),
+        );
+        assert!(path.starts_with(target.join("attachments")));
+        assert_eq!(fs::read(path).unwrap(), b"image fixture");
+        for attachment in value["chatComposition"]["attachments"].as_array().unwrap() {
+            let restored_path = Path::new(attachment["path"].as_str().unwrap());
+            assert!(restored_path.starts_with(target.join("attachments")));
+            assert_eq!(fs::read(restored_path).unwrap(), b"image fixture");
+        }
+        let chunks = load_session_chunks(&restored, "s").unwrap();
+        let history: Value = serde_json::from_slice(&chunks[0]).unwrap();
+        assert_eq!(
+            history["images"][0]["path"],
+            value["chatComposition"]["attachments"][0]["path"]
+        );
+        drop(restored);
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
