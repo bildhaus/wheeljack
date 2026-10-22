@@ -169,7 +169,7 @@ jobs:
             Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
           }
       - if: inputs.release_mode
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.windows_artifact_name }}
           path: artifacts/desktop/windows/*
@@ -276,7 +276,7 @@ jobs:
           if [[ -n "${WHEELJACK_KEYCHAIN_PATH:-}" ]]; then security delete-keychain "$WHEELJACK_KEYCHAIN_PATH" || true; fi
           if [[ -n "${WHEELJACK_CERTIFICATE_PATH:-}" ]]; then rm -f "$WHEELJACK_CERTIFICATE_PATH"; fi
       - if: inputs.release_mode
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.macos_artifact_name }}
           path: artifacts/desktop/macos/*
